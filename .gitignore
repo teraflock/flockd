@@ -1,0 +1,21 @@
+# binaries
+/hived
+/hive
+/dist/
+*.exe
+
+# go
+*.test
+*.out
+coverage.txt
+
+# web — NOTE: web/dist IS committed (embedded via go:embed); only
+# node_modules and vite caches are ignored.
+web/node_modules/
+web/.vite/
+web/*.tsbuildinfo
+
+# local dev droppings
+*.log
+.DS_Store
+/tmp/

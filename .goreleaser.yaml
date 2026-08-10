@@ -1,0 +1,117 @@
+# GoReleaser config (SPEC §A3). Run in CI on tag; signing steps carry
+# TODO(keys) markers until release keys/certs exist.
+version: 2
+
+project_name: hived
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: hived
+    main: ./cmd/hived
+    binary: hived
+    env: [CGO_ENABLED=0]
+    goos: [darwin, linux, windows]
+    goarch: [amd64, arm64]
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+  - id: hive
+    main: ./cmd/hive
+    binary: hive
+    env: [CGO_ENABLED=0]
+    goos: [darwin, linux, windows]
+    goarch: [amd64, arm64]
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+universal_binaries:
+  - id: hived-universal
+    ids: [hived]
+    name_template: hived
+    replace: true
+  - id: hive-universal
+    ids: [hive]
+    name_template: hive
+    replace: true
+
+archives:
+  - id: default
+    ids: [hived, hive, hived-universal, hive-universal]
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files: [README.md, LICENSE, docs/*]
+
+nfpms:
+  - id: packages
+    package_name: hivegrid
+    ids: [hived, hive]
+    vendor: HiveGrid
+    homepage: https://hivegrid.dev
+    maintainer: HiveGrid <ops@hivegrid.dev>
+    description: HiveGrid node daemon and CLI — serve LLM inference on idle hardware.
+    license: Apache-2.0
+    formats: [deb, rpm]
+    contents:
+      - src: ./LICENSE
+        dst: /usr/share/doc/hivegrid/LICENSE
+
+checksum:
+  name_template: checksums.txt
+
+# TODO(keys): enable once the cosign release key exists (offline/HSM — this
+# is the most sensitive key in the company, SPEC §6 / §A3).
+# signs:
+#   - cmd: cosign
+#     artifacts: checksum
+#     args: ["sign-blob", "--key", "env://COSIGN_KEY", "--output-signature", "${signature}", "${artifact}"]
+#
+# TODO(keys): macOS Developer ID signing + notarization (notarytool) hooks,
+# and Windows Authenticode (Azure Trusted Signing) — required before public
+# distribution; unsigned daemons are dead on arrival (SPEC §A3).
+
+brews:
+  - name: hive
+    ids: [default]
+    repository:
+      owner: hivegrid
+      name: homebrew-tap
+      # TODO(keys): tap deploy token
+    homepage: https://hivegrid.dev
+    description: HiveGrid node daemon + CLI — earn credits serving LLM inference on idle hardware
+    license: Apache-2.0
+    install: |
+      bin.install "hived"
+      bin.install "hive"
+    caveats: "Run `hive up` to install the background service, then `hive dashboard`."
+    skip_upload: true # TODO(keys): flip when the tap exists
+
+winget:
+  - name: hive
+    publisher: HiveGrid
+    package_identifier: HiveGrid.hive
+    short_description: HiveGrid node daemon + CLI
+    license: Apache-2.0
+    repository:
+      owner: hivegrid
+      name: winget-pkgs
+      branch: hive-{{.Version}}
+    skip_upload: true # TODO(keys): flip when the publisher account exists
+
+release:
+  draft: true
+  footer: |
+    ---
+    Install: see README. Verify checksums with `sha256sum -c checksums.txt`.
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-dev"

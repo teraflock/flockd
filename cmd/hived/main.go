@@ -1,0 +1,469 @@
+// Command hived is the HiveGrid node daemon: hardware detection, model
+// management, a supervised llama.cpp runtime, resource governance, the
+// loopback OpenAI-compatible API, and the coordinator tunnel (in-process
+// fake coordinator in --standalone / Phase 0 mode).
+package main
+
+import (
+	"context"
+	"crypto/tls"
+	"errors"
+	"flag"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
+	"time"
+
+	"github.com/hivegrid/hived/internal/config"
+	"github.com/hivegrid/hived/internal/engine"
+	"github.com/hivegrid/hived/internal/enroll"
+	"github.com/hivegrid/hived/internal/governor"
+	"github.com/hivegrid/hived/internal/hardware"
+	"github.com/hivegrid/hived/internal/localapi"
+	"github.com/hivegrid/hived/internal/logging"
+	"github.com/hivegrid/hived/internal/models"
+	rt "github.com/hivegrid/hived/internal/runtime"
+	"github.com/hivegrid/hived/internal/runtime/llamacpp"
+	"github.com/hivegrid/hived/internal/telemetry"
+	"github.com/hivegrid/hived/internal/tunnel"
+	"github.com/hivegrid/hived/internal/tunnel/fakecoord"
+	"github.com/hivegrid/hived/web"
+	tunnelv1 "github.com/hivegrid/proto/gen/go/hive/tunnel/v1"
+	typesv1 "github.com/hivegrid/proto/gen/go/hive/types/v1"
+)
+
+// version is stamped by GoReleaser via -ldflags.
+var version = "dev"
+
+func main() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, "hived:", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	var (
+		configPath  = flag.String("config", "", "path to config.toml (default <data_dir>/config.toml)")
+		standalone  = flag.Bool("standalone", false, "run with the in-process fake coordinator (no control plane needed)")
+		runtimeKind = flag.String("runtime", "", "runtime adapter: llamacpp|mock (overrides config)")
+		listen      = flag.String("listen", "", "local API listen address (overrides config)")
+		dataDir     = flag.String("data-dir", "", "data directory (overrides config)")
+		logLevel    = flag.String("log-level", "", "debug|info|warn|error (overrides config)")
+		showVersion = flag.Bool("version", false, "print version and exit")
+	)
+	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("hived", version)
+		return nil
+	}
+
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		return err
+	}
+	if *runtimeKind != "" {
+		cfg.Runtime.Kind = *runtimeKind
+	}
+	if *listen != "" {
+		cfg.LocalAPI.Listen = *listen
+	}
+	if *dataDir != "" {
+		cfg.DataDir = *dataDir
+	}
+	if *logLevel != "" {
+		cfg.Log.Level = *logLevel
+	}
+	if *standalone {
+		cfg.Tunnel.Standalone = true
+	}
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+
+	log, ring := logging.New(cfg.Log.Level, cfg.Log.Format)
+	slog.SetDefault(log)
+	hardware.Version = version
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil {
+		return fmt.Errorf("create data dir: %w", err)
+	}
+
+	// ---- hardware ----
+	hw, err := hardware.Detect(ctx, cfg.DataDir)
+	if err != nil {
+		return err
+	}
+	log.Info("hardware detected",
+		"os", hw.GetOs(), "arch", hw.GetArch(),
+		"cpu", hw.GetCpuModel(), "cores", hw.GetCpuCores(),
+		"ram_mb", hw.GetRamTotalMb(), "gpus", len(hw.GetGpus()),
+		"accel", hardware.BestAccel(hw))
+
+	// ---- identity & token ----
+	identity, err := enroll.LoadOrGenerateIdentity(cfg.DataDir)
+	if err != nil {
+		return err
+	}
+	token, err := localapi.LoadOrCreateToken(cfg.DataDir)
+	if err != nil {
+		return err
+	}
+	log.Info("node identity", "fingerprint", identity.Fingerprint())
+
+	// ---- governor ----
+	windows, err := governor.ParseWindows(cfg.Governor.Schedule)
+	if err != nil {
+		return err
+	}
+	gov := governor.New(governor.Policy{
+		Serve:          cfg.Governor.ServePolicy,
+		IdleAfter:      cfg.Governor.IdleAfter,
+		YieldGrace:     cfg.Governor.YieldGrace,
+		PollInterval:   cfg.Governor.PollInterval,
+		ServeOnBattery: cfg.Governor.ServeOnBattery,
+		MaxTempCelsius: cfg.Governor.MaxTempCelsius,
+		Schedule:       windows,
+	}, governor.NewPlatformIdleSource(), governor.NewPlatformPowerSource(), nil, log)
+	go gov.Run(ctx)
+
+	// ---- models & runtime ----
+	stats := telemetry.NewStats()
+	var mgr *models.Manager
+	if cfg.Runtime.Kind == "llamacpp" {
+		mgr, err = models.NewManager(filepath.Join(cfg.DataDir, "models"), cfg.Models.MaxDiskMB, log)
+		if err != nil {
+			return err
+		}
+	}
+	touch := func(string) {}
+	if mgr != nil {
+		touch = mgr.Touch
+	}
+	eng := engine.New(gov, stats, touch)
+
+	budget := rt.ResourceBudget{
+		MaxVRAMPercent: cfg.Budget.MaxVRAMPercent,
+		MaxRAMMB:       cfg.Budget.MaxRAMMB,
+		MaxConcurrent:  cfg.Budget.MaxConcurrent,
+	}
+	if err := loadDefaultModel(ctx, cfg, hw, mgr, eng, budget, log); err != nil {
+		return err
+	}
+	defer func() {
+		shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		for _, m := range eng.Models() {
+			_ = m.Instance.Shutdown(shutCtx)
+		}
+	}()
+
+	// ---- tunnel ----
+	// The node ID is assigned by the coordinator at enrollment, not derived
+	// locally: the key fingerprint identifies the *key*, the node ID
+	// identifies the enrolled node, and only the latter is what a session
+	// may announce. Unenrolled daemons serve locally under the fingerprint.
+	nodeID := identity.Fingerprint()
+	if cfg.Tunnel.Standalone {
+		coord, err := fakecoord.New()
+		if err != nil {
+			return err
+		}
+		defer coord.Stop()
+		creds, err := standaloneEnroll(ctx, cfg, coord.Dialer(), coord.Addr(), identity, hw)
+		if err != nil {
+			return err
+		}
+		if err := startTunnel(ctx, cfg, coord.Dialer(), coord.Addr(), coord.PubKey(), creds.NodeID, identity, hw, gov, stats, eng, mgr, budget, log); err != nil {
+			return err
+		}
+		nodeID = creds.NodeID
+		log.Info("standalone mode: in-process fake coordinator running", "node_id", nodeID, "hint", "OPENAI_BASE_URL=http://"+cfg.LocalAPI.Listen+"/v1")
+	} else {
+		creds, err := ensureEnrolled(ctx, cfg, identity, hw, log)
+		if err != nil {
+			return err
+		}
+		switch {
+		case creds != nil:
+			dialer, err := meshDialer(cfg, identity, creds)
+			if err != nil {
+				return err
+			}
+			if err := startTunnel(ctx, cfg, dialer, cfg.Tunnel.CoordinatorAddr, creds.CoordinatorPubKey, creds.NodeID, identity, hw, gov, stats, eng, mgr, budget, log); err != nil {
+				return err
+			}
+			log.Info("tunnel client started", "coordinator", cfg.Tunnel.CoordinatorAddr, "node_id", creds.NodeID)
+			nodeID = creds.NodeID
+		default:
+			log.Warn("node not enrolled: serving locally only", "hint", "run `hive login` to join the mesh, or start with --standalone")
+		}
+	}
+
+	// ---- local API ----
+	webFS, err := web.Dist()
+	if err != nil {
+		log.Warn("embedded dashboard unavailable", "err", err)
+		webFS = nil
+	}
+	srv := localapi.New(localapi.Deps{
+		Engine:        eng,
+		Governor:      gov,
+		Models:        mgr,
+		LogRing:       ring,
+		Hardware:      hw,
+		Log:           log,
+		WebFS:         webFS,
+		NodeID:        nodeID,
+		Version:       version,
+		Standalone:    cfg.Tunnel.Standalone,
+		RequireAuthV1: cfg.LocalAPI.RequireAuthV1,
+		Token:         token,
+	})
+	log.Info("hived ready",
+		"local_api", "http://"+cfg.LocalAPI.Listen,
+		"dashboard", "http://"+cfg.LocalAPI.Listen+"/",
+		"openai_base_url", "http://"+cfg.LocalAPI.Listen+"/v1")
+	return srv.ListenAndServe(ctx, cfg.LocalAPI.Listen)
+}
+
+// loadDefaultModel makes one model servable at startup (Phase 0). Further
+// models arrive via coordinator ModelAssignment.
+func loadDefaultModel(ctx context.Context, cfg config.Config, hw *typesv1.CapabilityProfile, mgr *models.Manager, eng *engine.Engine, budget rt.ResourceBudget, log *slog.Logger) error {
+	switch cfg.Runtime.Kind {
+	case "mock":
+		mock := rt.NewMockRuntime(cfg.Runtime.MockTokensPerSec)
+		spec := rt.ModelSpec{ID: cfg.Models.Default, ContextLength: 8192, Embeddings: true}
+		inst, err := mock.Load(ctx, spec, budget)
+		if err != nil {
+			return err
+		}
+		eng.Register(spec, inst)
+		reportRuntimeBuild(hw, inst, log)
+		log.Info("mock runtime loaded", "model", spec.ID, "tok_per_sec", cfg.Runtime.MockTokensPerSec)
+		return nil
+
+	case "llamacpp":
+		catalog, err := models.LoadCatalog(ctx, cfg.Models.ManifestPath, cfg.Models.ManifestURL, nil)
+		if err != nil {
+			return fmt.Errorf("load model catalog: %w", err)
+		}
+		entry, ok := catalog.Find(cfg.Models.Default)
+		if !ok {
+			return fmt.Errorf("default model %q not in catalog", cfg.Models.Default)
+		}
+		pspec := entry.Spec()
+		log.Info("ensuring model artifact", "model", pspec.GetId(), "size_mb", pspec.GetSizeBytes()/1024/1024)
+		path, err := mgr.Ensure(ctx, pspec)
+		if err != nil {
+			return err
+		}
+		for _, pin := range cfg.Models.Pin {
+			if pin == pspec.GetId() {
+				_ = mgr.Pin(pin, true)
+			}
+		}
+		adapter := &llamacpp.Adapter{
+			Fetcher: &llamacpp.Fetcher{
+				ManifestURL: cfg.Runtime.ArtifactManifestURL,
+				BinaryPath:  cfg.Runtime.LlamaServerPath,
+				CacheDir:    filepath.Join(cfg.DataDir, "runtimes"),
+			},
+			Accel:         hardware.BestAccel(hw),
+			Log:           log,
+			ContextLength: cfg.Runtime.ContextLength,
+		}
+		spec := rt.ModelSpec{
+			ID:            pspec.GetId(),
+			Family:        pspec.GetFamily(),
+			Quant:         pspec.GetQuant(),
+			SHA256:        pspec.GetSha256(),
+			Path:          path,
+			ContextLength: int(pspec.GetContextLength()),
+			Embeddings:    pspec.GetEmbeddings(),
+		}
+		inst, err := adapter.Load(ctx, spec, budget)
+		if err != nil {
+			return err
+		}
+		eng.Register(spec, inst)
+		reportRuntimeBuild(hw, inst, log)
+		log.Info("llama-server loaded", "model", spec.ID)
+		return nil
+	default:
+		return fmt.Errorf("unknown runtime kind %q", cfg.Runtime.Kind)
+	}
+}
+
+// reportRuntimeBuild stamps the loaded runtime's build id into the
+// capability profile. The coordinator uses it to pick fingerprint challenges
+// whose expected outputs were generated on this exact build; without it the
+// node cannot be fingerprint-verified at all (SPEC §2.2).
+func reportRuntimeBuild(hw *typesv1.CapabilityProfile, inst rt.Instance, log *slog.Logger) {
+	b, ok := inst.(rt.BuildIdentified)
+	if !ok {
+		return
+	}
+	hw.RuntimeBuildId = b.RuntimeBuildID()
+	log.Info("runtime build identified", "runtime_build_id", hw.RuntimeBuildId)
+}
+
+// startTunnel runs the session client in the background. nodeID must be the
+// coordinator-assigned ID from enrollment — the session is rejected
+// otherwise.
+func startTunnel(ctx context.Context, cfg config.Config, dialer tunnel.Dialer, addr string, coordKey []byte, nodeID string, identity *enroll.Identity, hw *typesv1.CapabilityProfile, gov *governor.Governor, stats *telemetry.Stats, eng *engine.Engine, mgr *models.Manager, budget rt.ResourceBudget, log *slog.Logger) error {
+	protoBudget := &typesv1.ResourceBudget{
+		MaxVramPercent:        uint32(cfg.Budget.MaxVRAMPercent),
+		MaxRamMb:              uint64(max(cfg.Budget.MaxRAMMB, 0)),
+		MaxConcurrentRequests: uint32(cfg.Budget.MaxConcurrent),
+		MaxDiskMb:             uint64(max(cfg.Models.MaxDiskMB, 0)),
+		ServeOnBattery:        cfg.Governor.ServeOnBattery,
+		MaxTempCelsius:        uint32(cfg.Governor.MaxTempCelsius),
+		ServePolicy:           cfg.Governor.ServePolicy,
+	}
+	modelStates := func() []*typesv1.ModelState {
+		var out []*typesv1.ModelState
+		for _, m := range eng.Models() {
+			out = append(out, &typesv1.ModelState{ModelId: m.Spec.ID, State: "ready"})
+		}
+		return out
+	}
+
+	client, err := tunnel.NewClient(tunnel.Options{
+		Dialer:            dialer,
+		Addr:              addr,
+		NodeID:            nodeID,
+		CoordinatorPubKey: coordKey,
+		Engine:            eng,
+		Admit:             gov,
+		HeartbeatInterval: cfg.Tunnel.HeartbeatInterval,
+		ReconnectMin:      cfg.Tunnel.ReconnectMin,
+		ReconnectMax:      cfg.Tunnel.ReconnectMax,
+		Log:               log,
+		Hello: func() *tunnelv1.Hello {
+			return &tunnelv1.Hello{
+				NodeId:        nodeID,
+				DaemonVersion: version,
+				Capability:    hw,
+				Models:        modelStates(),
+				Budget:        protoBudget,
+			}
+		},
+		Heartbeat: func() *tunnelv1.Heartbeat {
+			power := gov.Power()
+			return stats.BuildHeartbeat(telemetry.HeartbeatInput{
+				State:      gov.State().NodeState(),
+				QueueDepth: gov.Inflight(),
+				GPUTempC:   power.TempCelsius,
+				OnBattery:  power.OnBattery,
+				Models:     modelStates(),
+			})
+		},
+		OnModelAssignment: func(ctx context.Context, ma *tunnelv1.ModelAssignment) {
+			// Phase 1: download+load assigned models, evict listed ones.
+			// Requires the llamacpp runtime; logged for now on mock nodes.
+			log.Info("model assignment received", "assign", len(ma.GetAssign()), "evict", len(ma.GetEvictModelIds()))
+		},
+	})
+	if err != nil {
+		return err
+	}
+	go client.Run(ctx)
+	return nil
+}
+
+// standaloneEnroll enrolls against the in-process fake coordinator. Its
+// credentials live in a `standalone/` subdirectory so that running
+// `hived --standalone` on a machine that has really joined the mesh cannot
+// overwrite that node's mesh identity. The fake is ephemeral, so this
+// re-enrolls on every start.
+func standaloneEnroll(ctx context.Context, cfg config.Config, dialer tunnel.Dialer, addr string, identity *enroll.Identity, hw *typesv1.CapabilityProfile) (*enroll.Credentials, error) {
+	conn, err := dialer.Dial(ctx, addr)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	creds, err := enroll.Enroll(ctx, tunnelv1.NewTunnelServiceClient(conn), identity, "standalone",
+		hw, filepath.Join(cfg.DataDir, "standalone"))
+	if err != nil {
+		return nil, fmt.Errorf("standalone enrollment: %w", err)
+	}
+	return creds, nil
+}
+
+// ensureEnrolled returns the node's mesh credentials, performing enrollment
+// first when `hive login` has left a claim code behind. It returns (nil, nil)
+// when the node has neither credentials nor a pending claim code — that is
+// the ordinary "serving locally only" state, not an error.
+func ensureEnrolled(ctx context.Context, cfg config.Config, identity *enroll.Identity, hw *typesv1.CapabilityProfile, log *slog.Logger) (*enroll.Credentials, error) {
+	if enroll.Enrolled(cfg.DataDir) {
+		return enroll.LoadCredentials(cfg.DataDir)
+	}
+
+	code, err := enroll.ReadClaimCode(cfg.DataDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	// Bootstrap dial: the node has no client cert yet, so this leg is
+	// server-authenticated only. The credentials it returns (CA + pinned
+	// coordinator key) are what make every later connection mTLS.
+	log.Info("claim code found: enrolling with coordinator", "coordinator", cfg.Tunnel.CoordinatorAddr)
+	conn, err := bootstrapDialer(cfg).Dial(ctx, cfg.Tunnel.CoordinatorAddr)
+	if err != nil {
+		return nil, fmt.Errorf("enrollment dial %s: %w", cfg.Tunnel.CoordinatorAddr, err)
+	}
+	defer conn.Close()
+
+	enrollCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	creds, err := enroll.Enroll(enrollCtx, tunnelv1.NewTunnelServiceClient(conn), identity, code, hw, cfg.DataDir)
+	if err != nil {
+		// Keep the claim code: a coordinator that is merely unreachable
+		// should not cost the operator their code. A rejected code is
+		// reported plainly so they know to get a fresh one.
+		return nil, fmt.Errorf("enrollment failed (claim code kept at %s): %w", enroll.ClaimCodePath(cfg.DataDir), err)
+	}
+	// Claim codes are one-shot at the coordinator; a spent one would only
+	// produce confusing failures on later restarts.
+	if err := enroll.ClearClaimCode(cfg.DataDir); err != nil {
+		log.Warn("could not remove spent claim code", "err", err)
+	}
+	log.Info("enrolled with mesh", "node_id", creds.NodeID, "cert_expires", creds.CertExpiresAt.Format(time.RFC3339))
+	return creds, nil
+}
+
+// bootstrapDialer dials the coordinator before the node holds a client cert
+// (enrollment only). Plaintext in dev, server-authenticated TLS otherwise.
+func bootstrapDialer(cfg config.Config) tunnel.Dialer {
+	if cfg.Tunnel.Insecure {
+		return tunnel.InsecureDialer{}
+	}
+	return &tunnel.TLSDialer{TLS: &tls.Config{
+		MinVersion:         tls.VersionTLS13,
+		InsecureSkipVerify: cfg.Tunnel.InsecureSkipVerify, //nolint:gosec // dev flag, documented
+	}}
+}
+
+// meshDialer builds the session dialer from enrollment credentials: mTLS
+// with the coordinator CA pinned as the only root.
+func meshDialer(cfg config.Config, identity *enroll.Identity, creds *enroll.Credentials) (tunnel.Dialer, error) {
+	if cfg.Tunnel.Insecure {
+		return tunnel.InsecureDialer{}, nil
+	}
+	tlsCfg, err := enroll.ClientTLSConfig(identity, creds, cfg.Tunnel.InsecureSkipVerify)
+	if err != nil {
+		return nil, err
+	}
+	return &tunnel.TLSDialer{TLS: tlsCfg}, nil
+}

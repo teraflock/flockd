@@ -1,0 +1,118 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  GO_VERSION: "1.24"
+
+jobs:
+  # The proto contract repo is a sibling checkout (go.mod replace ../proto).
+  # Each job checks both repos out side by side.
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: hived }
+      - uses: actions/checkout@v4
+        with: { repository: hivegrid/proto, path: proto }
+      - uses: actions/setup-go@v5
+        with: { go-version: "${{ env.GO_VERSION }}", cache-dependency-path: hived/go.sum }
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          working-directory: hived
+          version: latest
+
+  test:
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        # Governor idle/yield logic is platform-behavioral: run its suite on
+        # macOS and Windows runners too (SPEC §A3).
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: hived }
+      - uses: actions/checkout@v4
+        with: { repository: hivegrid/proto, path: proto }
+      - uses: actions/setup-go@v5
+        with: { go-version: "${{ env.GO_VERSION }}", cache-dependency-path: hived/go.sum }
+      - name: unit tests
+        working-directory: hived
+        run: go test ./...
+      - name: race (concurrency-heavy packages)
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: hived
+        run: go test -race ./internal/governor/ ./internal/tunnel/... ./internal/runtime/... ./internal/localapi/
+      - name: smoke (standalone end-to-end)
+        if: matrix.os != 'windows-latest'
+        working-directory: hived
+        run: ./scripts/smoke.sh
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { goos: darwin, goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: hived }
+      - uses: actions/checkout@v4
+        with: { repository: hivegrid/proto, path: proto }
+      - uses: actions/setup-go@v5
+        with: { go-version: "${{ env.GO_VERSION }}", cache-dependency-path: hived/go.sum }
+      - name: cross-build
+        working-directory: hived
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          go build ./...
+          go build -o /dev/null ./cmd/hived
+          go build -o /dev/null ./cmd/hive
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "22", cache: npm, cache-dependency-path: web/package-lock.json }
+      - name: build dashboard
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+      - name: ensure committed dist is not stale (informational)
+        run: git status --porcelain web/dist || true
+
+  release:
+    # Tag builds produce (unsigned, draft) release artifacts.
+    # TODO(keys): cosign + notarization + Authenticode before public release.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: hived, fetch-depth: 0 }
+      - uses: actions/checkout@v4
+        with: { repository: hivegrid/proto, path: proto }
+      - uses: actions/setup-go@v5
+        with: { go-version: "${{ env.GO_VERSION }}", cache-dependency-path: hived/go.sum }
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          workdir: hived
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
