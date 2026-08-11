@@ -15,22 +15,39 @@ import (
 // apiClient talks to the daemon's local API. Every hive command is a client
 // of localhost:7777/api/v1 — one source of truth (SPEC §A1.2).
 type apiClient struct {
-	base  string
-	token string
-	hc    *http.Client
+	base        string
+	token       string
+	tokenSource string // where the token came from, for error messages
+	dataDir     string
+	hc          *http.Client
 }
 
+// newAPIClient resolves the bearer token, in precedence order: the --token
+// flag, $HIVE_TOKEN, then <dataDir>/local_api_token. The token is per
+// install and lives beside the daemon's other state, so pointing at the
+// wrong data dir is the usual cause of a 401 — tokenSource records where we
+// looked so the error can say so.
 func newAPIClient(base, dataDir string) (*apiClient, error) {
-	token := ""
-	raw, err := os.ReadFile(filepath.Join(dataDir, "local_api_token"))
-	if err == nil {
-		token = strings.TrimSpace(string(raw))
+	c := &apiClient{
+		base:    strings.TrimSuffix(base, "/"),
+		dataDir: dataDir,
+		hc:      &http.Client{Timeout: 10 * time.Second},
 	}
-	return &apiClient{
-		base:  strings.TrimSuffix(base, "/"),
-		token: token,
-		hc:    &http.Client{Timeout: 10 * time.Second},
-	}, nil
+	switch {
+	case flagToken != "":
+		c.token, c.tokenSource = strings.TrimSpace(flagToken), "--token"
+	case os.Getenv("HIVE_TOKEN") != "":
+		c.token, c.tokenSource = strings.TrimSpace(os.Getenv("HIVE_TOKEN")), "$HIVE_TOKEN"
+	default:
+		path := filepath.Join(dataDir, "local_api_token")
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			c.tokenSource = fmt.Sprintf("no token found at %s", path)
+			break
+		}
+		c.token, c.tokenSource = strings.TrimSpace(string(raw)), path
+	}
+	return c, nil
 }
 
 func (c *apiClient) do(method, path string, body, out any) error {
@@ -57,6 +74,13 @@ func (c *apiClient) do(method, path string, body, out any) error {
 		return fmt.Errorf("cannot reach hived at %s (is it running? try `hive up` or `hived --standalone`): %w", c.base, err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		return fmt.Errorf("daemon rejected the auth token (%s).\n"+
+			"  The token is per-install and lives in the daemon's data dir.\n"+
+			"  If hived runs with a custom data dir, point hive at the same one:\n"+
+			"    hive --data-dir %s <command>   (or set HIVED_DATA_DIR / HIVE_TOKEN)\n"+
+			"  Print the current token with: hive token", c.tokenSource, c.dataDir)
+	}
 	if resp.StatusCode >= 400 {
 		var e struct {
 			Error struct {

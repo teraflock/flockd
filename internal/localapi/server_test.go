@@ -390,3 +390,102 @@ func TestTokenFileCreation(t *testing.T) {
 		t.Errorf("token not stable: %q vs %q (%v)", tok1, tok2, err)
 	}
 }
+
+// Operators paste this token by hand out of a file or a terminal, and a
+// stray space is invisible in a password field. Rejecting it produced an
+// "invalid token" the operator could not distinguish from a wrong token.
+func TestBearerTokenToleratesSurroundingWhitespace(t *testing.T) {
+	srv := newTestServer(t, servingGovernor(t))
+	for _, header := range []string{
+		"Bearer " + testToken,
+		"Bearer  " + testToken,      // doubled space after the scheme
+		"  Bearer " + testToken,     // leading whitespace
+		"Bearer " + testToken + " ", // trailing whitespace
+		"Bearer\t" + testToken,
+		"bearer " + testToken, // RFC 6750: scheme is case-insensitive
+		"BEARER " + testToken,
+	} {
+		req, err := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/status", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", header)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("Authorization=%q -> %d, want 200", header, resp.StatusCode)
+		}
+	}
+}
+
+func TestBearerTokenStillRejectsWrongToken(t *testing.T) {
+	srv := newTestServer(t, servingGovernor(t))
+	for _, header := range []string{
+		"",
+		"Bearer ",
+		"Bearer hive_wrong",
+		"Bearer " + testToken + "x",
+		"Basic " + testToken, // wrong scheme
+		testToken,            // no scheme
+	} {
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/status", nil)
+		if header != "" {
+			req.Header.Set("Authorization", header)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("Authorization=%q -> %d, want 401", header, resp.StatusCode)
+		}
+	}
+}
+
+// EventSource cannot set request headers, so the SSE route (and only it)
+// accepts the token as a query parameter.
+func TestEventsAcceptsQueryToken(t *testing.T) {
+	srv := newTestServer(t, servingGovernor(t))
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/events?token="+testToken, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	resp, err := http.DefaultClient.Do(req.WithContext(ctx))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("events?token= -> %d, want 200", resp.StatusCode)
+	}
+
+	bad, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/events?token=nope", nil)
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel2()
+	resp2, err := http.DefaultClient.Do(bad.WithContext(ctx2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusUnauthorized {
+		t.Errorf("events?token=nope -> %d, want 401", resp2.StatusCode)
+	}
+}
+
+// The query-parameter escape hatch must not leak to the rest of /api/v1,
+// where it would end up in shell history and server logs for every call.
+func TestQueryTokenRejectedOnNonSSERoutes(t *testing.T) {
+	srv := newTestServer(t, servingGovernor(t))
+	resp, err := http.Get(srv.URL + "/api/v1/status?token=" + testToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("status?token= -> %d, want 401 (query tokens are SSE-only)", resp.StatusCode)
+	}
+}

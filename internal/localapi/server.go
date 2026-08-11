@@ -75,7 +75,7 @@ func New(deps Deps) *Server {
 	s.mux.HandleFunc("GET /api/v1/limits", s.authAPI(s.handleLimitsGet))
 	s.mux.HandleFunc("PUT /api/v1/limits", s.authAPI(s.handleLimitsPut))
 	s.mux.HandleFunc("GET /api/v1/logs", s.authAPI(s.handleLogs))
-	s.mux.HandleFunc("GET /api/v1/events", s.authAPI(s.handleEvents))
+	s.mux.HandleFunc("GET /api/v1/events", s.authSSE(s.handleEvents))
 
 	// Embedded web dashboard at the root.
 	if deps.WebFS != nil {
@@ -129,17 +129,66 @@ func isLoopback(addr string) bool {
 
 // ---- auth ----
 
+// presentedToken extracts the bearer token from the request. Surrounding
+// whitespace is trimmed: operators paste this token by hand out of a file or
+// a terminal, and a stray leading space produced an indistinguishable
+// "invalid token" before. The `token` query parameter is accepted only for
+// SSE, where the browser's EventSource cannot set headers at all.
+func presentedToken(r *http.Request, allowQuery bool) string {
+	if h := strings.TrimSpace(r.Header.Get("Authorization")); h != "" {
+		rest, ok := cutPrefixFold(h, "bearer")
+		// The scheme must be followed by whitespace, so "Bearerxyz" is not
+		// read as the token "xyz"; any amount of it is then tolerated.
+		if !ok || rest == "" || !isSpace(rest[0]) {
+			return "" // an Authorization header that is not Bearer is not ours
+		}
+		return strings.TrimSpace(rest)
+	}
+	if allowQuery {
+		return strings.TrimSpace(r.URL.Query().Get("token"))
+	}
+	return ""
+}
+
+func isSpace(b byte) bool { return b == ' ' || b == '\t' }
+
+// cutPrefixFold is strings.CutPrefix with an ASCII case-insensitive prefix
+// match ("Bearer", "bearer" and "BEARER" are all valid per RFC 6750).
+func cutPrefixFold(s, prefix string) (string, bool) {
+	if len(s) < len(prefix) || !strings.EqualFold(s[:len(prefix)], prefix) {
+		return s, false
+	}
+	return s[len(prefix):], true
+}
+
 func (s *Server) checkToken(r *http.Request) bool {
-	h := r.Header.Get("Authorization")
-	want := "Bearer " + s.deps.Token
-	return s.deps.Token != "" && subtle.ConstantTimeCompare([]byte(h), []byte(want)) == 1
+	return s.checkTokenOpts(r, false)
+}
+
+func (s *Server) checkTokenOpts(r *http.Request, allowQuery bool) bool {
+	got := presentedToken(r, allowQuery)
+	return s.deps.Token != "" &&
+		subtle.ConstantTimeCompare([]byte(got), []byte(s.deps.Token)) == 1
 }
 
 // authAPI always requires the bearer token.
 func (s *Server) authAPI(next http.HandlerFunc) http.HandlerFunc {
+	return s.authAPIOpts(next, false)
+}
+
+// authSSE additionally accepts `?token=`, because EventSource cannot send an
+// Authorization header. Loopback-only, and the token is the same per-install
+// secret — but it does land in browser history, so it stays limited to the
+// one endpoint that needs it.
+func (s *Server) authSSE(next http.HandlerFunc) http.HandlerFunc {
+	return s.authAPIOpts(next, true)
+}
+
+func (s *Server) authAPIOpts(next http.HandlerFunc, allowQuery bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !s.checkToken(r) {
-			writeOpenAIError(w, http.StatusUnauthorized, "invalid_request_error", "missing or invalid bearer token (see `hive dashboard --web` or the local_api_token file in the data dir)")
+		if !s.checkTokenOpts(r, allowQuery) {
+			writeOpenAIError(w, http.StatusUnauthorized, "invalid_request_error",
+				"missing or invalid bearer token (run `hive token` to print it, or read local_api_token in the daemon's data dir)")
 			return
 		}
 		next(w, r)

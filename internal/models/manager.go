@@ -94,6 +94,16 @@ func (m *Manager) saveLocked() {
 // Ensure makes the model available locally: verified cache hit, resumed
 // partial download, or full download. Returns the local path.
 func (m *Manager) Ensure(ctx context.Context, spec *typesv1.ModelSpec) (string, error) {
+	// A file:// artifact is a model the operator already has on disk (an
+	// LM Studio or ollama collection, a hand-built quant). Serve it in
+	// place: copying a 20GB GGUF into our cache to satisfy bookkeeping
+	// would be absurd, and since we do not own the file the LRU must never
+	// be allowed to delete it — so it is deliberately not registered in the
+	// cache state at all.
+	if path, ok := LocalArtifactPath(spec.GetArtifactUrl()); ok {
+		return m.ensureLocal(path, spec)
+	}
+
 	dest := m.Path(spec.GetId())
 
 	m.mu.Lock()

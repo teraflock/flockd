@@ -55,6 +55,13 @@ func (a *Adapter) Load(ctx context.Context, m rt.ModelSpec, res rt.ResourceBudge
 		"--port", strconv.Itoa(port),
 		"--parallel", strconv.Itoa(max(res.MaxConcurrent, 1)),
 		"--no-webui",
+		// Reasoning models otherwise put their chain-of-thought in
+		// `reasoning_content` and leave `content` empty, so a truncated
+		// generation returns nothing at all. A serving node must relay the
+		// model's whole token stream: the customer is billed for those
+		// tokens, and canary comparison (SPEC §2.2) diffs the output string,
+		// which would be empty for every reasoning model otherwise.
+		"--reasoning-format", "none",
 	}
 	if ctxLen > 0 {
 		args = append(args, "--ctx-size", strconv.Itoa(ctxLen))

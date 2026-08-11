@@ -23,6 +23,7 @@ var version = "dev"
 var (
 	flagAPI     string
 	flagDataDir string
+	flagToken   string
 )
 
 // dataDir resolves the daemon's data directory the same way hived does
@@ -61,10 +62,11 @@ func main() {
 	}
 	root.PersistentFlags().StringVar(&flagAPI, "api", "http://127.0.0.1:7777", "daemon local API base URL")
 	root.PersistentFlags().StringVar(&flagDataDir, "data-dir", "", "daemon data directory (for the auth token)")
+	root.PersistentFlags().StringVar(&flagToken, "token", "", "local API bearer token (default: $HIVE_TOKEN, else <data-dir>/local_api_token)")
 
 	root.AddCommand(
 		cmdUp(), cmdDown(), cmdStatus(), cmdLogin(), cmdModels(), cmdLimits(),
-		cmdEarnings(), cmdRedeem(), cmdDashboard(), cmdVersion(), cmdUninstall(),
+		cmdEarnings(), cmdRedeem(), cmdDashboard(), cmdToken(), cmdVersion(), cmdUninstall(),
 	)
 
 	if err := root.Execute(); err != nil {
@@ -383,6 +385,29 @@ func cmdRedeem() *cobra.Command {
 	}
 	c.Flags().StringVar(&redeemURL, "url", "https://hivegrid.dev/redeem", "payout page URL")
 	return c
+}
+
+// cmdToken prints the local API bearer token. The web dashboard needs it
+// pasted in, and every 401 from the CLI points here.
+func cmdToken() *cobra.Command {
+	return &cobra.Command{
+		Use:   "token",
+		Short: "Print the local API bearer token (for the web dashboard)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			dir := dataDir()
+			path := filepath.Join(dir, "local_api_token")
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				return fmt.Errorf("no token at %s — is this the data dir hived uses? "+
+					"Override with --data-dir or HIVED_DATA_DIR", path)
+			}
+			// Bare token on stdout so `hive token | pbcopy` works; the hint
+			// goes to stderr so it never pollutes a pipe.
+			fmt.Fprintln(os.Stderr, styleDim.Render("token from "+path+" — paste into http://127.0.0.1:7777"))
+			fmt.Println(strings.TrimSpace(string(raw)))
+			return nil
+		},
+	}
 }
 
 func cmdVersion() *cobra.Command {

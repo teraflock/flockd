@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, getToken, setToken, type Limits } from "./api";
+import { AuthError, api, getToken, setToken, type Limits } from "./api";
 
 type Tab = "status" | "earnings" | "models" | "limits";
 
@@ -45,15 +45,27 @@ export default function App() {
             className="flex-1 rounded border border-slate-800 bg-slate-900 px-3 py-2 text-sm"
           />
           <button
-            className="rounded bg-amber-400 px-4 py-2 text-sm font-semibold text-black"
+            className="rounded bg-amber-400 px-4 py-2 text-sm font-semibold text-black disabled:opacity-40"
+            disabled={!tokenInput.trim()}
             onClick={() => {
-              setToken(tokenInput);
-              qc.invalidateQueries();
+              const t = tokenInput.trim();
+              setTokenInput(t);
+              setToken(t);
+              // resetQueries, not invalidateQueries: a query parked in an
+              // error state should visibly retry from scratch, so the
+              // operator can tell the click did something.
+              qc.resetQueries();
             }}
           >
             connect
           </button>
         </div>
+
+        {status.isSuccess && (
+          <p className="mb-4 text-sm text-green-400">
+            connected to {status.data.node_id}
+          </p>
+        )}
 
         <nav className="mb-6 flex gap-1">
           {(["status", "earnings", "models", "limits"] as Tab[]).map((t) => (
@@ -74,8 +86,20 @@ export default function App() {
 
         {status.isError && (
           <p className="mb-4 text-sm text-red-400">
-            cannot reach the daemon API — check the token and that hived is
-            running.
+            {status.error instanceof AuthError ? (
+              <>
+                {status.error.message} — paste the token from{" "}
+                <code className="text-slate-300">
+                  &lt;data_dir&gt;/local_api_token
+                </code>{" "}
+                (or run <code className="text-slate-300">hive token</code>) and
+                press connect. Whitespace is trimmed for you.
+              </>
+            ) : (
+              <>{String(status.error?.message ?? status.error)} — is hived
+                running? Try <code className="text-slate-300">hive up</code> or{" "}
+                <code className="text-slate-300">hived --standalone</code>.</>
+            )}
           </p>
         )}
 

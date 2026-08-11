@@ -141,6 +141,38 @@ HIVED_TUNNEL__COORDINATOR_ADDR=coordinator:9090 hived
   needs it to pick fingerprint challenges calibrated for that runtime;
   without it a node cannot be fingerprint-verified at all.
 
+## Local models and real llama.cpp
+
+`artifact_url` accepts `file://` paths (and bare absolute paths), so a node
+serves an existing GGUF collection **in place** — no download, no copy, and
+the LRU never evicts a file the daemon does not own (`internal/models/
+local.go`). A real 64-hex `sha256` is verified before serving; `TODO-verify`
+or empty serves with a loud unverified warning.
+
+Verified against a real `llama-server` for the first time (Homebrew
+llama.cpp b10360, M3 Max/Metal): Qwen3.5-9B Q4_K_M ~50 tok/s, a 20GB Q4_K_M
+~64 tok/s, SHA verification 2.3s and 11s respectively.
+
+**Reasoning models**: the adapter passes `--reasoning-format none` so
+chain-of-thought stays inline in `content`. llama.cpp otherwise routes it to
+`reasoning_content` and leaves `content` empty, so a generation truncated
+mid-thought returned *nothing* while still billing the customer for the
+tokens — and canary comparison, which diffs output strings, would have seen
+empty output for every reasoning model.
+
+## Local API auth
+
+Bearer parsing tolerates surrounding whitespace and a case-insensitive
+scheme: the token is pasted by hand out of a file or terminal, and a stray
+leading space produced an "invalid token" indistinguishable from a wrong
+one. `/api/v1/events` additionally accepts `?token=` because EventSource
+cannot set headers; every other route rejects query tokens.
+
+`hive token` prints the token (bare on stdout, hint on stderr, so
+`| pbcopy` works). The CLI resolves it from `--token`, then `$HIVE_TOKEN`,
+then `<data_dir>/local_api_token`, and a 401 names the path it searched —
+a data-dir mismatch between `hive` and `hived` is the usual cause.
+
 ## Deviations from SPEC (deliberate, Phase 0)
 
 - Tunnel transport is gRPC over H2/TLS behind the `Dialer` seam; QUIC is
