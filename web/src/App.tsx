@@ -15,7 +15,12 @@ export default function App() {
     <div className="min-h-screen">
       <header className="flex items-baseline gap-4 border-b border-slate-800 px-6 py-4">
         <h1 className="text-lg font-bold tracking-widest text-amber-400">
-          ⬡ TERAFLOCK
+          <svg viewBox="0 0 48 48" width="20" height="20" aria-hidden="true" className="inline align-[-4px] mr-1">
+            <path d="M6 40 L24 40 L31 32 L13 32 Z" fill="#566079" />
+            <path d="M11 28 L29 28 L36 20 L18 20 Z" fill="#8b95a9" />
+            <path d="M16 16 L34 16 L41 8 L23 8 Z" fill="#f5b60d" />
+          </svg>
+          TERAFLOCK
         </h1>
         <span className="text-xs text-slate-500">node dashboard</span>
         {status.data && (

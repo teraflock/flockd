@@ -151,7 +151,7 @@ func cmdStatus() *cobra.Command {
 			if st.State == "serving" {
 				stateStyle = styleOK
 			}
-			fmt.Println(styleTitle.Render("⬡ Teraflock node"), styleDim.Render(st.NodeID))
+			fmt.Println(styleTitle.Render("/// Teraflock node"), styleDim.Render(st.NodeID))
 			fmt.Printf("  state      %s\n", stateStyle.Render(st.State))
 			fmt.Printf("  version    %s%s\n", st.Version, map[bool]string{true: " (standalone)", false: ""}[st.Standalone])
 			fmt.Printf("  uptime     %s\n", (time.Duration(st.UptimeSeconds) * time.Second).String())

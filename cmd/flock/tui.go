@@ -175,7 +175,7 @@ func (m *dashModel) View() string {
 	if st.Standalone {
 		mode = dashLabel.Render(" · standalone")
 	}
-	header := dashHeader.Render("⬡ TERAFLOCK") + "  " +
+	header := dashHeader.Render("/// TERAFLOCK") + "  " +
 		stateStr + mode + "  " +
 		dashLabel.Render(fmt.Sprintf("node %s · v%s · up %s", short(st.NodeID), st.Version, (time.Duration(st.UptimeSeconds)*time.Second).String()))
 
