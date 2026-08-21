@@ -12,10 +12,10 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/spf13/cobra"
 	"github.com/teraflock/flockd/internal/config"
 	"github.com/teraflock/flockd/internal/enroll"
 	"github.com/teraflock/flockd/internal/svc"
-	"github.com/spf13/cobra"
 )
 
 var version = "dev"
@@ -46,11 +46,13 @@ func client() (*apiClient, error) {
 	return newAPIClient(flagAPI, dataDir())
 }
 
+// Brand palette v1 (website/docs/brand.md): gold for the brand voice,
+// orange (never gold) for warnings. Hex degrades to ANSI where needed.
 var (
-	styleTitle = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)
-	styleOK    = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
-	styleWarn  = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
-	styleDim   = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	styleTitle = lipgloss.NewStyle().Foreground(lipgloss.Color("#f5b60d")).Bold(true)
+	styleOK    = lipgloss.NewStyle().Foreground(lipgloss.Color("#34d399"))
+	styleWarn  = lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c"))
+	styleDim   = lipgloss.NewStyle().Foreground(lipgloss.Color("#8b95a9"))
 )
 
 func main() {

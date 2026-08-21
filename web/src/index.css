@@ -1,5 +1,22 @@
 @import "tailwindcss";
 
+/* Brand palette v1 (website/docs/brand.md): the stock slate/amber scales
+   are remapped to Teraflock night/gold so every existing utility class
+   picks up brand values. Use these scale names; values live in the doc. */
+@theme {
+  --color-slate-950: #0b0e14; /* night-900: page bg */
+  --color-slate-900: #11151f; /* night-850: panels */
+  --color-slate-800: #232a3b; /* night-700: borders, active fills */
+  --color-slate-500: #566079; /* night-500: faint labels */
+  --color-slate-400: #8b95a9; /* night-400: secondary text */
+  --color-slate-300: #b3bccd; /* night-300: code text */
+  --color-slate-200: #e6ebf4; /* night-100: body text */
+  --color-amber-400: #f5b60d; /* gold-500: the brand gold */
+  --color-amber-300: #fbc63a; /* gold-400: hover */
+  --color-green-400: #34d399; /* success */
+  --color-red-400:   #f87171; /* danger */
+}
+
 :root {
   color-scheme: dark;
 }

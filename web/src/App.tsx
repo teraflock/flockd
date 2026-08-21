@@ -45,7 +45,7 @@ export default function App() {
             className="flex-1 rounded border border-slate-800 bg-slate-900 px-3 py-2 text-sm"
           />
           <button
-            className="rounded bg-amber-400 px-4 py-2 text-sm font-semibold text-black disabled:opacity-40"
+            className="rounded bg-amber-400 px-4 py-2 text-sm font-semibold text-slate-950 disabled:opacity-40"
             disabled={!tokenInput.trim()}
             onClick={() => {
               const t = tokenInput.trim();
@@ -306,7 +306,7 @@ function LimitsPage() {
           />
         </label>
         <button
-          className="self-start rounded bg-amber-400 px-4 py-1.5 font-semibold text-black disabled:opacity-40"
+          className="self-start rounded bg-amber-400 px-4 py-1.5 font-semibold text-slate-950 disabled:opacity-40"
           disabled={!draft}
           onClick={() =>
             draft &&

@@ -120,13 +120,16 @@ func (m *dashModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 var (
 	dashPanel = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("240")).
+			BorderForeground(lipgloss.Color("#39445a")).
 			Padding(0, 1)
-	dashHeader = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)
-	dashLabel  = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	dashGreen  = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
-	dashAmber  = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
-	dashBig    = lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Bold(true)
+	// Brand palette v1 (website/docs/brand.md); lipgloss degrades hex to
+	// the nearest ANSI color on non-truecolor terminals. Warnings are
+	// orange — gold is reserved for the brand accent (dashHeader).
+	dashHeader = lipgloss.NewStyle().Foreground(lipgloss.Color("#f5b60d")).Bold(true)
+	dashLabel  = lipgloss.NewStyle().Foreground(lipgloss.Color("#8b95a9"))
+	dashGreen  = lipgloss.NewStyle().Foreground(lipgloss.Color("#34d399"))
+	dashAmber  = lipgloss.NewStyle().Foreground(lipgloss.Color("#fb923c"))
+	dashBig    = lipgloss.NewStyle().Foreground(lipgloss.Color("#e6ebf4")).Bold(true)
 )
 
 var sparkBars = []rune("▁▂▃▄▅▆▇█")
