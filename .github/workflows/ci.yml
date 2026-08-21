@@ -16,14 +16,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with: { path: hived }
+        with: { path: flockd }
       - uses: actions/checkout@v4
-        with: { repository: hivegrid/proto, path: proto }
+        with: { repository: teraflock/proto, path: proto }
       - uses: actions/setup-go@v5
-        with: { go-version: "${{ env.GO_VERSION }}", cache-dependency-path: hived/go.sum }
+        with: { go-version: "${{ env.GO_VERSION }}", cache-dependency-path: flockd/go.sum }
       - uses: golangci/golangci-lint-action@v6
         with:
-          working-directory: hived
+          working-directory: flockd
           version: latest
 
   test:
@@ -37,21 +37,21 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-        with: { path: hived }
+        with: { path: flockd }
       - uses: actions/checkout@v4
-        with: { repository: hivegrid/proto, path: proto }
+        with: { repository: teraflock/proto, path: proto }
       - uses: actions/setup-go@v5
-        with: { go-version: "${{ env.GO_VERSION }}", cache-dependency-path: hived/go.sum }
+        with: { go-version: "${{ env.GO_VERSION }}", cache-dependency-path: flockd/go.sum }
       - name: unit tests
-        working-directory: hived
+        working-directory: flockd
         run: go test ./...
       - name: race (concurrency-heavy packages)
         if: matrix.os == 'ubuntu-latest'
-        working-directory: hived
+        working-directory: flockd
         run: go test -race ./internal/governor/ ./internal/tunnel/... ./internal/runtime/... ./internal/localapi/
       - name: smoke (standalone end-to-end)
         if: matrix.os != 'windows-latest'
-        working-directory: hived
+        working-directory: flockd
         run: ./scripts/smoke.sh
 
   build:
@@ -67,21 +67,21 @@ jobs:
           - { goos: windows, goarch: amd64 }
     steps:
       - uses: actions/checkout@v4
-        with: { path: hived }
+        with: { path: flockd }
       - uses: actions/checkout@v4
-        with: { repository: hivegrid/proto, path: proto }
+        with: { repository: teraflock/proto, path: proto }
       - uses: actions/setup-go@v5
-        with: { go-version: "${{ env.GO_VERSION }}", cache-dependency-path: hived/go.sum }
+        with: { go-version: "${{ env.GO_VERSION }}", cache-dependency-path: flockd/go.sum }
       - name: cross-build
-        working-directory: hived
+        working-directory: flockd
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
         run: |
           go build ./...
-          go build -o /dev/null ./cmd/hived
-          go build -o /dev/null ./cmd/hive
+          go build -o /dev/null ./cmd/flockd
+          go build -o /dev/null ./cmd/flock
 
   web:
     runs-on: ubuntu-latest
@@ -105,14 +105,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with: { path: hived, fetch-depth: 0 }
+        with: { path: flockd, fetch-depth: 0 }
       - uses: actions/checkout@v4
-        with: { repository: hivegrid/proto, path: proto }
+        with: { repository: teraflock/proto, path: proto }
       - uses: actions/setup-go@v5
-        with: { go-version: "${{ env.GO_VERSION }}", cache-dependency-path: hived/go.sum }
+        with: { go-version: "${{ env.GO_VERSION }}", cache-dependency-path: flockd/go.sum }
       - uses: goreleaser/goreleaser-action@v6
         with:
-          workdir: hived
+          workdir: flockd
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

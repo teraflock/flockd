@@ -12,7 +12,7 @@ import (
 )
 
 // MockRuntime is a deterministic in-process runtime used by tests, the fake
-// coordinator path, and `hived --standalone --runtime=mock`. Same seed ->
+// coordinator path, and `flockd --standalone --runtime=mock`. Same seed ->
 // same output, so it also exercises the fingerprint-challenge flow.
 type MockRuntime struct {
 	// TokensPerSec throttles generation; <= 0 means unthrottled.
@@ -53,7 +53,7 @@ type mockInstance struct {
 var mockWords = strings.Fields(`the swarm hums quietly beneath the desk idle silicon wakes to
 serve a stranger prompt tokens flow like nectar back through the tunnel
 each cell of the grid earns its keep small models good enough five times
-cheaper the hive remembers nothing it only computes and yields the moment
+cheaper the flock remembers nothing it only computes and yields the moment
 you touch the keyboard`)
 
 func (i *mockInstance) Complete(ctx context.Context, req CompletionRequest) (TokenStream, error) {

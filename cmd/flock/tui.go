@@ -158,9 +158,9 @@ func sparkline(vals []float64, width int) string {
 func (m *dashModel) View() string {
 	if !m.haveOne {
 		if m.lastErr != nil {
-			return dashPanel.Render(dashAmber.Render("cannot reach hived") + "\n" + m.lastErr.Error() + "\n\n" + dashLabel.Render("start it with `hive up` or `hived --standalone`  ·  q to quit"))
+			return dashPanel.Render(dashAmber.Render("cannot reach flockd") + "\n" + m.lastErr.Error() + "\n\n" + dashLabel.Render("start it with `flock up` or `flockd --standalone`  ·  q to quit"))
 		}
-		return dashLabel.Render("connecting to hived …")
+		return dashLabel.Render("connecting to flockd …")
 	}
 	st := m.status
 
@@ -172,7 +172,7 @@ func (m *dashModel) View() string {
 	if st.Standalone {
 		mode = dashLabel.Render(" · standalone")
 	}
-	header := dashHeader.Render("⬡ HIVEGRID") + "  " +
+	header := dashHeader.Render("⬡ TERAFLOCK") + "  " +
 		stateStr + mode + "  " +
 		dashLabel.Render(fmt.Sprintf("node %s · v%s · up %s", short(st.NodeID), st.Version, (time.Duration(st.UptimeSeconds)*time.Second).String()))
 

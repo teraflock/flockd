@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// apiClient talks to the daemon's local API. Every hive command is a client
+// apiClient talks to the daemon's local API. Every flock command is a client
 // of localhost:7777/api/v1 — one source of truth (SPEC §A1.2).
 type apiClient struct {
 	base        string
@@ -23,7 +23,7 @@ type apiClient struct {
 }
 
 // newAPIClient resolves the bearer token, in precedence order: the --token
-// flag, $HIVE_TOKEN, then <dataDir>/local_api_token. The token is per
+// flag, $FLOCK_TOKEN, then <dataDir>/local_api_token. The token is per
 // install and lives beside the daemon's other state, so pointing at the
 // wrong data dir is the usual cause of a 401 — tokenSource records where we
 // looked so the error can say so.
@@ -36,8 +36,8 @@ func newAPIClient(base, dataDir string) (*apiClient, error) {
 	switch {
 	case flagToken != "":
 		c.token, c.tokenSource = strings.TrimSpace(flagToken), "--token"
-	case os.Getenv("HIVE_TOKEN") != "":
-		c.token, c.tokenSource = strings.TrimSpace(os.Getenv("HIVE_TOKEN")), "$HIVE_TOKEN"
+	case os.Getenv("FLOCK_TOKEN") != "":
+		c.token, c.tokenSource = strings.TrimSpace(os.Getenv("FLOCK_TOKEN")), "$FLOCK_TOKEN"
 	default:
 		path := filepath.Join(dataDir, "local_api_token")
 		raw, err := os.ReadFile(path)
@@ -71,15 +71,15 @@ func (c *apiClient) do(method, path string, body, out any) error {
 	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		return fmt.Errorf("cannot reach hived at %s (is it running? try `hive up` or `hived --standalone`): %w", c.base, err)
+		return fmt.Errorf("cannot reach flockd at %s (is it running? try `flock up` or `flockd --standalone`): %w", c.base, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusUnauthorized {
 		return fmt.Errorf("daemon rejected the auth token (%s).\n"+
 			"  The token is per-install and lives in the daemon's data dir.\n"+
-			"  If hived runs with a custom data dir, point hive at the same one:\n"+
-			"    hive --data-dir %s <command>   (or set HIVED_DATA_DIR / HIVE_TOKEN)\n"+
-			"  Print the current token with: hive token", c.tokenSource, c.dataDir)
+			"  If flockd runs with a custom data dir, point flock at the same one:\n"+
+			"    flock --data-dir %s <command>   (or set FLOCKD_DATA_DIR / FLOCK_TOKEN)\n"+
+			"  Print the current token with: flock token", c.tokenSource, c.dataDir)
 	}
 	if resp.StatusCode >= 400 {
 		var e struct {

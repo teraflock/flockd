@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	rt "github.com/hivegrid/hived/internal/runtime"
+	rt "github.com/teraflock/flockd/internal/runtime"
 )
 
 // fakeLlamaServer emulates the subset of llama-server's OpenAI-compatible

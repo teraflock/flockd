@@ -1,11 +1,11 @@
-# hived configuration
+# flockd configuration
 
-`hived` resolves configuration in this order (later wins):
+`flockd` resolves configuration in this order (later wins):
 
 1. built-in defaults
 2. TOML file — `--config <path>`, or `<data_dir>/config.toml` if it exists
-3. environment variables — prefix `HIVED_`, `__` (double underscore) as the
-   section separator: `HIVED_LOCAL_API__LISTEN=127.0.0.1:8080` sets
+3. environment variables — prefix `FLOCKD_`, `__` (double underscore) as the
+   section separator: `FLOCKD_LOCAL_API__LISTEN=127.0.0.1:8080` sets
    `local_api.listen`
 4. a handful of CLI flags (`--standalone`, `--runtime`, `--listen`,
    `--data-dir`, `--log-level`) override everything for convenience
@@ -14,7 +14,7 @@ Every knob, with defaults:
 
 ```toml
 # Where keys, certs, tokens, models and runtimes live. 0700.
-data_dir = "~/.hivegrid"
+data_dir = "~/.teraflock"
 
 [log]
 level  = "info"   # debug | info | warn | error
@@ -57,7 +57,7 @@ max_ram_mb       = 0    # 0 = auto
 max_concurrent   = 2    # parallel slots
 
 [models]
-manifest_path = ""              # local catalog file (hivegrid/models YAML/JSON)
+manifest_path = ""              # local catalog file (teraflock/models YAML/JSON)
 manifest_url  = ""              # or a catalog URL; one of the two is required for llamacpp
 default       = "mock-8b-instruct"  # model served at startup
 max_disk_mb   = 61440           # model-cache budget; LRU eviction below it
@@ -65,7 +65,7 @@ pin           = []              # model ids exempt from eviction
 exclude       = []              # model ids never assigned to this node
 
 [tunnel]
-coordinator_addr     = "tunnel.hivegrid.dev:443"
+coordinator_addr     = "tunnel.teraflock.dev:443"
 standalone           = false    # run the in-process fake coordinator (Phase 0)
 heartbeat_interval   = "5s"     # coordinator may override via HelloAck
 reconnect_min        = "1s"     # jittered exponential backoff bounds
@@ -76,13 +76,13 @@ insecure             = false    # dev only: plaintext gRPC to the coordinator
                                 # plaintext until mTLS termination lands)
 
 [enroll]
-login_url = "https://hivegrid.dev/claim"   # browser page opened by `hive login`
+login_url = "https://teraflock.dev/claim"   # browser page opened by `flock login`
 ```
 
 ## Notes
 
 - **Durations** use Go syntax: `"90s"`, `"2m"`, `"1h30m"`.
-- **Limits set at runtime** (`hive limits`, `PUT /api/v1/limits`, web
+- **Limits set at runtime** (`flock limits`, `PUT /api/v1/limits`, web
   dashboard) apply live to the governor but are *not yet persisted* back to
   `config.toml`; they reset on daemon restart. TODO(persistence).
 - **Secrets on disk** (`node.key`, `local_api_token`, `node_creds.pem`) are
@@ -92,10 +92,10 @@ login_url = "https://hivegrid.dev/claim"   # browser page opened by `hive login`
 
 ```json
 {
-  "build_id": "llamacpp-b4458-hive1",
+  "build_id": "llamacpp-b4458-flock1",
   "builds": [
     {"os": "darwin", "arch": "arm64", "accel": "metal",
-     "url": "https://artifacts.hivegrid.dev/llamacpp/b4458/darwin-arm64-metal/llama-server",
+     "url": "https://artifacts.teraflock.dev/llamacpp/b4458/darwin-arm64-metal/llama-server",
      "sha256": "…", "size_bytes": 4300000}
   ]
 }

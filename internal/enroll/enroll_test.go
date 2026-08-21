@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hivegrid/hived/internal/tunnel/fakecoord"
-	tunnelv1 "github.com/hivegrid/proto/gen/go/hive/tunnel/v1"
-	typesv1 "github.com/hivegrid/proto/gen/go/hive/types/v1"
+	"github.com/teraflock/flockd/internal/tunnel/fakecoord"
+	tunnelv1 "github.com/teraflock/proto/gen/go/flock/tunnel/v1"
+	typesv1 "github.com/teraflock/proto/gen/go/flock/types/v1"
 )
 
 func TestIdentityPersistence(t *testing.T) {
@@ -103,7 +103,7 @@ func TestEnrollAgainstFakeCoordinator(t *testing.T) {
 
 func TestLoginFlowCallback(t *testing.T) {
 	f := &LoginFlow{
-		LoginURL: "https://hivegrid.dev/claim",
+		LoginURL: "https://teraflock.dev/claim",
 		OpenBrowser: func(u string) error {
 			// Simulate the human+webapp: hit the loopback callback with the
 			// same state and a claim code.
@@ -139,7 +139,7 @@ func TestLoginFlowCallback(t *testing.T) {
 
 func TestLoginFlowRejectsStateMismatch(t *testing.T) {
 	f := &LoginFlow{
-		LoginURL: "https://hivegrid.dev/claim",
+		LoginURL: "https://teraflock.dev/claim",
 		OpenBrowser: func(u string) error {
 			go func() {
 				parsed := mustParse(t, u)

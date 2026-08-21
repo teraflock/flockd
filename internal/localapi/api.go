@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/hivegrid/hived/internal/governor"
-	"github.com/hivegrid/hived/internal/telemetry"
+	"github.com/teraflock/flockd/internal/governor"
+	"github.com/teraflock/flockd/internal/telemetry"
 )
 
 // StatusResponse is GET /api/v1/status (also streamed on /api/v1/events).

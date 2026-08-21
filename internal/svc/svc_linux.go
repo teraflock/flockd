@@ -11,12 +11,12 @@ import (
 	"strings"
 )
 
-const unitName = "hived.service"
+const unitName = "flockd.service"
 
 func newPlatformManager() Manager { return &systemdManager{} }
 
 // systemdManager manages a user-level systemd unit
-// (~/.config/systemd/user/hived.service).
+// (~/.config/systemd/user/flockd.service).
 type systemdManager struct{}
 
 func (m *systemdManager) unitPath() (string, error) {
@@ -29,7 +29,7 @@ func (m *systemdManager) unitPath() (string, error) {
 
 func renderUnit(binPath string, args []string) string {
 	return fmt.Sprintf(`[Unit]
-Description=HiveGrid node daemon
+Description=Teraflock node daemon
 After=network-online.target
 Wants=network-online.target
 

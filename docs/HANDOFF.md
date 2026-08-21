@@ -6,7 +6,7 @@ path.
 
 ## Fully implemented and tested
 
-- **Config** (`internal/config`): koanf defaults ← TOML ← `HIVED_*` env;
+- **Config** (`internal/config`): koanf defaults ← TOML ← `FLOCKD_*` env;
   validation; every knob documented in `docs/config.md`.
 - **Runtime interface** (`internal/runtime`): exactly SPEC §A1.3.
   - **mock runtime**: deterministic by seed, configurable tok/s,
@@ -35,7 +35,7 @@ path.
   over bufconn incl. corrupted-signature rejection and reconnect-after-kick.
 - **Fake coordinator** (`internal/tunnel/fakecoord`): real gRPC service
   over bufconn, Enroll with actual CA/CSR signing, driver API for tests,
-  session kick. Runs inside `hived --standalone`.
+  session kick. Runs inside `flockd --standalone`.
 - **Enrollment** (`internal/enroll`): Ed25519 identity (0600), CSR, Enroll
   RPC + credential persistence + pinned coordinator key, mTLS client
   config, PKCE-style loopback login flow (state + S256 challenge) with
@@ -47,14 +47,14 @@ path.
   OpenAI error shapes; 503 on yield. 12-test suite.
 - **Telemetry**: rolling 1-minute tok/s window, counters, heartbeat
   assembly.
-- **CLI/TUI** (`cmd/hive`): up/down/status/login/models(list|pin|rm)/
+- **CLI/TUI** (`cmd/flock`): up/down/status/login/models(list|pin|rm)/
   limits/earnings/redeem/dashboard(TUI + --web)/version/uninstall(--purge).
   Bubbletea dashboard with sparkline, earnings ticker, model slots.
 - **Web dashboard** (`web/`): React+TS+Tailwind(4)+TanStack Query source,
   built successfully; `dist/` committed and embedded via `go:embed`.
 - **svc**: launchd LaunchAgent (real, plist render tested) and systemd
   user unit (real) management.
-- **Daemon** (`cmd/hived`): full wiring, graceful shutdown, structured
+- **Daemon** (`cmd/flockd`): full wiring, graceful shutdown, structured
   logging with in-memory ring for `/api/v1/logs`.
 
 ## Stubbed (compiles, documented, returns useful errors)
@@ -70,10 +70,10 @@ path.
 - **ModelAssignment handling**: dispatch plumbing exists; the handler
   currently logs (download+load+evict loop needs the llamacpp runtime on a
   real node — wire `models.Manager` + `engine.Register` in
-  `cmd/hived/startTunnel`).
+  `cmd/flockd/startTunnel`).
 - **ConfigUpdate** from coordinator: logged, not applied mid-session.
-- **Enroll-without-restart**: `hive login` stores the claim code and the
-  daemon consumes it on next start (`hive down && hive up`). Triggering
+- **Enroll-without-restart**: `flock login` stores the claim code and the
+  daemon consumes it on next start (`flock down && flock up`). Triggering
   enrollment through the running daemon's local API is still TODO.
 - **Cert rotation**: `enroll.RotateIfNeeded` scaffolded (re-enrolls within
   7 days of expiry); needs the real coordinator's rotation semantics and a
@@ -83,7 +83,7 @@ path.
 
 1. **Real llama-server E2E**: stand up the `runtimes/` build CI, publish an
    artifact manifest, and add an opt-in integration test
-   (`HIVED_TEST_LLAMA_SERVER_PATH=… go test -tags realllama`).
+   (`FLOCKD_TEST_LLAMA_SERVER_PATH=… go test -tags realllama`).
 2. **Phase 1 tunnel remainder**: QUIC `Dialer` (quic-go); cert rotation call
    site; ModelAssignment → download/load/evict. (Enrollment against the real
    coordinator now works — see below.)
@@ -114,13 +114,13 @@ path.
 A real daemon now joins a real coordinator end to end:
 
 ```sh
-hive login --claim-code <code>     # or the browser PKCE flow
-HIVED_TUNNEL__COORDINATOR_ADDR=coordinator:9090 hived
+flock login --claim-code <code>     # or the browser PKCE flow
+FLOCKD_TUNNEL__COORDINATOR_ADDR=coordinator:9090 flockd
 ```
 
 - `enroll.{Save,Read,Clear}ClaimCode` own the `<data_dir>/claim_code`
-  handoff between the `hive` and `hived` processes.
-- `ensureEnrolled` (cmd/hived) exchanges the code for credentials over a
+  handoff between the `flock` and `flockd` processes.
+- `ensureEnrolled` (cmd/flockd) exchanges the code for credentials over a
   server-authenticated bootstrap dial, persists them, and clears the spent
   code. A failed enrollment keeps the code (an unreachable coordinator must
   not cost the operator their code).
@@ -129,11 +129,11 @@ HIVED_TUNNEL__COORDINATOR_ADDR=coordinator:9090 hived
   and every session was rejected with "unknown node". `fakecoord` now
   enforces the same rule so the test suite catches it
   (`TestSessionRejectsUnenrolledNodeID`).
-- `hive` resolves `data_dir` through the same config chain as `hived`, so a
+- `flock` resolves `data_dir` through the same config chain as `flockd`, so a
   moved data dir cannot silently break the handoff.
 - `--standalone` enrolls into `<data_dir>/standalone/` so it can never
   overwrite a real mesh identity.
-- `tunnel.insecure = true` (config or `HIVED_TUNNEL__INSECURE`) dials the
+- `tunnel.insecure = true` (config or `FLOCKD_TUNNEL__INSECURE`) dials the
   coordinator over plaintext gRPC — needed against the dev coordinator until
   mTLS termination lands, never for real deployments.
 - The daemon reports `runtime_build_id` in its CapabilityProfile
@@ -168,17 +168,17 @@ leading space produced an "invalid token" indistinguishable from a wrong
 one. `/api/v1/events` additionally accepts `?token=` because EventSource
 cannot set headers; every other route rejects query tokens.
 
-`hive token` prints the token (bare on stdout, hint on stderr, so
-`| pbcopy` works). The CLI resolves it from `--token`, then `$HIVE_TOKEN`,
+`flock token` prints the token (bare on stdout, hint on stderr, so
+`| pbcopy` works). The CLI resolves it from `--token`, then `$FLOCK_TOKEN`,
 then `<data_dir>/local_api_token`, and a 401 names the path it searched —
-a data-dir mismatch between `hive` and `hived` is the usual cause.
+a data-dir mismatch between `flock` and `flockd` is the usual cause.
 
 ## Deviations from SPEC (deliberate, Phase 0)
 
 - Tunnel transport is gRPC over H2/TLS behind the `Dialer` seam; QUIC is
   documented as the production transport but not implemented (SPEC allows
   the fallback; quic-go adds a lot of surface for zero Phase 0 value).
-- `hive up` installs a **user-level** service (LaunchAgent / systemd
+- `flock up` installs a **user-level** service (LaunchAgent / systemd
   --user), not a system daemon — no root, loopback only, simpler uninstall.
 - Earnings numbers in standalone mode are explicitly labelled simulated
   (55 µcredits/completion token ≈ SPEC §7 "small" payout class).

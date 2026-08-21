@@ -18,19 +18,19 @@ func newPlatformManager() Manager { return &scmManager{} }
 type scmManager struct{}
 
 func (scmManager) Install(context.Context, string, []string) error {
-	return fmt.Errorf("%w: run `hived --standalone` in a terminal, or create a service manually with `sc.exe create hived binPath= \"C:\\path\\to\\hived.exe\"`", ErrUnsupported)
+	return fmt.Errorf("%w: run `flockd --standalone` in a terminal, or create a service manually with `sc.exe create flockd binPath= \"C:\\path\\to\\flockd.exe\"`", ErrUnsupported)
 }
 
 func (scmManager) Uninstall(context.Context) error {
-	return fmt.Errorf("%w: remove with `sc.exe delete hived`", ErrUnsupported)
+	return fmt.Errorf("%w: remove with `sc.exe delete flockd`", ErrUnsupported)
 }
 
 func (scmManager) Start(context.Context) error {
-	return fmt.Errorf("%w: start with `sc.exe start hived`", ErrUnsupported)
+	return fmt.Errorf("%w: start with `sc.exe start flockd`", ErrUnsupported)
 }
 
 func (scmManager) Stop(context.Context) error {
-	return fmt.Errorf("%w: stop with `sc.exe stop hived`", ErrUnsupported)
+	return fmt.Errorf("%w: stop with `sc.exe stop flockd`", ErrUnsupported)
 }
 
 func (scmManager) Status(context.Context) (Status, error) {

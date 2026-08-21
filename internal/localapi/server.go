@@ -20,11 +20,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hivegrid/hived/internal/engine"
-	"github.com/hivegrid/hived/internal/governor"
-	"github.com/hivegrid/hived/internal/logging"
-	"github.com/hivegrid/hived/internal/models"
-	typesv1 "github.com/hivegrid/proto/gen/go/hive/types/v1"
+	"github.com/teraflock/flockd/internal/engine"
+	"github.com/teraflock/flockd/internal/governor"
+	"github.com/teraflock/flockd/internal/logging"
+	"github.com/teraflock/flockd/internal/models"
+	typesv1 "github.com/teraflock/proto/gen/go/flock/types/v1"
 )
 
 // Deps wires the server to the daemon internals.
@@ -188,7 +188,7 @@ func (s *Server) authAPIOpts(next http.HandlerFunc, allowQuery bool) http.Handle
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !s.checkTokenOpts(r, allowQuery) {
 			writeOpenAIError(w, http.StatusUnauthorized, "invalid_request_error",
-				"missing or invalid bearer token (run `hive token` to print it, or read local_api_token in the daemon's data dir)")
+				"missing or invalid bearer token (run `flock token` to print it, or read local_api_token in the daemon's data dir)")
 			return
 		}
 		next(w, r)
@@ -228,7 +228,7 @@ func LoadOrCreateToken(dataDir string) (string, error) {
 	if _, err := rand.Read(buf); err != nil {
 		return "", fmt.Errorf("localapi: entropy: %w", err)
 	}
-	tok := "hive_" + hex.EncodeToString(buf)
+	tok := "flock_" + hex.EncodeToString(buf)
 	if err := os.WriteFile(path, []byte(tok+"\n"), 0o600); err != nil {
 		return "", fmt.Errorf("localapi: write token: %w", err)
 	}

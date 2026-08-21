@@ -11,7 +11,7 @@ import (
 	"strings"
 )
 
-const launchdLabel = "dev.hivegrid.hived"
+const launchdLabel = "dev.teraflock.flockd"
 
 func newPlatformManager() Manager { return &launchdManager{} }
 

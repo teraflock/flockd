@@ -1,5 +1,5 @@
 // Package models manages the local model cache: catalog manifests
-// (hivegrid/models format), resumable GGUF downloads with SHA256
+// (teraflock/models format), resumable GGUF downloads with SHA256
 // verification, and LRU eviction under the operator's disk budget.
 package models
 
@@ -13,11 +13,11 @@ import (
 	"strings"
 	"time"
 
-	typesv1 "github.com/hivegrid/proto/gen/go/hive/types/v1"
+	typesv1 "github.com/teraflock/proto/gen/go/flock/types/v1"
 	"gopkg.in/yaml.v3"
 )
 
-// Catalog is the manifest format of the hivegrid/models repo
+// Catalog is the manifest format of the teraflock/models repo
 // (catalog/*.yaml). JSON is accepted too.
 type Catalog struct {
 	Models []CatalogModel `yaml:"models" json:"models"`

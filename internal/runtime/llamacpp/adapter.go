@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	rt "github.com/hivegrid/hived/internal/runtime"
+	rt "github.com/teraflock/flockd/internal/runtime"
 )
 
 // Adapter implements runtime.Runtime by supervising llama-server and
@@ -331,5 +331,5 @@ func (i *instance) Shutdown(ctx context.Context) error {
 }
 
 // RuntimeBuildID implements runtime.BuildIdentified: the pinned llama.cpp
-// build this instance is supervising, as published by hivegrid/runtimes.
+// build this instance is supervising, as published by teraflock/runtimes.
 func (i *instance) RuntimeBuildID() string { return i.buildID }

@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	typesv1 "github.com/hivegrid/proto/gen/go/hive/types/v1"
+	typesv1 "github.com/teraflock/proto/gen/go/flock/types/v1"
 )
 
 func TestLocalArtifactPath(t *testing.T) {

@@ -1,4 +1,4 @@
-// Command hive is the operator CLI/TUI for the HiveGrid node daemon. All
+// Command flock is the operator CLI/TUI for the Teraflock node daemon. All
 // commands are clients of the daemon's local API on localhost:7777.
 package main
 
@@ -12,9 +12,9 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/hivegrid/hived/internal/config"
-	"github.com/hivegrid/hived/internal/enroll"
-	"github.com/hivegrid/hived/internal/svc"
+	"github.com/teraflock/flockd/internal/config"
+	"github.com/teraflock/flockd/internal/enroll"
+	"github.com/teraflock/flockd/internal/svc"
 	"github.com/spf13/cobra"
 )
 
@@ -26,8 +26,8 @@ var (
 	flagToken   string
 )
 
-// dataDir resolves the daemon's data directory the same way hived does
-// (defaults <- TOML <- HIVED_* env), so that files exchanged between the two
+// dataDir resolves the daemon's data directory the same way flockd does
+// (defaults <- TOML <- FLOCKD_* env), so that files exchanged between the two
 // processes — the claim code, the local API token — land where the daemon
 // actually looks. Falling back to the built-in default here would silently
 // break enrollment for anyone who moved data_dir.
@@ -55,14 +55,14 @@ var (
 
 func main() {
 	root := &cobra.Command{
-		Use:           "hive",
-		Short:         "HiveGrid node CLI — earn credits serving open-weight LLM inference on idle hardware",
+		Use:           "flock",
+		Short:         "Teraflock node CLI — earn credits serving open-weight LLM inference on idle hardware",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
 	root.PersistentFlags().StringVar(&flagAPI, "api", "http://127.0.0.1:7777", "daemon local API base URL")
 	root.PersistentFlags().StringVar(&flagDataDir, "data-dir", "", "daemon data directory (for the auth token)")
-	root.PersistentFlags().StringVar(&flagToken, "token", "", "local API bearer token (default: $HIVE_TOKEN, else <data-dir>/local_api_token)")
+	root.PersistentFlags().StringVar(&flagToken, "token", "", "local API bearer token (default: $FLOCK_TOKEN, else <data-dir>/local_api_token)")
 
 	root.AddCommand(
 		cmdUp(), cmdDown(), cmdStatus(), cmdLogin(), cmdModels(), cmdLimits(),
@@ -75,27 +75,27 @@ func main() {
 	}
 }
 
-// findHived locates the daemon binary (next to hive, then PATH).
-func findHived() (string, error) {
+// findFlockd locates the daemon binary (next to flock, then PATH).
+func findFlockd() (string, error) {
 	self, err := os.Executable()
 	if err == nil {
-		cand := filepath.Join(filepath.Dir(self), "hived")
+		cand := filepath.Join(filepath.Dir(self), "flockd")
 		if _, err := os.Stat(cand); err == nil {
 			return cand, nil
 		}
 	}
-	return exec.LookPath("hived")
+	return exec.LookPath("flockd")
 }
 
 func cmdUp() *cobra.Command {
 	var standalone bool
 	c := &cobra.Command{
 		Use:   "up",
-		Short: "Install and start the hived service (launchd/systemd)",
+		Short: "Install and start the flockd service (launchd/systemd)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			bin, err := findHived()
+			bin, err := findFlockd()
 			if err != nil {
-				return fmt.Errorf("hived binary not found (install it next to hive or on PATH): %w", err)
+				return fmt.Errorf("flockd binary not found (install it next to flock or on PATH): %w", err)
 			}
 			daemonArgs := []string{}
 			if standalone {
@@ -109,8 +109,8 @@ func cmdUp() *cobra.Command {
 			if err := m.Start(ctx); err != nil {
 				return err
 			}
-			fmt.Println(styleOK.Render("✓"), "hived service installed and started")
-			fmt.Println(styleDim.Render("  check it with `hive status` or `hive dashboard`"))
+			fmt.Println(styleOK.Render("✓"), "flockd service installed and started")
+			fmt.Println(styleDim.Render("  check it with `flock status` or `flock dashboard`"))
 			return nil
 		},
 	}
@@ -121,12 +121,12 @@ func cmdUp() *cobra.Command {
 func cmdDown() *cobra.Command {
 	return &cobra.Command{
 		Use:   "down",
-		Short: "Stop the hived service",
+		Short: "Stop the flockd service",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := svc.NewManager().Stop(cmd.Context()); err != nil {
 				return err
 			}
-			fmt.Println(styleOK.Render("✓"), "hived stopped")
+			fmt.Println(styleOK.Render("✓"), "flockd stopped")
 			return nil
 		},
 	}
@@ -149,7 +149,7 @@ func cmdStatus() *cobra.Command {
 			if st.State == "serving" {
 				stateStyle = styleOK
 			}
-			fmt.Println(styleTitle.Render("⬡ HiveGrid node"), styleDim.Render(st.NodeID))
+			fmt.Println(styleTitle.Render("⬡ Teraflock node"), styleDim.Render(st.NodeID))
 			fmt.Printf("  state      %s\n", stateStyle.Render(st.State))
 			fmt.Printf("  version    %s%s\n", st.Version, map[bool]string{true: " (standalone)", false: ""}[st.Standalone])
 			fmt.Printf("  uptime     %s\n", (time.Duration(st.UptimeSeconds) * time.Second).String())
@@ -197,13 +197,13 @@ func cmdLogin() *cobra.Command {
 				}
 				claimCode = res.ClaimCode
 			}
-			// The daemon consumes this on its next start (`hive`/`hived` are
+			// The daemon consumes this on its next start (`flock`/`flockd` are
 			// separate processes, so the data dir is the handoff).
 			if err := enroll.SaveClaimCode(dataDir(), claimCode); err != nil {
 				return err
 			}
 			fmt.Println(styleOK.Render("✓"), "claim code stored")
-			fmt.Println(styleDim.Render("  restart the daemon (`hive down && hive up`) to complete enrollment"))
+			fmt.Println(styleDim.Render("  restart the daemon (`flock down && flock up`) to complete enrollment"))
 			return nil
 		},
 	}
@@ -383,7 +383,7 @@ func cmdRedeem() *cobra.Command {
 			return nil
 		},
 	}
-	c.Flags().StringVar(&redeemURL, "url", "https://hivegrid.dev/redeem", "payout page URL")
+	c.Flags().StringVar(&redeemURL, "url", "https://teraflock.dev/redeem", "payout page URL")
 	return c
 }
 
@@ -398,10 +398,10 @@ func cmdToken() *cobra.Command {
 			path := filepath.Join(dir, "local_api_token")
 			raw, err := os.ReadFile(path)
 			if err != nil {
-				return fmt.Errorf("no token at %s — is this the data dir hived uses? "+
-					"Override with --data-dir or HIVED_DATA_DIR", path)
+				return fmt.Errorf("no token at %s — is this the data dir flockd uses? "+
+					"Override with --data-dir or FLOCKD_DATA_DIR", path)
 			}
-			// Bare token on stdout so `hive token | pbcopy` works; the hint
+			// Bare token on stdout so `flock token | pbcopy` works; the hint
 			// goes to stderr so it never pollutes a pipe.
 			fmt.Fprintln(os.Stderr, styleDim.Render("token from "+path+" — paste into http://127.0.0.1:7777"))
 			fmt.Println(strings.TrimSpace(string(raw)))
@@ -415,7 +415,7 @@ func cmdVersion() *cobra.Command {
 		Use:   "version",
 		Short: "Print version",
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Println("hive", version)
+			fmt.Println("flock", version)
 		},
 	}
 }
@@ -424,12 +424,12 @@ func cmdUninstall() *cobra.Command {
 	var purge bool
 	c := &cobra.Command{
 		Use:   "uninstall",
-		Short: "Stop and remove the hived service (one-command clean uninstall)",
+		Short: "Stop and remove the flockd service (one-command clean uninstall)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := svc.NewManager().Uninstall(cmd.Context()); err != nil {
 				return err
 			}
-			fmt.Println(styleOK.Render("✓"), "hived service removed")
+			fmt.Println(styleOK.Render("✓"), "flockd service removed")
 			if purge {
 				dd := dataDir()
 				if err := os.RemoveAll(dd); err != nil {

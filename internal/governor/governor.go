@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hivegrid/hived/internal/clock"
-	typesv1 "github.com/hivegrid/proto/gen/go/hive/types/v1"
+	"github.com/teraflock/flockd/internal/clock"
+	typesv1 "github.com/teraflock/proto/gen/go/flock/types/v1"
 )
 
 // State is the governor's serving decision.
@@ -157,7 +157,7 @@ func (g *Governor) Run(ctx context.Context) {
 	}
 }
 
-// SetPolicy swaps the policy at runtime (`hive limits` / PUT /api/v1/limits).
+// SetPolicy swaps the policy at runtime (`flock limits` / PUT /api/v1/limits).
 // The next evaluate() applies it.
 func (g *Governor) SetPolicy(p Policy) {
 	if p.YieldGrace <= 0 {

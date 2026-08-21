@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hivegrid/hived/internal/governor"
-	rt "github.com/hivegrid/hived/internal/runtime"
-	"github.com/hivegrid/hived/internal/tunnel"
-	"github.com/hivegrid/hived/internal/tunnel/fakecoord"
-	tunnelv1 "github.com/hivegrid/proto/gen/go/hive/tunnel/v1"
-	typesv1 "github.com/hivegrid/proto/gen/go/hive/types/v1"
+	"github.com/teraflock/flockd/internal/governor"
+	rt "github.com/teraflock/flockd/internal/runtime"
+	"github.com/teraflock/flockd/internal/tunnel"
+	"github.com/teraflock/flockd/internal/tunnel/fakecoord"
+	tunnelv1 "github.com/teraflock/proto/gen/go/flock/tunnel/v1"
+	typesv1 "github.com/teraflock/proto/gen/go/flock/types/v1"
 )
 
 func quietLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
@@ -364,7 +364,7 @@ func TestSignatureRoundTrip(t *testing.T) {
 }
 
 // TestSessionRejectsUnenrolledNodeID pins the contract that broke the first
-// live hived↔coordinator mesh: a session must announce the node ID the
+// live flockd↔coordinator mesh: a session must announce the node ID the
 // coordinator assigned at enrollment, not the node's key fingerprint. The
 // real coordinator rejects anything else with "unknown node", so the fake
 // does too — otherwise this only surfaces against a deployed control plane.

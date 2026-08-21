@@ -13,13 +13,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hivegrid/hived/internal/engine"
-	"github.com/hivegrid/hived/internal/governor"
-	rt "github.com/hivegrid/hived/internal/runtime"
-	typesv1 "github.com/hivegrid/proto/gen/go/hive/types/v1"
+	"github.com/teraflock/flockd/internal/engine"
+	"github.com/teraflock/flockd/internal/governor"
+	rt "github.com/teraflock/flockd/internal/runtime"
+	typesv1 "github.com/teraflock/proto/gen/go/flock/types/v1"
 )
 
-const testToken = "hive_testtoken"
+const testToken = "flock_testtoken"
 
 func quietLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
@@ -382,7 +382,7 @@ func TestTokenFileCreation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(tok1, "hive_") {
+	if !strings.HasPrefix(tok1, "flock_") {
 		t.Errorf("token = %q", tok1)
 	}
 	tok2, err := LoadOrCreateToken(dir)
@@ -426,7 +426,7 @@ func TestBearerTokenStillRejectsWrongToken(t *testing.T) {
 	for _, header := range []string{
 		"",
 		"Bearer ",
-		"Bearer hive_wrong",
+		"Bearer flock_wrong",
 		"Bearer " + testToken + "x",
 		"Basic " + testToken, // wrong scheme
 		testToken,            // no scheme

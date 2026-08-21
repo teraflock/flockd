@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	tunnelv1 "github.com/hivegrid/proto/gen/go/hive/tunnel/v1"
+	tunnelv1 "github.com/teraflock/proto/gen/go/flock/tunnel/v1"
 	"google.golang.org/protobuf/proto"
 )
 

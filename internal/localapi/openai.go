@@ -9,9 +9,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/hivegrid/hived/internal/engine"
-	"github.com/hivegrid/hived/internal/governor"
-	rt "github.com/hivegrid/hived/internal/runtime"
+	"github.com/teraflock/flockd/internal/engine"
+	"github.com/teraflock/flockd/internal/governor"
+	rt "github.com/teraflock/flockd/internal/runtime"
 )
 
 // ---- OpenAI wire shapes (subset) ----
@@ -148,7 +148,7 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 		Data   []model `json:"data"`
 	}{Object: "list"}
 	for _, m := range s.deps.Engine.Models() {
-		out.Data = append(out.Data, model{ID: m.Spec.ID, Object: "model", Created: s.start.Unix(), OwnedBy: "hivegrid"})
+		out.Data = append(out.Data, model{ID: m.Spec.ID, Object: "model", Created: s.start.Unix(), OwnedBy: "teraflock"})
 	}
 	writeJSON(w, http.StatusOK, out)
 }

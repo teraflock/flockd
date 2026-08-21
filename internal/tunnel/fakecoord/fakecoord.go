@@ -1,7 +1,7 @@
 // Package fakecoord is an in-process fake coordinator implementing
-// hive.tunnel.v1.TunnelService over bufconn (SPEC §A2.2 key seam). It lets
+// flock.tunnel.v1.TunnelService over bufconn (SPEC §A2.2 key seam). It lets
 // the whole daemon — enrollment, session, heartbeats, dispatch, challenges —
-// run without a control plane. `hived --standalone` uses it in Phase 0, and
+// run without a control plane. `flockd --standalone` uses it in Phase 0, and
 // it doubles as the test harness for the tunnel client.
 package fakecoord
 
@@ -18,9 +18,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hivegrid/hived/internal/tunnel"
-	tunnelv1 "github.com/hivegrid/proto/gen/go/hive/tunnel/v1"
-	typesv1 "github.com/hivegrid/proto/gen/go/hive/types/v1"
+	"github.com/teraflock/flockd/internal/tunnel"
+	tunnelv1 "github.com/teraflock/proto/gen/go/flock/tunnel/v1"
+	typesv1 "github.com/teraflock/proto/gen/go/flock/types/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -475,7 +475,7 @@ func newCA() (*x509.Certificate, ed25519.PrivateKey, error) {
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "HiveGrid Fake Coordinator CA"},
+		Subject:               pkix.Name{CommonName: "Teraflock Fake Coordinator CA"},
 		NotBefore:             time.Now().Add(-time.Hour),
 		NotAfter:              time.Now().Add(24 * 365 * time.Hour),
 		IsCA:                  true,

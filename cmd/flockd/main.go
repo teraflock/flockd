@@ -1,4 +1,4 @@
-// Command hived is the HiveGrid node daemon: hardware detection, model
+// Command flockd is the Teraflock node daemon: hardware detection, model
 // management, a supervised llama.cpp runtime, resource governance, the
 // loopback OpenAI-compatible API, and the coordinator tunnel (in-process
 // fake coordinator in --standalone / Phase 0 mode).
@@ -17,22 +17,22 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/hivegrid/hived/internal/config"
-	"github.com/hivegrid/hived/internal/engine"
-	"github.com/hivegrid/hived/internal/enroll"
-	"github.com/hivegrid/hived/internal/governor"
-	"github.com/hivegrid/hived/internal/hardware"
-	"github.com/hivegrid/hived/internal/localapi"
-	"github.com/hivegrid/hived/internal/logging"
-	"github.com/hivegrid/hived/internal/models"
-	rt "github.com/hivegrid/hived/internal/runtime"
-	"github.com/hivegrid/hived/internal/runtime/llamacpp"
-	"github.com/hivegrid/hived/internal/telemetry"
-	"github.com/hivegrid/hived/internal/tunnel"
-	"github.com/hivegrid/hived/internal/tunnel/fakecoord"
-	"github.com/hivegrid/hived/web"
-	tunnelv1 "github.com/hivegrid/proto/gen/go/hive/tunnel/v1"
-	typesv1 "github.com/hivegrid/proto/gen/go/hive/types/v1"
+	"github.com/teraflock/flockd/internal/config"
+	"github.com/teraflock/flockd/internal/engine"
+	"github.com/teraflock/flockd/internal/enroll"
+	"github.com/teraflock/flockd/internal/governor"
+	"github.com/teraflock/flockd/internal/hardware"
+	"github.com/teraflock/flockd/internal/localapi"
+	"github.com/teraflock/flockd/internal/logging"
+	"github.com/teraflock/flockd/internal/models"
+	rt "github.com/teraflock/flockd/internal/runtime"
+	"github.com/teraflock/flockd/internal/runtime/llamacpp"
+	"github.com/teraflock/flockd/internal/telemetry"
+	"github.com/teraflock/flockd/internal/tunnel"
+	"github.com/teraflock/flockd/internal/tunnel/fakecoord"
+	"github.com/teraflock/flockd/web"
+	tunnelv1 "github.com/teraflock/proto/gen/go/flock/tunnel/v1"
+	typesv1 "github.com/teraflock/proto/gen/go/flock/types/v1"
 )
 
 // version is stamped by GoReleaser via -ldflags.
@@ -40,7 +40,7 @@ var version = "dev"
 
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, "hived:", err)
+		fmt.Fprintln(os.Stderr, "flockd:", err)
 		os.Exit(1)
 	}
 }
@@ -58,7 +58,7 @@ func run() error {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Println("hived", version)
+		fmt.Println("flockd", version)
 		return nil
 	}
 
@@ -203,7 +203,7 @@ func run() error {
 			log.Info("tunnel client started", "coordinator", cfg.Tunnel.CoordinatorAddr, "node_id", creds.NodeID)
 			nodeID = creds.NodeID
 		default:
-			log.Warn("node not enrolled: serving locally only", "hint", "run `hive login` to join the mesh, or start with --standalone")
+			log.Warn("node not enrolled: serving locally only", "hint", "run `flock login` to join the mesh, or start with --standalone")
 		}
 	}
 
@@ -227,7 +227,7 @@ func run() error {
 		RequireAuthV1: cfg.LocalAPI.RequireAuthV1,
 		Token:         token,
 	})
-	log.Info("hived ready",
+	log.Info("flockd ready",
 		"local_api", "http://"+cfg.LocalAPI.Listen,
 		"dashboard", "http://"+cfg.LocalAPI.Listen+"/",
 		"openai_base_url", "http://"+cfg.LocalAPI.Listen+"/v1")
@@ -381,7 +381,7 @@ func startTunnel(ctx context.Context, cfg config.Config, dialer tunnel.Dialer, a
 
 // standaloneEnroll enrolls against the in-process fake coordinator. Its
 // credentials live in a `standalone/` subdirectory so that running
-// `hived --standalone` on a machine that has really joined the mesh cannot
+// `flockd --standalone` on a machine that has really joined the mesh cannot
 // overwrite that node's mesh identity. The fake is ephemeral, so this
 // re-enrolls on every start.
 func standaloneEnroll(ctx context.Context, cfg config.Config, dialer tunnel.Dialer, addr string, identity *enroll.Identity, hw *typesv1.CapabilityProfile) (*enroll.Credentials, error) {
@@ -399,7 +399,7 @@ func standaloneEnroll(ctx context.Context, cfg config.Config, dialer tunnel.Dial
 }
 
 // ensureEnrolled returns the node's mesh credentials, performing enrollment
-// first when `hive login` has left a claim code behind. It returns (nil, nil)
+// first when `flock login` has left a claim code behind. It returns (nil, nil)
 // when the node has neither credentials nor a pending claim code — that is
 // the ordinary "serving locally only" state, not an error.
 func ensureEnrolled(ctx context.Context, cfg config.Config, identity *enroll.Identity, hw *typesv1.CapabilityProfile, log *slog.Logger) (*enroll.Credentials, error) {

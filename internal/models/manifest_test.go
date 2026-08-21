@@ -19,7 +19,7 @@ models:
     min_vram_mb: 6144
     min_ram_mb: 8192
     license: llama3.1
-    artifact_url: https://models.hivegrid.dev/llama-3.1-8b-q4.gguf
+    artifact_url: https://models.teraflock.dev/llama-3.1-8b-q4.gguf
     size_bytes: 4920000000
     payout_class: small
     context_length: 8192

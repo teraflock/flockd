@@ -2,16 +2,16 @@
 # TODO(keys) markers until release keys/certs exist.
 version: 2
 
-project_name: hived
+project_name: flockd
 
 before:
   hooks:
     - go mod tidy
 
 builds:
-  - id: hived
-    main: ./cmd/hived
-    binary: hived
+  - id: flockd
+    main: ./cmd/flockd
+    binary: flockd
     env: [CGO_ENABLED=0]
     goos: [darwin, linux, windows]
     goarch: [amd64, arm64]
@@ -20,9 +20,9 @@ builds:
         goarch: arm64
     ldflags:
       - -s -w -X main.version={{.Version}}
-  - id: hive
-    main: ./cmd/hive
-    binary: hive
+  - id: flock
+    main: ./cmd/flock
+    binary: flock
     env: [CGO_ENABLED=0]
     goos: [darwin, linux, windows]
     goarch: [amd64, arm64]
@@ -33,18 +33,18 @@ builds:
       - -s -w -X main.version={{.Version}}
 
 universal_binaries:
-  - id: hived-universal
-    ids: [hived]
-    name_template: hived
+  - id: flockd-universal
+    ids: [flockd]
+    name_template: flockd
     replace: true
-  - id: hive-universal
-    ids: [hive]
-    name_template: hive
+  - id: flock-universal
+    ids: [flock]
+    name_template: flock
     replace: true
 
 archives:
   - id: default
-    ids: [hived, hive, hived-universal, hive-universal]
+    ids: [flockd, flock, flockd-universal, flock-universal]
     formats: [tar.gz]
     format_overrides:
       - goos: windows
@@ -53,17 +53,17 @@ archives:
 
 nfpms:
   - id: packages
-    package_name: hivegrid
-    ids: [hived, hive]
-    vendor: HiveGrid
-    homepage: https://hivegrid.dev
-    maintainer: HiveGrid <ops@hivegrid.dev>
-    description: HiveGrid node daemon and CLI — serve LLM inference on idle hardware.
+    package_name: teraflock
+    ids: [flockd, flock]
+    vendor: Teraflock
+    homepage: https://teraflock.dev
+    maintainer: Teraflock <ops@teraflock.dev>
+    description: Teraflock node daemon and CLI — serve LLM inference on idle hardware.
     license: Apache-2.0
     formats: [deb, rpm]
     contents:
       - src: ./LICENSE
-        dst: /usr/share/doc/hivegrid/LICENSE
+        dst: /usr/share/doc/teraflock/LICENSE
 
 checksum:
   name_template: checksums.txt
@@ -80,31 +80,31 @@ checksum:
 # distribution; unsigned daemons are dead on arrival (SPEC §A3).
 
 brews:
-  - name: hive
+  - name: flock
     ids: [default]
     repository:
-      owner: hivegrid
+      owner: teraflock
       name: homebrew-tap
       # TODO(keys): tap deploy token
-    homepage: https://hivegrid.dev
-    description: HiveGrid node daemon + CLI — earn credits serving LLM inference on idle hardware
+    homepage: https://teraflock.dev
+    description: Teraflock node daemon + CLI — earn credits serving LLM inference on idle hardware
     license: Apache-2.0
     install: |
-      bin.install "hived"
-      bin.install "hive"
-    caveats: "Run `hive up` to install the background service, then `hive dashboard`."
+      bin.install "flockd"
+      bin.install "flock"
+    caveats: "Run `flock up` to install the background service, then `flock dashboard`."
     skip_upload: true # TODO(keys): flip when the tap exists
 
 winget:
-  - name: hive
-    publisher: HiveGrid
-    package_identifier: HiveGrid.hive
-    short_description: HiveGrid node daemon + CLI
+  - name: flock
+    publisher: Teraflock
+    package_identifier: Teraflock.flock
+    short_description: Teraflock node daemon + CLI
     license: Apache-2.0
     repository:
-      owner: hivegrid
+      owner: teraflock
       name: winget-pkgs
-      branch: hive-{{.Version}}
+      branch: flock-{{.Version}}
     skip_upload: true # TODO(keys): flip when the publisher account exists
 
 release:

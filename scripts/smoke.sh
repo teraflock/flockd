@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Phase 0 smoke test: build hived, run it standalone with the mock runtime,
+# Phase 0 smoke test: build flockd, run it standalone with the mock runtime,
 # and prove the OpenAI-compatible endpoint + management API work end to end.
 set -euo pipefail
 
@@ -7,8 +7,8 @@ cd "$(dirname "$0")/.."
 
 PORT="${SMOKE_PORT:-7791}"
 DATA_DIR="$(mktemp -d)"
-BIN="$(mktemp -d)/hived"
-LOG="$DATA_DIR/hived.log"
+BIN="$(mktemp -d)/flockd"
+LOG="$DATA_DIR/flockd.log"
 
 cleanup() {
   kill "$DAEMON_PID" 2>/dev/null || true
@@ -17,11 +17,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "==> building hived"
-go build -o "$BIN" ./cmd/hived
+echo "==> building flockd"
+go build -o "$BIN" ./cmd/flockd
 
-echo "==> starting hived --standalone --runtime=mock on :$PORT"
-HIVED_GOVERNOR__SERVE_POLICY=always \
+echo "==> starting flockd --standalone --runtime=mock on :$PORT"
+FLOCKD_GOVERNOR__SERVE_POLICY=always \
   "$BIN" --standalone --runtime=mock --data-dir "$DATA_DIR" --listen "127.0.0.1:$PORT" >"$LOG" 2>&1 &
 DAEMON_PID=$!
 
@@ -80,7 +80,7 @@ EVENTS=$(curl -sN --max-time 3 -H "Authorization: Bearer $TOKEN" "http://127.0.0
 echo "$EVENTS" | grep -q 'event: status' || fail "SSE events"
 
 echo "==> GET / (embedded web dashboard)"
-curl -sf "http://127.0.0.1:$PORT/" | grep -qi '<title>HiveGrid' || fail "web dashboard"
+curl -sf "http://127.0.0.1:$PORT/" | grep -qi '<title>Teraflock' || fail "web dashboard"
 
 echo
-echo "SMOKE OK — hived serves an OpenAI-compatible endpoint at http://127.0.0.1:$PORT/v1"
+echo "SMOKE OK — flockd serves an OpenAI-compatible endpoint at http://127.0.0.1:$PORT/v1"

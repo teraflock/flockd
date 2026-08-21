@@ -1,4 +1,4 @@
-# Example model catalog (hivegrid/models format). Point the daemon at a
+# Example model catalog (teraflock/models format). Point the daemon at a
 # file like this with:
 #   [models]
 #   manifest_path = "/path/to/catalog.yaml"

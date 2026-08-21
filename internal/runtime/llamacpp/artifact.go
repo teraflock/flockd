@@ -17,11 +17,11 @@ import (
 )
 
 // ArtifactManifest describes pinned llama-server builds per (os, arch,
-// accel), published by the private hivegrid/runtimes CI to the artifact CDN.
+// accel), published by the private teraflock/runtimes CI to the artifact CDN.
 // The build id participates in the fingerprint trust tuple
 // (model_sha, quant, runtime_build_id) — SPEC §2.2.
 type ArtifactManifest struct {
-	// BuildID like "llamacpp-b4458-hive1".
+	// BuildID like "llamacpp-b4458-flock1".
 	BuildID string          `json:"build_id"`
 	Builds  []ArtifactBuild `json:"builds"`
 }

@@ -10,9 +10,9 @@ import (
 	"io"
 	"sync"
 
-	"github.com/hivegrid/hived/internal/governor"
-	rt "github.com/hivegrid/hived/internal/runtime"
-	"github.com/hivegrid/hived/internal/telemetry"
+	"github.com/teraflock/flockd/internal/governor"
+	rt "github.com/teraflock/flockd/internal/runtime"
+	"github.com/teraflock/flockd/internal/telemetry"
 )
 
 // payoutMicroPerToken is the standalone-mode simulated payout: 55

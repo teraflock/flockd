@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// LoginFlow implements the `hive login` browser handoff: a PKCE-style
+// LoginFlow implements the `flock login` browser handoff: a PKCE-style
 // loopback callback that receives the claim code from the signup page.
 //
 //  1. generate code_verifier + S256 challenge
@@ -95,7 +95,7 @@ func (f *LoginFlow) Run(ctx context.Context) (*Result, string, error) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html")
-		_, _ = w.Write([]byte("<html><body><h2>HiveGrid: node claimed.</h2>You can close this tab and return to the terminal.</body></html>"))
+		_, _ = w.Write([]byte("<html><body><h2>Teraflock: node claimed.</h2>You can close this tab and return to the terminal.</body></html>"))
 		got <- callback{code: code}
 	})
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}

@@ -1,5 +1,5 @@
-// Package config loads hived configuration from defaults, an optional TOML
-// file, and HIVED_-prefixed environment variables (koanf). Every knob is
+// Package config loads flockd configuration from defaults, an optional TOML
+// file, and FLOCKD_-prefixed environment variables (koanf). Every knob is
 // documented in docs/config.md.
 package config
 
@@ -88,7 +88,7 @@ type Budget struct {
 
 type Models struct {
 	// ManifestPath or ManifestURL locates the model catalog (YAML/JSON,
-	// hivegrid/models format).
+	// teraflock/models format).
 	ManifestPath string `koanf:"manifest_path"`
 	ManifestURL  string `koanf:"manifest_url"`
 	// Default is the model id served in standalone mode.
@@ -119,7 +119,7 @@ type Tunnel struct {
 }
 
 type Enroll struct {
-	// LoginURL is the browser URL opened by `hive login`.
+	// LoginURL is the browser URL opened by `flock login`.
 	LoginURL string `koanf:"login_url"`
 }
 
@@ -127,7 +127,7 @@ type Enroll struct {
 func Default() Config {
 	home, _ := os.UserHomeDir()
 	return Config{
-		DataDir: filepath.Join(home, ".hivegrid"),
+		DataDir: filepath.Join(home, ".teraflock"),
 		Log:     Log{Level: "info", Format: "text"},
 		LocalAPI: LocalAPI{
 			Listen:        "127.0.0.1:7777",
@@ -155,21 +155,21 @@ func Default() Config {
 			MaxDiskMB: 60 * 1024,
 		},
 		Tunnel: Tunnel{
-			CoordinatorAddr:   "tunnel.hivegrid.dev:443",
+			CoordinatorAddr:   "tunnel.teraflock.dev:443",
 			HeartbeatInterval: 5 * time.Second,
 			ReconnectMin:      time.Second,
 			ReconnectMax:      2 * time.Minute,
 		},
 		Enroll: Enroll{
-			LoginURL: "https://hivegrid.dev/claim",
+			LoginURL: "https://teraflock.dev/claim",
 		},
 	}
 }
 
 // Load resolves configuration: defaults <- TOML file (if path != "" or the
-// default path exists) <- HIVED_* environment variables.
+// default path exists) <- FLOCKD_* environment variables.
 //
-// Env mapping: HIVED_LOCAL_API__LISTEN=... maps to local_api.listen
+// Env mapping: FLOCKD_LOCAL_API__LISTEN=... maps to local_api.listen
 // (double underscore = section separator).
 func Load(path string) (Config, error) {
 	k := koanf.New(".")
@@ -191,8 +191,8 @@ func Load(path string) (Config, error) {
 		}
 	}
 
-	if err := k.Load(env.Provider("HIVED_", ".", func(s string) string {
-		s = strings.TrimPrefix(s, "HIVED_")
+	if err := k.Load(env.Provider("FLOCKD_", ".", func(s string) string {
+		s = strings.TrimPrefix(s, "FLOCKD_")
 		s = strings.ToLower(s)
 		return strings.ReplaceAll(s, "__", ".")
 	}), nil); err != nil {

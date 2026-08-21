@@ -1,4 +1,4 @@
-# HiveGrid hived task runner (SPEC §A3: `just build|test|lint|run`).
+# Teraflock flockd task runner (SPEC §A3: `just build|test|lint|run`).
 # Everything also works with plain go commands — just is convenience.
 
 default: build
@@ -6,8 +6,8 @@ default: build
 # Build both binaries into ./dist/local
 build:
     mkdir -p dist/local
-    go build -o dist/local/hived ./cmd/hived
-    go build -o dist/local/hive ./cmd/hive
+    go build -o dist/local/flockd ./cmd/flockd
+    go build -o dist/local/flock ./cmd/flock
 
 # Run all tests
 test:
@@ -26,7 +26,7 @@ vet:
 
 # Run the daemon standalone with the mock runtime
 run:
-    go run ./cmd/hived --standalone --runtime=mock
+    go run ./cmd/flockd --standalone --runtime=mock
 
 # End-to-end Phase 0 smoke test
 smoke:
@@ -38,7 +38,7 @@ web:
 
 # Live TUI against a running daemon
 dashboard:
-    go run ./cmd/hive dashboard
+    go run ./cmd/flock dashboard
 
 clean:
     rm -rf dist

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hivegrid/hived/internal/clock"
+	"github.com/teraflock/flockd/internal/clock"
 )
 
 func quietLogger() *slog.Logger {

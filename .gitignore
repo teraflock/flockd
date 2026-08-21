@@ -1,6 +1,6 @@
 # binaries
-/hived
-/hive
+/flockd
+/flock
 /dist/
 *.exe
 

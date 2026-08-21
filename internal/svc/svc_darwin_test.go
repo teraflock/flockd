@@ -8,10 +8,10 @@ import (
 )
 
 func TestRenderPlist(t *testing.T) {
-	p := renderPlist("/usr/local/bin/hived", []string{"--config", "/etc/hived.toml"})
+	p := renderPlist("/usr/local/bin/flockd", []string{"--config", "/etc/flockd.toml"})
 	for _, want := range []string{
-		"dev.hivegrid.hived",
-		"<string>/usr/local/bin/hived</string>",
+		"dev.teraflock.flockd",
+		"<string>/usr/local/bin/flockd</string>",
 		"<string>--config</string>",
 		"<key>KeepAlive</key>",
 	} {

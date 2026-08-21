@@ -1,4 +1,4 @@
-// Package tunnel implements the node side of hive.tunnel.v1.TunnelService:
+// Package tunnel implements the node side of flock.tunnel.v1.TunnelService:
 // the persistent, node-initiated session over which the coordinator pushes
 // dispatches, challenges and model assignments (SPEC §3: nodes dial out,
 // never listen).
@@ -17,9 +17,9 @@ import (
 	"sync"
 	"time"
 
-	rt "github.com/hivegrid/hived/internal/runtime"
-	tunnelv1 "github.com/hivegrid/proto/gen/go/hive/tunnel/v1"
-	typesv1 "github.com/hivegrid/proto/gen/go/hive/types/v1"
+	rt "github.com/teraflock/flockd/internal/runtime"
+	tunnelv1 "github.com/teraflock/proto/gen/go/flock/tunnel/v1"
+	typesv1 "github.com/teraflock/proto/gen/go/flock/types/v1"
 	"google.golang.org/grpc"
 )
 

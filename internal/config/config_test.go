@@ -17,7 +17,7 @@ func TestLoadTOMLAndEnv(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
 	tomlBody := `
-data_dir = "/tmp/hivetest"
+data_dir = "/tmp/flocktest"
 
 [governor]
 serve_policy = "always"
@@ -32,14 +32,14 @@ pin = ["llama-3.1-8b-instruct-q4_k_m"]
 	if err := os.WriteFile(path, []byte(tomlBody), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("HIVED_LOCAL_API__LISTEN", "127.0.0.1:9999")
-	t.Setenv("HIVED_RUNTIME__KIND", "mock")
+	t.Setenv("FLOCKD_LOCAL_API__LISTEN", "127.0.0.1:9999")
+	t.Setenv("FLOCKD_RUNTIME__KIND", "mock")
 
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.DataDir != "/tmp/hivetest" {
+	if cfg.DataDir != "/tmp/flocktest" {
 		t.Errorf("data_dir = %q", cfg.DataDir)
 	}
 	if cfg.Governor.ServePolicy != "always" {

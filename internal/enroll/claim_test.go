@@ -53,7 +53,7 @@ func TestClaimCodeRoundTrip(t *testing.T) {
 
 func TestClaimCodeTrimsWhitespace(t *testing.T) {
 	dir := t.TempDir()
-	// `hive login` writes a trailing newline; operators pasting a code into
+	// `flock login` writes a trailing newline; operators pasting a code into
 	// the file by hand tend to add more.
 	if err := os.WriteFile(ClaimCodePath(dir), []byte("  claim-xyz \n\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -85,7 +85,7 @@ func TestClaimCodeRejectsEmpty(t *testing.T) {
 }
 
 func TestSaveClaimCodeCreatesDataDir(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "nested", "hivegrid")
+	dir := filepath.Join(t.TempDir(), "nested", "teraflock")
 	if err := SaveClaimCode(dir, "claim-1"); err != nil {
 		t.Fatal(err)
 	}

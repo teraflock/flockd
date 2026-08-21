@@ -13,10 +13,10 @@ import (
 )
 
 // TestMain doubles as the fake llama-server child process: when re-exec'd
-// with HIVED_FAKE_LLAMA_PORT set, it serves /health on that port until
+// with FLOCKD_FAKE_LLAMA_PORT set, it serves /health on that port until
 // killed (the standard helper-process pattern).
 func TestMain(m *testing.M) {
-	if port := os.Getenv("HIVED_FAKE_LLAMA_PORT"); port != "" {
+	if port := os.Getenv("FLOCKD_FAKE_LLAMA_PORT"); port != "" {
 		runFakeLlamaChild(port)
 		return
 	}
@@ -55,7 +55,7 @@ func newTestSupervisor(t *testing.T) (*supervisor, string) {
 	s.backoffMin = 50 * time.Millisecond
 	// exec.Cmd env is inherited from the parent; set the trigger var here
 	// and clean it up after.
-	t.Setenv("HIVED_FAKE_LLAMA_PORT", strconv.Itoa(port))
+	t.Setenv("FLOCKD_FAKE_LLAMA_PORT", strconv.Itoa(port))
 	return s, url
 }
 

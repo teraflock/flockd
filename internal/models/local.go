@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	typesv1 "github.com/hivegrid/proto/gen/go/hive/types/v1"
+	typesv1 "github.com/teraflock/proto/gen/go/flock/types/v1"
 )
 
 // LocalArtifactPath reports whether an artifact_url points at a file already

@@ -1,6 +1,6 @@
 // Typed client for the daemon's local API (/api/v1). The bearer token comes
 // from <data_dir>/local_api_token and is stored in localStorage after the
-// operator pastes it once (hive dashboard --web prints it).
+// operator pastes it once (flock dashboard --web prints it).
 
 export interface GpuSummary {
   vendor: string;
@@ -75,11 +75,11 @@ export interface Limits {
 // in and out: a stray leading space is invisible in a password field and
 // produced an indistinguishable "invalid token".
 export function getToken(): string {
-  return (localStorage.getItem("hive_token") ?? "").trim();
+  return (localStorage.getItem("flock_token") ?? "").trim();
 }
 
 export function setToken(t: string) {
-  localStorage.setItem("hive_token", t.trim());
+  localStorage.setItem("flock_token", t.trim());
 }
 
 /** Thrown when the daemon answered but rejected the token. */

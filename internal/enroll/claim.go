@@ -7,9 +7,9 @@ import (
 	"strings"
 )
 
-// claimFile holds the one-shot claim code captured by `hive login` until the
+// claimFile holds the one-shot claim code captured by `flock login` until the
 // daemon exchanges it for credentials. It is deliberately a plain file in the
-// data dir: `hive` and `hived` are separate processes (often separate user
+// data dir: `flock` and `flockd` are separate processes (often separate user
 // sessions once the service is installed), so the filesystem is the handoff.
 const claimFile = "claim_code"
 

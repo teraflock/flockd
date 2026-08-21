@@ -1,7 +1,7 @@
-# ⬡ HiveGrid — `hived`
+# ⬡ Teraflock — `flockd`
 
-**Turn idle GPUs into an inference mesh.** `hived` is the open-source node
-daemon for [HiveGrid](https://hivegrid.dev): install it on a Mac, a gaming
+**Turn idle GPUs into an inference mesh.** `flockd` is the open-source node
+daemon for [Teraflock](https://teraflock.dev): install it on a Mac, a gaming
 PC, or a homelab box, and your idle silicon serves open-weight LLM
 inference — earning credits you can spend on the network's OpenAI-compatible
 API or redeem for cash.
@@ -17,7 +17,7 @@ API or redeem for cash.
   [docs/privacy.md](docs/privacy.md) for exactly what the daemon can and
   cannot see — including the honest part about what node operators could
   theoretically observe.
-- 💰 **Earnings you can watch tick.** `hive dashboard` (terminal) and a
+- 💰 **Earnings you can watch tick.** `flock dashboard` (terminal) and a
   built-in web dashboard at `localhost:7777`.
 
 > **Status: Phase 0.** The single-node vertical slice works end to end
@@ -29,16 +29,16 @@ API or redeem for cash.
 Coming soon (release pipeline is configured, first tagged release pending):
 
 ```sh
-curl -fsSL https://get.hivegrid.dev | sh        # coming soon
-brew install hivegrid/tap/hive                  # coming soon
-winget install HiveGrid.hive                    # coming soon
+curl -fsSL https://get.teraflock.dev | sh        # coming soon
+brew install teraflock/tap/flock                  # coming soon
+winget install Teraflock.flock                    # coming soon
 ```
 
 Build from source today:
 
 ```sh
-git clone https://github.com/hivegrid/proto ../proto   # sibling checkout (see Development)
-go build ./cmd/hived ./cmd/hive
+git clone https://github.com/teraflock/proto ../proto   # sibling checkout (see Development)
+go build ./cmd/flockd ./cmd/flock
 ```
 
 ## Quickstart (standalone, no account needed)
@@ -48,7 +48,7 @@ mock model — the whole serving path (governor, tunnel, telemetry, API) is
 real:
 
 ```sh
-hived --standalone --runtime=mock
+flockd --standalone --runtime=mock
 ```
 
 Point any OpenAI SDK at it:
@@ -93,34 +93,34 @@ for await (const chunk of stream) {
 point the daemon at a llama-server binary and a model catalog:
 
 ```toml
-# ~/.hivegrid/config.toml
+# ~/.teraflock/config.toml
 [runtime]
 kind = "llamacpp"
 llama_server_path = "/opt/homebrew/bin/llama-server"
 
 [models]
-manifest_path = "/path/to/catalog.yaml"   # hivegrid/models format
+manifest_path = "/path/to/catalog.yaml"   # teraflock/models format
 default = "llama-3.1-8b-instruct-q4_k_m"
 ```
 
 Then watch it work:
 
 ```sh
-hive dashboard        # gorgeous terminal dashboard: tok/s sparkline, earnings ticker
-hive dashboard --web  # browser dashboard (prints the auth token to paste)
-hive status           # one-shot status
-hive limits --serve idle-only   # resource policy
+flock dashboard        # gorgeous terminal dashboard: tok/s sparkline, earnings ticker
+flock dashboard --web  # browser dashboard (prints the auth token to paste)
+flock status           # one-shot status
+flock limits --serve idle-only   # resource policy
 scripts/smoke.sh      # the whole Phase 0 exit criterion as a script
 ```
 
 ## Joining the mesh (Phase 1, soon)
 
 ```sh
-hive login   # browser handoff, claims this node to your account
-hive up      # install + start the service (launchd / systemd --user)
+flock login   # browser handoff, claims this node to your account
+flock up      # install + start the service (launchd / systemd --user)
 ```
 
-Until the hosted coordinator ships, `hive login` stores your claim code and
+Until the hosted coordinator ships, `flock login` stores your claim code and
 the daemon serves locally only.
 
 ## Resource governance promises
@@ -135,30 +135,30 @@ these are hard rules, enforced by the governor and its test suite:
 | never drain your battery | `serve_on_battery = false` by default |
 | never cook your laptop | `max_temp_celsius` pause threshold |
 | you set the schedule | `serve = scheduled` + windows like `22:00-08:00` |
-| clean exit | `hive uninstall --purge` removes everything |
+| clean exit | `flock uninstall --purge` removes everything |
 
 ## Architecture
 
 ```
 OpenAI SDKs ──▶ localhost:7777/v1 ─┐
-hive CLI/TUI ─▶ /api/v1 ───────────┼─▶ engine ─▶ governor ─▶ runtime (llama-server subprocess / mock)
+flock CLI/TUI ─▶ /api/v1 ───────────┼─▶ engine ─▶ governor ─▶ runtime (llama-server subprocess / mock)
 web dashboard ▶ / (go:embed) ──────┘        ▲
 coordinator ◀── mTLS tunnel (outbound only) ┘   (in-process fake coordinator in --standalone)
 ```
 
 More in [docs/architecture.md](docs/architecture.md). Protocol contracts
-live in [hivegrid/proto](https://github.com/hivegrid/proto)
-(`hive.tunnel.v1`, `hive.types.v1`).
+live in [teraflock/proto](https://github.com/teraflock/proto)
+(`flock.tunnel.v1`, `flock.types.v1`).
 
 ## Development
 
-`hived` expects the proto repo as a **sibling checkout** (there's a
-`replace github.com/hivegrid/proto => ../proto` in `go.mod`):
+`flockd` expects the proto repo as a **sibling checkout** (there's a
+`replace github.com/teraflock/proto => ../proto` in `go.mod`):
 
 ```
-hivegrid/
-├── proto/    git clone https://github.com/hivegrid/proto
-└── hived/    this repo
+teraflock/
+├── proto/    git clone https://github.com/teraflock/proto
+└── flockd/    this repo
 ```
 
 ```sh

@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hivegrid/hived/internal/governor"
-	rt "github.com/hivegrid/hived/internal/runtime"
+	"github.com/teraflock/flockd/internal/governor"
+	rt "github.com/teraflock/flockd/internal/runtime"
 )
 
 func newEngine(t *testing.T, admit Admitter) (*Engine, []string) {

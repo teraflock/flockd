@@ -1,6 +1,6 @@
 // Package enroll manages node identity (Ed25519 keypair that never leaves
 // the device), CSR generation, the Enroll RPC, credential storage, and the
-// `hive login` PKCE-style browser handoff (SPEC §4.1, §6).
+// `flock login` PKCE-style browser handoff (SPEC §4.1, §6).
 package enroll
 
 import (
@@ -19,8 +19,8 @@ import (
 
 	"crypto/x509/pkix"
 
-	tunnelv1 "github.com/hivegrid/proto/gen/go/hive/tunnel/v1"
-	typesv1 "github.com/hivegrid/proto/gen/go/hive/types/v1"
+	tunnelv1 "github.com/teraflock/proto/gen/go/flock/tunnel/v1"
+	typesv1 "github.com/teraflock/proto/gen/go/flock/types/v1"
 )
 
 const (
@@ -156,13 +156,13 @@ func SaveCredentials(dataDir string, c *Credentials) error {
 	}
 	var buf []byte
 	buf = append(buf, pem.EncodeToMemory(&pem.Block{
-		Type:  "HIVEGRID NODE ID",
+		Type:  "TERAFLOCK NODE ID",
 		Bytes: []byte(c.NodeID),
 	})...)
 	buf = append(buf, c.ClientCertPEM...)
 	buf = append(buf, c.CACertPEM...)
 	buf = append(buf, pem.EncodeToMemory(&pem.Block{
-		Type:    "HIVEGRID COORDINATOR PUBKEY",
+		Type:    "TERAFLOCK COORDINATOR PUBKEY",
 		Bytes:   c.CoordinatorPubKey,
 		Headers: map[string]string{"Expires": c.CertExpiresAt.UTC().Format(time.RFC3339)},
 	})...)
@@ -189,7 +189,7 @@ func LoadCredentials(dataDir string) (*Credentials, error) {
 			break
 		}
 		switch block.Type {
-		case "HIVEGRID NODE ID":
+		case "TERAFLOCK NODE ID":
 			c.NodeID = string(block.Bytes)
 		case "CERTIFICATE":
 			// First cert = client, second = CA.
@@ -199,7 +199,7 @@ func LoadCredentials(dataDir string) (*Credentials, error) {
 			} else {
 				c.CACertPEM = p
 			}
-		case "HIVEGRID COORDINATOR PUBKEY":
+		case "TERAFLOCK COORDINATOR PUBKEY":
 			c.CoordinatorPubKey = ed25519.PublicKey(block.Bytes)
 			if exp := block.Headers["Expires"]; exp != "" {
 				c.CertExpiresAt, _ = time.Parse(time.RFC3339, exp)

@@ -2,7 +2,7 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
-// Dev server proxies to a locally running hived so `npm run dev` works
+// Dev server proxies to a locally running flockd so `npm run dev` works
 // against the real daemon API.
 export default defineConfig({
   plugins: [react(), tailwindcss()],

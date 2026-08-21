@@ -6,13 +6,13 @@ prompts?"). It is deliberately blunt.
 
 ## For node operators
 
-What `hived` does on your machine:
+What `flockd` does on your machine:
 
 - Detects hardware (GPU model/VRAM, CPU, RAM, disk free) and reports it to
   the coordinator so work can be scheduled sensibly. That's the
-  `CapabilityProfile` — you can inspect it with `hive status`.
+  `CapabilityProfile` — you can inspect it with `flock status`.
 - Downloads model files (GGUF) and a pinned `llama-server` build into
-  `~/.hivegrid`, both SHA256-verified before use. It refuses to run
+  `~/.teraflock`, both SHA256-verified before use. It refuses to run
   anything whose hash doesn't match the manifest.
 - Opens **one outbound** mTLS connection to the coordinator. It never
   listens on a non-loopback port. No port forwarding, no inbound attack
@@ -24,7 +24,7 @@ What `hived` does on your machine:
   (idle-only by default; never on battery by default; instant-yield within
   2s of you touching the machine).
 
-What `hived` does **not** do:
+What `flockd` does **not** do:
 
 - It does not read your files, your browser, or anything outside its data
   directory.
@@ -41,7 +41,7 @@ The daemon is Apache-2.0 open source specifically so you can verify all of
 the above instead of trusting this document.
 
 Uninstall is one command and leaves nothing behind:
-`hive uninstall --purge`.
+`flock uninstall --purge`.
 
 ## For API customers
 
@@ -51,7 +51,7 @@ principle, inspect their own machine's memory and read what it is
 computing. Consumer GPUs have no usable trusted-execution enclave today.
 Anyone who tells you otherwise is selling something.
 
-HiveGrid's design responses:
+Teraflock's design responses:
 
 - **Privacy tiers** (SPEC §2.1). `tier: open` (default, cheapest) may land
   on any qualified node — treat it like sending text to a well-behaved but

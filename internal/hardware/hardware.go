@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"runtime"
 
-	typesv1 "github.com/hivegrid/proto/gen/go/hive/types/v1"
+	typesv1 "github.com/teraflock/proto/gen/go/flock/types/v1"
 )
 
 // Version is stamped by the linker (goreleaser) and reported in the profile.

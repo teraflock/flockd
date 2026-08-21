@@ -15,7 +15,7 @@ export default function App() {
     <div className="min-h-screen">
       <header className="flex items-baseline gap-4 border-b border-slate-800 px-6 py-4">
         <h1 className="text-lg font-bold tracking-widest text-amber-400">
-          ⬡ HIVEGRID
+          ⬡ TERAFLOCK
         </h1>
         <span className="text-xs text-slate-500">node dashboard</span>
         {status.data && (
@@ -92,13 +92,13 @@ export default function App() {
                 <code className="text-slate-300">
                   &lt;data_dir&gt;/local_api_token
                 </code>{" "}
-                (or run <code className="text-slate-300">hive token</code>) and
+                (or run <code className="text-slate-300">flock token</code>) and
                 press connect. Whitespace is trimmed for you.
               </>
             ) : (
-              <>{String(status.error?.message ?? status.error)} — is hived
-                running? Try <code className="text-slate-300">hive up</code> or{" "}
-                <code className="text-slate-300">hived --standalone</code>.</>
+              <>{String(status.error?.message ?? status.error)} — is flockd
+                running? Try <code className="text-slate-300">flock up</code> or{" "}
+                <code className="text-slate-300">flockd --standalone</code>.</>
             )}
           </p>
         )}
