@@ -21,7 +21,7 @@ func TestLocalArtifactPath(t *testing.T) {
 	// "file:///C:/models/a.gguf" instead, but that's a separate coverage
 	// gap tracked as a follow-up.
 	if runtime.GOOS == "windows" {
-		t.Skip("Windows-specific path semantics are a follow-up (see #TODO)")
+		t.Skip("Windows-specific path semantics are a follow-up (see #1)")
 	}
 	home, _ := os.UserHomeDir()
 	cases := []struct {
@@ -71,7 +71,7 @@ func TestEnsureLocalServesInPlaceWithoutCopying(t *testing.T) {
 	// See TestLocalArtifactPath's skip: file://<windows-path> URL parsing is
 	// a separate follow-up.
 	if runtime.GOOS == "windows" {
-		t.Skip("Windows-specific file:// URL semantics are a follow-up (see #TODO)")
+		t.Skip("Windows-specific file:// URL semantics are a follow-up (see #1)")
 	}
 	src := t.TempDir()
 	path, sum := writeGGUF(t, src, "porkchop.gguf", "pretend weights")
