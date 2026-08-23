@@ -5,9 +5,11 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -103,15 +105,31 @@ func cmdUp() *cobra.Command {
 			if standalone {
 				daemonArgs = append(daemonArgs, "--standalone")
 			}
+			logPath := filepath.Join(dataDir(), "flockd.log")
 			m := svc.NewManager()
 			ctx := cmd.Context()
-			if err := m.Install(ctx, bin, daemonArgs, svc.Options{
-				LogPath: filepath.Join(dataDir(), "flockd.log"),
-			}); err != nil {
+			if err := m.Install(ctx, bin, daemonArgs, svc.Options{LogPath: logPath}); err != nil {
 				return err
 			}
 			if err := m.Start(ctx); err != nil {
 				return err
+			}
+			// The service manager returns as soon as the process exec'd —
+			// a daemon that dies during boot (missing runtime, bad config)
+			// looks identical to a healthy start. Poll the local API until
+			// it answers, so `flock up` fails loudly instead of leaving a
+			// crash-looping unit behind.
+			waitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			if err := waitForDaemon(waitCtx, flagAPI); err != nil {
+				fmt.Println(styleWarn.Render("✗"), "flockd installed but not responding on", flagAPI)
+				if tail := tailFlockdLogs(ctx, logPath); tail != "" {
+					fmt.Println(styleDim.Render("  last log lines:"))
+					for _, line := range strings.Split(strings.TrimRight(tail, "\n"), "\n") {
+						fmt.Println(styleDim.Render("    " + line))
+					}
+				}
+				return fmt.Errorf("daemon did not come up within 10s (try `flock down` to stop the restart loop): %w", err)
 			}
 			fmt.Println(styleOK.Render("✓"), "flockd service installed and started")
 			fmt.Println(styleDim.Render("  check it with `flock status` or `flock dashboard`"))
@@ -120,6 +138,65 @@ func cmdUp() *cobra.Command {
 	}
 	c.Flags().BoolVar(&standalone, "standalone", false, "run the daemon with the in-process fake coordinator")
 	return c
+}
+
+// waitForDaemon polls the local API until it answers or ctx expires. Any
+// HTTP response counts as "up" — 401 from the auth wall is fine, we only
+// need to know the listener is bound. The daemon binds the port as the very
+// last step of boot, so a successful probe proves it got past hardware
+// detection, model load, and runtime fetch.
+func waitForDaemon(ctx context.Context, base string) error {
+	url := strings.TrimSuffix(base, "/") + "/api/v1/status"
+	client := &http.Client{Timeout: 500 * time.Millisecond}
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	var lastErr error
+	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return err
+		}
+		resp, err := client.Do(req)
+		if err == nil {
+			resp.Body.Close()
+			return nil
+		}
+		lastErr = err
+		select {
+		case <-ctx.Done():
+			return lastErr
+		case <-ticker.C:
+		}
+	}
+}
+
+// tailFlockdLogs returns the last ~20 lines of daemon output for the
+// current platform: journalctl on Linux, the launchd LogPath on macOS.
+// Best-effort — an empty return means "we couldn't get anything," not an
+// error to surface to the user.
+func tailFlockdLogs(ctx context.Context, logPath string) string {
+	if runtime.GOOS == "linux" {
+		out, err := exec.CommandContext(ctx,
+			"journalctl", "--user", "-u", "flockd", "-n", "20", "--no-pager", "--output=cat",
+		).Output()
+		if err == nil {
+			return string(out)
+		}
+	}
+	// launchd (macOS) and any fallback path: read the log file the service
+	// was pointed at. Read the whole file — startup crash logs are small.
+	if logPath == "" {
+		return ""
+	}
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+	if len(lines) > 20 {
+		lines = lines[len(lines)-20:]
+	}
+	return strings.Join(lines, "\n")
 }
 
 func cmdDown() *cobra.Command {
