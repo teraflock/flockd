@@ -218,23 +218,19 @@ func TestFetcherBinaryPathMissing(t *testing.T) {
 // leave a crash-looping daemon behind. This is the exact bug that
 // prompted its introduction: a linux/amd64 CUDA box against a catalog
 // with only darwin/arm64 artifacts.
+//
+// Use plan9 as the artifact OS so no real CI runner accidentally
+// satisfies the manifest — the assertion is "when no build matches, we
+// error", and that has to hold on every runner.
 func TestPreflightRejectsPlatformWithNoBuild(t *testing.T) {
 	man := ArtifactManifest{RuntimeBuildID: "llamacpp-b9999-1", Artifacts: []Artifact{
-		{OS: "darwin", Arch: "arm64", Accel: "metal", URL: "http://x", SHA256: strings.Repeat("0", 64)},
+		{OS: "plan9", Arch: "amd64", Accel: "metal", URL: "http://x", SHA256: strings.Repeat("0", 64)},
 	}}
 	mj, _ := json.Marshal(man)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(mj) }))
 	defer srv.Close()
 
 	err := (&Fetcher{ManifestURL: srv.URL}).Preflight(context.Background(), "cuda12")
-	// If this test *happens* to run on darwin/arm64 the manifest above is
-	// valid — skip the assertion rather than lie about the shape of the fix.
-	if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
-		if err != nil {
-			t.Fatalf("darwin/arm64 build should pass preflight, got %v", err)
-		}
-		return
-	}
 	if err == nil || !strings.Contains(err.Error(), "no build for") {
 		t.Fatalf("want no-build error, got %v", err)
 	}

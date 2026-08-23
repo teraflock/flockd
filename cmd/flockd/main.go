@@ -240,7 +240,11 @@ func loadDefaultModel(ctx context.Context, cfg config.Config, hw *typesv1.Capabi
 	switch cfg.Runtime.Kind {
 	case "mock":
 		mock := rt.NewMockRuntime(cfg.Runtime.MockTokensPerSec)
-		spec := rt.ModelSpec{ID: cfg.Models.Default, ContextLength: 8192, Embeddings: true}
+		// The mock is a fake in-memory model — Models.Default names a real
+		// GGUF in the hosted catalog and is only meaningful on the llamacpp
+		// path. Use a dedicated fixture id here so README/smoke examples
+		// (mock-8b-instruct) hold no matter what the config default is.
+		spec := rt.ModelSpec{ID: "mock-8b-instruct", ContextLength: 8192, Embeddings: true}
 		inst, err := mock.Load(ctx, spec, budget)
 		if err != nil {
 			return err
