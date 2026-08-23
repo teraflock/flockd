@@ -56,8 +56,8 @@ nfpms:
     package_name: teraflock
     ids: [flockd, flock]
     vendor: Teraflock
-    homepage: https://teraflock.dev
-    maintainer: Teraflock <ops@teraflock.dev>
+    homepage: https://teraflock.ai
+    maintainer: Teraflock <hello@teraflock.ai>
     description: Teraflock node daemon and CLI — serve LLM inference on idle hardware.
     license: Apache-2.0
     formats: [deb, rpm]
@@ -85,15 +85,23 @@ brews:
     repository:
       owner: teraflock
       name: homebrew-tap
-      # TODO(keys): tap deploy token
-    homepage: https://teraflock.dev
+      # Local releases use the ambient GITHUB_TOKEN (gh auth); CI needs a
+      # TAP_GITHUB_TOKEN PAT with write access to homebrew-tap.
+      token: "{{ .Env.GITHUB_TOKEN }}"
+    directory: Formula
+    homepage: https://teraflock.ai
     description: Teraflock node daemon + CLI — earn credits serving LLM inference on idle hardware
     license: Apache-2.0
     install: |
       bin.install "flockd"
       bin.install "flock"
-    caveats: "Run `flock up` to install the background service, then `flock dashboard`."
-    skip_upload: true # TODO(keys): flip when the tap exists
+    caveats: |
+      Binaries are not yet notarized (beta). To join the mesh you need an
+      invite from teraflock.ai — then:
+        flock login      # opens the claim page in your browser
+        flock up         # installs and starts the background service
+        flock dashboard  # watch it earn
+    skip_upload: false
 
 winget:
   - name: flock
@@ -108,7 +116,7 @@ winget:
     skip_upload: true # TODO(keys): flip when the publisher account exists
 
 release:
-  draft: true
+  draft: false
   footer: |
     ---
     Install: see README. Verify checksums with `sha256sum -c checksums.txt`.

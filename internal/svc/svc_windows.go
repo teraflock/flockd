@@ -17,7 +17,7 @@ func newPlatformManager() Manager { return &scmManager{} }
 // manual instructions.
 type scmManager struct{}
 
-func (scmManager) Install(context.Context, string, []string) error {
+func (scmManager) Install(context.Context, string, []string, Options) error {
 	return fmt.Errorf("%w: run `flockd --standalone` in a terminal, or create a service manually with `sc.exe create flockd binPath= \"C:\\path\\to\\flockd.exe\"`", ErrUnsupported)
 }
 

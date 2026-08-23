@@ -277,6 +277,7 @@ func loadDefaultModel(ctx context.Context, cfg config.Config, hw *typesv1.Capabi
 				CacheDir:    filepath.Join(cfg.DataDir, "runtimes"),
 			},
 			Accel:         hardware.BestAccel(hw),
+			VRAMMB:        hardware.BestVRAMMB(hw),
 			Log:           log,
 			ContextLength: cfg.Runtime.ContextLength,
 		}

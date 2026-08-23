@@ -62,3 +62,15 @@ func BestAccel(p *typesv1.CapabilityProfile) string {
 	}
 	return cpuAccel()
 }
+
+// BestVRAMMB returns the largest detected GPU memory (system RAM on Apple
+// Silicon's unified memory); 0 when no usable GPU was found.
+func BestVRAMMB(p *typesv1.CapabilityProfile) uint64 {
+	var best uint64
+	for _, g := range p.GetGpus() {
+		if g.GetVendor() != "none" && g.GetVramMb() > best {
+			best = g.GetVramMb()
+		}
+	}
+	return best
+}

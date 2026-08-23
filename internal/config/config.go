@@ -134,8 +134,11 @@ func Default() Config {
 			RequireAuthV1: false,
 		},
 		Runtime: Runtime{
-			Kind:             "llamacpp",
-			MockTokensPerSec: 120,
+			Kind: "llamacpp",
+			// Pinned llama-server builds published by teraflock/runtimes;
+			// runtime.llama_server_path overrides for self-built binaries.
+			ArtifactManifestURL: "https://teraflock-downloads.s3.amazonaws.com/runtimes/llamacpp/manifest.json",
+			MockTokensPerSec:    120,
 		},
 		Governor: Governor{
 			ServePolicy:    "idle-only",
@@ -151,8 +154,11 @@ func Default() Config {
 			MaxConcurrent:  2,
 		},
 		Models: Models{
-			Default:   "mock-8b-instruct",
-			MaxDiskMB: 60 * 1024,
+			// The hosted flat catalog (models repo CI publishes it); a
+			// local manifest_path overrides for development.
+			ManifestURL: "https://teraflock-downloads.s3.amazonaws.com/catalog/catalog.json",
+			Default:     "llama-3.2-3b-instruct-q4_k_m",
+			MaxDiskMB:   60 * 1024,
 		},
 		Tunnel: Tunnel{
 			CoordinatorAddr:   "tunnel.teraflock.ai:443",

@@ -28,11 +28,22 @@ func (m *launchdManager) plistPath() (string, error) {
 }
 
 // renderPlist is separated for testability.
-func renderPlist(binPath string, args []string) string {
+//
+// ProcessType is deliberately Standard, not Background: Background (and
+// LowPriorityBackgroundIO, both tried first) throttled the first-run model
+// download ~20x and starved token streaming. Being polite to the operator's
+// machine is the governor's job (idle detection, instant-yield, battery
+// guard) — not launchd's blunt QoS tier.
+func renderPlist(binPath string, args []string, opts Options) string {
 	var argsXML strings.Builder
 	argsXML.WriteString("\t\t<string>" + binPath + "</string>\n")
 	for _, a := range args {
 		argsXML.WriteString("\t\t<string>" + a + "</string>\n")
+	}
+	logXML := ""
+	if opts.LogPath != "" {
+		logXML = fmt.Sprintf("\t<key>StandardOutPath</key>\n\t<string>%s</string>\n"+
+			"\t<key>StandardErrorPath</key>\n\t<string>%s</string>\n", opts.LogPath, opts.LogPath)
 	}
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -51,15 +62,13 @@ func renderPlist(binPath string, args []string) string {
 		<false/>
 	</dict>
 	<key>ProcessType</key>
-	<string>Background</string>
-	<key>LowPriorityBackgroundIO</key>
-	<true/>
-</dict>
+	<string>Standard</string>
+%s</dict>
 </plist>
-`, launchdLabel, argsXML.String())
+`, launchdLabel, argsXML.String(), logXML)
 }
 
-func (m *launchdManager) Install(ctx context.Context, binPath string, args []string) error {
+func (m *launchdManager) Install(ctx context.Context, binPath string, args []string, opts Options) error {
 	path, err := m.plistPath()
 	if err != nil {
 		return err
@@ -67,7 +76,7 @@ func (m *launchdManager) Install(ctx context.Context, binPath string, args []str
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("svc: mkdir LaunchAgents: %w", err)
 	}
-	if err := os.WriteFile(path, []byte(renderPlist(binPath, args)), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(renderPlist(binPath, args, opts)), 0o644); err != nil {
 		return fmt.Errorf("svc: write plist: %w", err)
 	}
 	return nil

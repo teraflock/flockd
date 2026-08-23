@@ -26,13 +26,19 @@ API or redeem for cash.
 
 ## Install
 
-Coming soon (release pipeline is configured, first tagged release pending):
+macOS / Linux:
 
 ```sh
-curl -fsSL https://get.teraflock.dev | sh        # coming soon
-brew install teraflock/tap/flock                  # coming soon
-winget install Teraflock.flock                    # coming soon
+brew install teraflock/tap/flock          # macOS + Linuxbrew
+curl -fsSL https://teraflock.ai/install.sh | sh   # anything else
 ```
+
+Windows: grab the zip from the [latest release](https://github.com/teraflock/flockd/releases/latest)
+(`winget install Teraflock.flock` coming later).
+
+Beta note: binaries are checksummed but not yet code-signed/notarized.
+Joining the mesh needs an invite from [teraflock.ai](https://teraflock.ai) —
+then `flock login`, `flock up`, `flock dashboard`.
 
 Build from source today:
 

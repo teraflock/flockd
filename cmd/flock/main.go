@@ -105,7 +105,9 @@ func cmdUp() *cobra.Command {
 			}
 			m := svc.NewManager()
 			ctx := cmd.Context()
-			if err := m.Install(ctx, bin, daemonArgs); err != nil {
+			if err := m.Install(ctx, bin, daemonArgs, svc.Options{
+				LogPath: filepath.Join(dataDir(), "flockd.log"),
+			}); err != nil {
 				return err
 			}
 			if err := m.Start(ctx); err != nil {
@@ -205,7 +207,22 @@ func cmdLogin() *cobra.Command {
 				return err
 			}
 			fmt.Println(styleOK.Render("✓"), "claim code stored")
-			fmt.Println(styleDim.Render("  restart the daemon (`flock down && flock up`) to complete enrollment"))
+			// When the service is already installed and running, finish the
+			// job: enrollment happens on daemon start, so restart it now
+			// instead of telling the operator to.
+			m := svc.NewManager()
+			if st, err := m.Status(cmd.Context()); err == nil && st == svc.StatusRunning {
+				fmt.Println("  restarting flockd to complete enrollment…")
+				if err := m.Stop(cmd.Context()); err != nil {
+					return fmt.Errorf("stop service: %w (run `flock down && flock up` manually)", err)
+				}
+				if err := m.Start(cmd.Context()); err != nil {
+					return fmt.Errorf("start service: %w (run `flock up` manually)", err)
+				}
+				fmt.Println(styleOK.Render("✓"), "daemon restarted — check `flock status` in a moment")
+				return nil
+			}
+			fmt.Println(styleDim.Render("  run `flock up` to start the daemon and complete enrollment"))
 			return nil
 		},
 	}

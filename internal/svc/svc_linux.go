@@ -46,7 +46,7 @@ WantedBy=default.target
 `, binPath, strings.Join(args, " "))
 }
 
-func (m *systemdManager) Install(ctx context.Context, binPath string, args []string) error {
+func (m *systemdManager) Install(ctx context.Context, binPath string, args []string, _ Options) error {
 	path, err := m.unitPath()
 	if err != nil {
 		return err

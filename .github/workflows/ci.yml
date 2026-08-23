@@ -115,4 +115,8 @@ jobs:
           workdir: flockd
           args: release --clean
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The formula push targets teraflock/homebrew-tap, which the
+          # workflow-scoped GITHUB_TOKEN cannot write; TAP_GITHUB_TOKEN is
+          # a PAT with write access to that repo. Falls back so tag builds
+          # still publish release artifacts without it.
+          GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}

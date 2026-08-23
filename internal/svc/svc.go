@@ -18,10 +18,18 @@ const (
 	StatusUnknown      Status = "unknown"
 )
 
+// Options tune the installed service definition.
+type Options struct {
+	// LogPath receives the daemon's stdout+stderr where the platform has no
+	// native log sink (launchd). systemd ignores it — journalctl already
+	// captures the unit's output.
+	LogPath string
+}
+
 // Manager is the platform-specific service controller.
 type Manager interface {
 	// Install writes the service definition pointing at binPath with args.
-	Install(ctx context.Context, binPath string, args []string) error
+	Install(ctx context.Context, binPath string, args []string, opts Options) error
 	Uninstall(ctx context.Context) error
 	Start(ctx context.Context) error
 	Stop(ctx context.Context) error

@@ -33,10 +33,10 @@ require_auth_v1 = false
 kind = "llamacpp"            # llamacpp | mock
 # Use an existing llama-server binary instead of downloading one.
 llama_server_path = ""
-# JSON manifest of pinned, SHA256-verified llama-server builds
-# (see internal/runtime/llamacpp/artifact.go for the schema). Required for
-# kind=llamacpp unless llama_server_path is set.
-artifact_manifest_url = ""
+# JSON manifest of pinned, SHA256-verified llama-server builds, published
+# by teraflock/runtimes (manifests/schema.json is the source of truth).
+# Defaults to the hosted manifest; llama_server_path overrides fetching.
+artifact_manifest_url = "https://teraflock-downloads.s3.amazonaws.com/runtimes/llamacpp/manifest.json"
 # Synthetic generation speed for kind=mock (tests, demos).
 mock_tokens_per_sec = 120
 # --ctx-size override passed to llama-server (0 = model default).
@@ -92,11 +92,17 @@ login_url = "https://teraflock.dev/claim"   # browser page opened by `flock logi
 
 ```json
 {
-  "build_id": "llamacpp-b4458-flock1",
-  "builds": [
+  "runtime_build_id": "llamacpp-b9892-1",
+  "runtime": "llamacpp",
+  "artifacts": [
     {"os": "darwin", "arch": "arm64", "accel": "metal",
-     "url": "https://artifacts.teraflock.dev/llamacpp/b4458/darwin-arm64-metal/llama-server",
-     "sha256": "…", "size_bytes": 4300000}
+     "filename": "llama-server-b9892-darwin-arm64-metal.tar.gz",
+     "url": "https://teraflock-downloads.s3.amazonaws.com/runtimes/llamacpp-b9892-1/llama-server-b9892-darwin-arm64-metal.tar.gz",
+     "sha256": "…", "size_bytes": 7000000}
   ]
 }
 ```
+
+  The tarball is verified against `sha256` before anything is unpacked;
+  the daemon extracts `llama-server`, `LICENSE.llama.cpp` and `BUILDINFO`
+  into `data_dir/runtimes/<runtime_build_id>/`.

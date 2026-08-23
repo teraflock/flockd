@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -20,9 +21,46 @@ import (
 type Adapter struct {
 	Fetcher *Fetcher
 	Accel   string // preferred accelerator backend from hardware detection
-	Log     *slog.Logger
+	// VRAMMB is the detected GPU memory (system RAM on Apple Silicon);
+	// with budget.max_vram_percent it bounds GPU offload. 0 = unknown.
+	VRAMMB uint64
+	Log    *slog.Logger
 	// ContextLength override (0 = model/catalog default).
 	ContextLength int
+}
+
+// gpuAccels are backends where llama-server offloads layers to a device.
+var gpuAccels = map[string]bool{"metal": true, "cuda12": true, "rocm": true, "vulkan": true}
+
+// gpuLayers decides --n-gpu-layers. Full offload when the model fits the
+// VRAM budget (the common case; llama.cpp clamps 999 to the real layer
+// count). When it doesn't fit, offload a proportional slice — the layer
+// count is approximated at 64 until GGUF block_count parsing lands
+// (TODO(gguf)), which errs toward offloading slightly less than possible
+// rather than blowing the operator's budget.
+func (a *Adapter) gpuLayers(modelPath string, res rt.ResourceBudget) int {
+	if !gpuAccels[a.Accel] {
+		return 0
+	}
+	if res.MaxVRAMPercent <= 0 || a.VRAMMB == 0 {
+		return 999
+	}
+	fi, err := os.Stat(modelPath)
+	if err != nil {
+		return 999
+	}
+	budgetMB := float64(a.VRAMMB) * float64(res.MaxVRAMPercent) / 100
+	// Weights + KV cache + compute buffers: ~1.15x file size is a safe
+	// working floor for quantized GGUFs at moderate context.
+	needMB := float64(fi.Size()) / (1 << 20) * 1.15
+	if needMB <= budgetMB {
+		return 999
+	}
+	layers := int(budgetMB / needMB * 64)
+	if layers < 0 {
+		layers = 0
+	}
+	return layers
 }
 
 func (a *Adapter) logger() *slog.Logger {
@@ -68,6 +106,14 @@ func (a *Adapter) Load(ctx context.Context, m rt.ModelSpec, res rt.ResourceBudge
 	}
 	if m.Embeddings {
 		args = append(args, "--embeddings")
+	}
+	if gpuAccels[a.Accel] {
+		ngl := a.gpuLayers(m.Path, res)
+		args = append(args, "--n-gpu-layers", strconv.Itoa(ngl))
+		if ngl < 999 {
+			a.logger().Warn("model exceeds VRAM budget: partial GPU offload",
+				"model", m.ID, "n_gpu_layers", ngl, "max_vram_percent", res.MaxVRAMPercent)
+		}
 	}
 
 	url := fmt.Sprintf("http://127.0.0.1:%d", port)
