@@ -404,7 +404,11 @@ func standaloneEnroll(ctx context.Context, cfg config.Config, dialer tunnel.Dial
 // the ordinary "serving locally only" state, not an error.
 func ensureEnrolled(ctx context.Context, cfg config.Config, identity *enroll.Identity, hw *typesv1.CapabilityProfile, log *slog.Logger) (*enroll.Credentials, error) {
 	if enroll.Enrolled(cfg.DataDir) {
-		return enroll.LoadCredentials(cfg.DataDir)
+		creds, err := enroll.LoadCredentials(cfg.DataDir)
+		if err != nil {
+			return nil, err
+		}
+		return rotateIfNeeded(ctx, cfg, identity, creds, hw, log)
 	}
 
 	code, err := enroll.ReadClaimCode(cfg.DataDir)
@@ -441,6 +445,33 @@ func ensureEnrolled(ctx context.Context, cfg config.Config, identity *enroll.Ide
 	}
 	log.Info("enrolled with mesh", "node_id", creds.NodeID, "cert_expires", creds.CertExpiresAt.Format(time.RFC3339))
 	return creds, nil
+}
+
+// rotateIfNeeded refreshes the client certificate when it is near expiry
+// (SPEC §6: 30-day certs, rotate in the last 7 days). Rotation reuses the
+// Enroll RPC over the bootstrap (server-auth) dial — possession of the node
+// key is the credential, not a claim code — so a failure here must never
+// take the node down: it keeps serving on the old cert and retries on the
+// next restart.
+func rotateIfNeeded(ctx context.Context, cfg config.Config, identity *enroll.Identity, creds *enroll.Credentials, hw *typesv1.CapabilityProfile, log *slog.Logger) (*enroll.Credentials, error) {
+	if time.Until(creds.CertExpiresAt) > 7*24*time.Hour {
+		return creds, nil
+	}
+	log.Info("client cert near expiry: rotating", "expires", creds.CertExpiresAt.Format(time.RFC3339))
+	conn, err := bootstrapDialer(cfg).Dial(ctx, cfg.Tunnel.CoordinatorAddr)
+	if err != nil {
+		log.Warn("cert rotation dial failed; keeping current cert", "err", err)
+		return creds, nil
+	}
+	defer conn.Close()
+	rotateCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	fresh, err := enroll.RotateIfNeeded(rotateCtx, tunnelv1.NewTunnelServiceClient(conn), identity, creds, hw, cfg.DataDir)
+	if err != nil {
+		log.Warn("cert rotation failed; keeping current cert", "err", err)
+		return creds, nil
+	}
+	return fresh, nil
 }
 
 // bootstrapDialer dials the coordinator before the node holds a client cert

@@ -155,13 +155,13 @@ func Default() Config {
 			MaxDiskMB: 60 * 1024,
 		},
 		Tunnel: Tunnel{
-			CoordinatorAddr:   "tunnel.teraflock.dev:443",
+			CoordinatorAddr:   "tunnel.teraflock.ai:443",
 			HeartbeatInterval: 5 * time.Second,
 			ReconnectMin:      time.Second,
 			ReconnectMax:      2 * time.Minute,
 		},
 		Enroll: Enroll{
-			LoginURL: "https://teraflock.dev/claim",
+			LoginURL: "https://teraflock.ai/claim",
 		},
 	}
 }
