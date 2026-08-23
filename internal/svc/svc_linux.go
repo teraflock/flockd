@@ -32,6 +32,12 @@ func renderUnit(binPath string, args []string) string {
 Description=Teraflock node daemon
 After=network-online.target
 Wants=network-online.target
+# Cap the restart storm on permanent failures (missing runtime for
+# this OS/arch, bad config): after 5 failed starts in 60s systemd
+# marks the unit failed and stops retrying, so flock status can see
+# it instead of the daemon hammering the CPU forever.
+StartLimitBurst=5
+StartLimitIntervalSec=60
 
 [Service]
 ExecStart=%s %s

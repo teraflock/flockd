@@ -17,6 +17,8 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/teraflock/flockd/internal/config"
 	"github.com/teraflock/flockd/internal/enroll"
+	"github.com/teraflock/flockd/internal/hardware"
+	"github.com/teraflock/flockd/internal/runtime/llamacpp"
 	"github.com/teraflock/flockd/internal/svc"
 )
 
@@ -106,8 +108,14 @@ func cmdUp() *cobra.Command {
 				daemonArgs = append(daemonArgs, "--standalone")
 			}
 			logPath := filepath.Join(dataDir(), "flockd.log")
-			m := svc.NewManager()
 			ctx := cmd.Context()
+			// Refuse to install a service that will crash-loop: fetch the
+			// pinned runtime manifest and confirm a build exists for this
+			// box. Skipped for the mock runtime (no artifacts needed).
+			if err := preflightRuntime(ctx); err != nil {
+				return err
+			}
+			m := svc.NewManager()
 			if err := m.Install(ctx, bin, daemonArgs, svc.Options{LogPath: logPath}); err != nil {
 				return err
 			}
@@ -138,6 +146,39 @@ func cmdUp() *cobra.Command {
 	}
 	c.Flags().BoolVar(&standalone, "standalone", false, "run the daemon with the in-process fake coordinator")
 	return c
+}
+
+// preflightRuntime refuses to install a service unit that would crash-loop
+// because no llama-server build exists for this OS/arch/accel in the pinned
+// catalog. Cheap: one JSON fetch + a pure pick(). Skipped for the mock
+// runtime and when a local llama_server_path is already configured.
+func preflightRuntime(ctx context.Context) error {
+	cfg, err := config.Load("")
+	if err != nil {
+		return fmt.Errorf("preflight: load config: %w", err)
+	}
+	if cfg.Runtime.Kind != "llamacpp" {
+		return nil
+	}
+	preCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	hw, err := hardware.Detect(preCtx, cfg.DataDir)
+	if err != nil {
+		return fmt.Errorf("preflight: hardware detect: %w", err)
+	}
+	f := &llamacpp.Fetcher{
+		ManifestURL: cfg.Runtime.ArtifactManifestURL,
+		BinaryPath:  cfg.Runtime.LlamaServerPath,
+	}
+	if err := f.Preflight(preCtx, hardware.BestAccel(hw)); err != nil {
+		return fmt.Errorf("%w\n\n"+
+			"Options:\n"+
+			"  · set runtime.kind = \"mock\" in ~/.teraflock/config.toml for a\n"+
+			"    quick smoke test (deterministic tokens, no artifacts needed)\n"+
+			"  · set runtime.llama_server_path to a locally built llama-server\n"+
+			"  · wait for a matching build to publish in the runtime catalog", err)
+	}
+	return nil
 }
 
 // waitForDaemon polls the local API until it answers or ctx expires. Any

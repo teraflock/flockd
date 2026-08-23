@@ -53,6 +53,31 @@ type Fetcher struct {
 	HTTPClient *http.Client
 }
 
+// Preflight checks that a runtime binary is *resolvable* for this
+// (GOOS, GOARCH, accel) without actually downloading the tarball. Used by
+// `flock up` to refuse installing a service unit that would crash-loop on
+// first start when the pinned catalog has no build for this machine.
+// Returns nil when either f.BinaryPath is present on disk or f.ManifestURL
+// advertises a matching artifact (cpu fallback included, same rule as
+// Ensure).
+func (f *Fetcher) Preflight(ctx context.Context, accel string) error {
+	if f.BinaryPath != "" {
+		if _, err := os.Stat(f.BinaryPath); err != nil {
+			return fmt.Errorf("llamacpp: configured llama_server_path: %w", err)
+		}
+		return nil
+	}
+	if f.ManifestURL == "" {
+		return fmt.Errorf("llamacpp: no runtime binary available: set runtime.llama_server_path to an existing llama-server binary or runtime.artifact_manifest_url to a pinned build manifest")
+	}
+	man, err := f.fetchManifest(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = man.pick(runtime.GOOS, runtime.GOARCH, accel)
+	return err
+}
+
 // Ensure returns the path to a verified llama-server binary and its build id.
 func (f *Fetcher) Ensure(ctx context.Context, accel string) (path, buildID string, err error) {
 	if f.BinaryPath != "" {

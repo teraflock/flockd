@@ -212,3 +212,56 @@ func TestFetcherBinaryPathMissing(t *testing.T) {
 		t.Fatal("expected error for missing binary path")
 	}
 }
+
+// Preflight is what `flock up` calls before installing a service unit —
+// it must reject platforms the catalog has no build for, so we don't
+// leave a crash-looping daemon behind. This is the exact bug that
+// prompted its introduction: a linux/amd64 CUDA box against a catalog
+// with only darwin/arm64 artifacts.
+func TestPreflightRejectsPlatformWithNoBuild(t *testing.T) {
+	man := ArtifactManifest{RuntimeBuildID: "llamacpp-b9999-1", Artifacts: []Artifact{
+		{OS: "darwin", Arch: "arm64", Accel: "metal", URL: "http://x", SHA256: strings.Repeat("0", 64)},
+	}}
+	mj, _ := json.Marshal(man)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(mj) }))
+	defer srv.Close()
+
+	err := (&Fetcher{ManifestURL: srv.URL}).Preflight(context.Background(), "cuda12")
+	// If this test *happens* to run on darwin/arm64 the manifest above is
+	// valid — skip the assertion rather than lie about the shape of the fix.
+	if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
+		if err != nil {
+			t.Fatalf("darwin/arm64 build should pass preflight, got %v", err)
+		}
+		return
+	}
+	if err == nil || !strings.Contains(err.Error(), "no build for") {
+		t.Fatalf("want no-build error, got %v", err)
+	}
+}
+
+func TestPreflightAcceptsCPUFallback(t *testing.T) {
+	man := ArtifactManifest{RuntimeBuildID: "llamacpp-b9999-1", Artifacts: []Artifact{
+		{OS: runtime.GOOS, Arch: runtime.GOARCH, Accel: "cpu-avx2", URL: "http://x", SHA256: strings.Repeat("0", 64)},
+	}}
+	mj, _ := json.Marshal(man)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(mj) }))
+	defer srv.Close()
+
+	// Asking for a GPU accel that the manifest doesn't advertise must still
+	// succeed via the cpu-avx2 fallback — same rule as Ensure.
+	if err := (&Fetcher{ManifestURL: srv.URL}).Preflight(context.Background(), "cuda12"); err != nil {
+		t.Fatalf("cpu fallback should satisfy preflight, got %v", err)
+	}
+}
+
+func TestPreflightAcceptsExistingLocalBinary(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "llama-server")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// BinaryPath skips the manifest entirely (no URL configured is fine).
+	if err := (&Fetcher{BinaryPath: bin}).Preflight(context.Background(), "cuda12"); err != nil {
+		t.Fatalf("existing binary should satisfy preflight, got %v", err)
+	}
+}
