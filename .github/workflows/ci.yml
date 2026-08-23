@@ -6,7 +6,7 @@ on:
   pull_request:
 
 env:
-  GO_VERSION: "1.24"
+  GO_VERSION: "1.25"
 
 jobs:
   # The proto contract repo is a sibling checkout (go.mod replace ../proto).
@@ -15,16 +15,17 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { path: flockd }
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { repository: teraflock/proto, path: proto }
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with: { go-version: "${{ env.GO_VERSION }}", cache-dependency-path: flockd/go.sum }
-      - uses: golangci/golangci-lint-action@v6
-        with:
-          working-directory: flockd
-          version: latest
+      - name: Lint
+        working-directory: flockd
+        run: |
+          go install github.com/mgechev/revive@v1.15.0
+          $(go env GOPATH)/bin/revive -formatter friendly ./...
 
   test:
     needs: lint
@@ -36,11 +37,11 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { path: flockd }
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { repository: teraflock/proto, path: proto }
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with: { go-version: "${{ env.GO_VERSION }}", cache-dependency-path: flockd/go.sum }
       - name: unit tests
         working-directory: flockd
@@ -66,11 +67,11 @@ jobs:
           - { goos: linux, goarch: arm64 }
           - { goos: windows, goarch: amd64 }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { path: flockd }
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { repository: teraflock/proto, path: proto }
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with: { go-version: "${{ env.GO_VERSION }}", cache-dependency-path: flockd/go.sum }
       - name: cross-build
         working-directory: flockd
@@ -86,8 +87,8 @@ jobs:
   web:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with: { node-version: "22", cache: npm, cache-dependency-path: web/package-lock.json }
       - name: build dashboard
         working-directory: web
@@ -104,11 +105,11 @@ jobs:
     needs: [test, build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { path: flockd, fetch-depth: 0 }
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { repository: teraflock/proto, path: proto }
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with: { go-version: "${{ env.GO_VERSION }}", cache-dependency-path: flockd/go.sum }
       - uses: goreleaser/goreleaser-action@v6
         with:

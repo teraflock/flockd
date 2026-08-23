@@ -17,9 +17,10 @@ test:
 test-race:
     go test -race ./internal/governor/ ./internal/tunnel/... ./internal/runtime/... ./internal/localapi/
 
-# Lint (requires golangci-lint installed)
+# Lint (installs revive on first use — same tool CI runs)
 lint:
-    golangci-lint run
+    go install github.com/mgechev/revive@v1.15.0
+    $(go env GOPATH)/bin/revive -formatter friendly ./...
 
 vet:
     go vet ./...

@@ -178,7 +178,7 @@ fresh clone without Node installed (it's embedded via `go:embed`). Rebuild
 it when you touch `web/src`.
 
 Task runner (`just build|test|lint|smoke`) and CI config are in the repo;
-lint with `golangci-lint run`.
+`just lint` installs and runs revive (same tool CI enforces).
 
 ## Roadmap
 
