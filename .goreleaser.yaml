@@ -87,7 +87,7 @@ brews:
       name: homebrew-tap
       # Local releases use the ambient GITHUB_TOKEN (gh auth); CI needs a
       # TAP_GITHUB_TOKEN PAT with write access to homebrew-tap.
-      token: "{{ .Env.GITHUB_TOKEN }}"
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
     directory: Formula
     homepage: https://teraflock.ai
     description: Teraflock node daemon + CLI — earn credits serving LLM inference on idle hardware

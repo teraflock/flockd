@@ -105,6 +105,8 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [test, build]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
         with: { path: flockd, fetch-depth: 0 }
@@ -117,8 +119,7 @@ jobs:
           workdir: flockd
           args: release --clean
         env:
-          # The formula push targets teraflock/homebrew-tap, which the
-          # workflow-scoped GITHUB_TOKEN cannot write; TAP_GITHUB_TOKEN is
-          # a PAT with write access to that repo. Falls back so tag builds
-          # still publish release artifacts without it.
-          GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # TAP_GITHUB_TOKEN is a PAT with write access to teraflock/homebrew-tap;
+          # goreleaser uses it only for the formula push (see .goreleaser.yaml brews.token).
+          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
