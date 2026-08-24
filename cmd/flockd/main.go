@@ -27,6 +27,7 @@ import (
 	"github.com/teraflock/flockd/internal/models"
 	rt "github.com/teraflock/flockd/internal/runtime"
 	"github.com/teraflock/flockd/internal/runtime/llamacpp"
+	"github.com/teraflock/flockd/internal/runtime/vllm"
 	"github.com/teraflock/flockd/internal/telemetry"
 	"github.com/teraflock/flockd/internal/tunnel"
 	"github.com/teraflock/flockd/internal/tunnel/fakecoord"
@@ -302,6 +303,22 @@ func loadDefaultModel(ctx context.Context, cfg config.Config, hw *typesv1.Capabi
 		reportRuntimeBuild(hw, inst, log)
 		log.Info("llama-server loaded", "model", spec.ID)
 		return nil
+
+	case "vllm":
+		adapter := &vllm.Adapter{
+			BaseURL: cfg.Runtime.VLLMBaseURL,
+			Model:   cfg.Runtime.VLLMModel,
+		}
+		inst, err := adapter.Load(ctx, rt.ModelSpec{}, budget)
+		if err != nil {
+			return err
+		}
+		spec := rt.ModelSpec{ID: adapter.Model}
+		eng.Register(spec, inst)
+		reportRuntimeBuild(hw, inst, log)
+		log.Info("vllm proxy loaded", "model", adapter.Model, "base_url", cfg.Runtime.VLLMBaseURL)
+		return nil
+
 	default:
 		return fmt.Errorf("unknown runtime kind %q", cfg.Runtime.Kind)
 	}
