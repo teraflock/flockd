@@ -3,6 +3,9 @@
 
 default: build
 
+help:
+    @just --list
+
 # Build both binaries into ./dist/local
 build:
     mkdir -p dist/local
