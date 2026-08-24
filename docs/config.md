@@ -30,7 +30,7 @@ listen = "127.0.0.1:7777"
 require_auth_v1 = false
 
 [runtime]
-kind = "llamacpp"            # llamacpp | mock
+kind = "llamacpp"            # llamacpp | vllm | mock
 # Use an existing llama-server binary instead of downloading one.
 llama_server_path = ""
 # JSON manifest of pinned, SHA256-verified llama-server builds, published
@@ -41,6 +41,12 @@ artifact_manifest_url = "https://teraflock-downloads.s3.amazonaws.com/runtimes/l
 mock_tokens_per_sec = 120
 # --ctx-size override passed to llama-server (0 = model default).
 context_length = 0
+# Base URL of an already-running vLLM server (required when kind = "vllm").
+# flockd proxies OpenAI-compatible requests to it; vLLM lifecycle is external.
+vllm_base_url = ""           # e.g. "http://localhost:8000"
+# Model name to send in vLLM requests. If empty, the first model from
+# vLLM's GET /v1/models is used automatically.
+vllm_model = ""
 
 [governor]
 serve_policy     = "idle-only"  # always | idle-only | scheduled
