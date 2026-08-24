@@ -309,13 +309,11 @@ func loadDefaultModel(ctx context.Context, cfg config.Config, hw *typesv1.Capabi
 			BaseURL: cfg.Runtime.VLLMBaseURL,
 			Model:   cfg.Runtime.VLLMModel,
 		}
-		// vLLM manages its own model; ModelSpec is a placeholder so the
-		// engine has an ID to route requests against.
-		spec := rt.ModelSpec{ID: cfg.Models.Default}
-		inst, err := adapter.Load(ctx, spec, budget)
+		inst, err := adapter.Load(ctx, rt.ModelSpec{}, budget)
 		if err != nil {
 			return err
 		}
+		spec := rt.ModelSpec{ID: adapter.Model}
 		eng.Register(spec, inst)
 		reportRuntimeBuild(hw, inst, log)
 		log.Info("vllm proxy loaded", "model", adapter.Model, "base_url", cfg.Runtime.VLLMBaseURL)

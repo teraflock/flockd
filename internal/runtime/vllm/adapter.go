@@ -31,6 +31,7 @@ func (a *Adapter) Load(ctx context.Context, _ rt.ModelSpec, _ rt.ResourceBudget)
 	if err != nil {
 		return nil, fmt.Errorf("vllm: %w", err)
 	}
+	a.Model = model // store resolved name so callers can use it after Load
 	inst := &instance{
 		baseURL: a.BaseURL,
 		model:   model,
