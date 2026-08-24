@@ -123,10 +123,12 @@ type oaStreamChunk struct {
 }
 
 func (i *instance) generate(ctx context.Context, req rt.CompletionRequest) (rt.TokenStream, error) {
+	// vLLM validates seed as int64; mask the uint64 into range.
+	seed := req.Params.Seed & 0x7FFFFFFFFFFFFFFF
 	body := oaChatRequest{
 		Model:  i.model,
 		Stream: true,
-		Seed:   &req.Params.Seed,
+		Seed:   &seed,
 		StreamOptions: &oaStreamOpt{
 			IncludeUsage: true,
 		},
