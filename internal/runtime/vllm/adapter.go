@@ -111,7 +111,8 @@ type oaStreamOpt struct {
 type oaStreamChunk struct {
 	Choices []struct {
 		Delta struct {
-			Content string `json:"content"`
+			Content   string `json:"content"`
+			Reasoning string `json:"reasoning"` // reasoning models stream CoT here
 		} `json:"delta"`
 		Text         string  `json:"text"`
 		FinishReason *string `json:"finish_reason"`
@@ -196,6 +197,9 @@ func parseSSE(ctx context.Context, resp *http.Response, ch chan<- rt.Chunk) {
 			delta := choice.Delta.Content
 			if delta == "" {
 				delta = choice.Text
+			}
+			if delta == "" {
+				delta = choice.Delta.Reasoning
 			}
 			if delta != "" {
 				if !send(ctx, ch, rt.Chunk{Delta: delta, TokenCount: 1}) {
