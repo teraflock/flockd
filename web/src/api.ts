@@ -114,9 +114,9 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 
 /** SSE stream of live daemon events. EventSource cannot set headers, so the
  *  token goes in the query string — the daemon accepts it for this route
- *  only. */
-export function eventsURL(): string {
-  return `/api/v1/events?token=${encodeURIComponent(getToken())}`;
+ *  only. Pass logs=true to also receive each log line as a `log` event. */
+export function eventsURL(logs = false): string {
+  return `/api/v1/events?token=${encodeURIComponent(getToken())}${logs ? "&logs=1" : ""}`;
 }
 
 export const api = {
@@ -134,3 +134,14 @@ export const api = {
   removeModel: (id: string) =>
     req<{ ok: boolean }>(`/api/v1/models/${id}`, { method: "DELETE" }),
 };
+
+export interface LogEntry {
+  time: string;
+  level: string;
+  message: string;
+  attrs?: string;
+}
+
+export function fetchLogs(n = 500): Promise<{ logs: LogEntry[] }> {
+  return req<{ logs: LogEntry[] }>(`/api/v1/logs?n=${n}`);
+}

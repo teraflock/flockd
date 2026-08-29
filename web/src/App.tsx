@@ -1,13 +1,63 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AuthError, api, getToken, setToken, type Limits } from "./api";
+import {
+  AuthError,
+  api,
+  eventsURL,
+  fetchLogs,
+  getToken,
+  setToken,
+  type Limits,
+  type LogEntry,
+  type Status,
+} from "./api";
 
-type Tab = "status" | "earnings" | "models" | "limits";
+type Tab = "status" | "earnings" | "models" | "limits" | "logs";
+
+// Live log lines pushed over SSE, kept outside React so the stream survives
+// tab switches. The logs tab merges this with the history endpoint.
+const liveLog: LogEntry[] = [];
+let liveLogVersion = 0;
+
+/** Subscribe to the daemon's SSE stream: status snapshots land straight in
+ *  the query cache (no 2s poll lag), model changes invalidate the models
+ *  query, and log lines accumulate for the logs tab. Reconnection is
+ *  EventSource's own; queries keep their polling as a belt-and-braces
+ *  fallback while the stream is down. */
+function useEvents() {
+  const qc = useQueryClient();
+  const lastModelInval = useRef(0);
+  useEffect(() => {
+    const token = getToken();
+    if (!token) return;
+    const es = new EventSource(eventsURL(true));
+    es.addEventListener("status", (e) => {
+      qc.setQueryData<Status>(["status"], JSON.parse((e as MessageEvent).data));
+    });
+    const invalidateModels = () => {
+      // model_progress arrives ~4×/s during a download; refetching the
+      // models list that often is noise. Once a second is plenty.
+      const now = Date.now();
+      if (now - lastModelInval.current < 1000) return;
+      lastModelInval.current = now;
+      void qc.invalidateQueries({ queryKey: ["models"] });
+    };
+    es.addEventListener("models_changed", invalidateModels);
+    es.addEventListener("model_progress", invalidateModels);
+    es.addEventListener("log", (e) => {
+      liveLog.push(JSON.parse((e as MessageEvent).data));
+      if (liveLog.length > 2000) liveLog.splice(0, liveLog.length - 2000);
+      liveLogVersion++;
+    });
+    return () => es.close();
+  }, [qc]);
+}
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("status");
   const [tokenInput, setTokenInput] = useState(getToken());
   const qc = useQueryClient();
+  useEvents();
 
   const status = useQuery({ queryKey: ["status"], queryFn: api.status });
 
@@ -73,7 +123,7 @@ export default function App() {
         )}
 
         <nav className="mb-6 flex gap-1">
-          {(["status", "earnings", "models", "limits"] as Tab[]).map((t) => (
+          {(["status", "earnings", "models", "limits", "logs"] as Tab[]).map((t) => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -112,6 +162,7 @@ export default function App() {
         {tab === "earnings" && <EarningsPage />}
         {tab === "models" && <ModelsPage />}
         {tab === "limits" && <LimitsPage />}
+        {tab === "logs" && <LogsPage />}
       </div>
     </div>
   );
@@ -325,9 +376,76 @@ function LimitsPage() {
         </button>
         <p className="text-xs text-slate-500">
           yield grace {lim.yield_grace_seconds}s · idle threshold{" "}
-          {lim.idle_after_seconds}s · changes apply live, reset on daemon
-          restart (persistence TODO)
+          {lim.idle_after_seconds}s · changes apply live and persist to{" "}
+          <code>&lt;data_dir&gt;/limits.toml</code> (config.toml is never
+          rewritten)
         </p>
+      </div>
+    </Card>
+  );
+}
+
+function LogsPage() {
+  // History once, then live lines from the SSE stream; a 500ms version poll
+  // repaints without re-rendering on every single line.
+  const { data: history } = useQuery({
+    queryKey: ["logs"],
+    queryFn: () => fetchLogs(500),
+    refetchInterval: false,
+  });
+  const [, setTick] = useState(0);
+  const [follow, setFollow] = useState(true);
+  const box = useRef<HTMLDivElement>(null);
+  const seen = useRef(0);
+  useEffect(() => {
+    const t = setInterval(() => {
+      if (liveLogVersion !== seen.current) {
+        seen.current = liveLogVersion;
+        setTick((n) => n + 1);
+      }
+    }, 500);
+    return () => clearInterval(t);
+  }, []);
+  useEffect(() => {
+    if (follow && box.current) box.current.scrollTop = box.current.scrollHeight;
+  });
+
+  const lines = [...(history?.logs ?? []), ...liveLog];
+  const color = (level: string) =>
+    level === "ERROR"
+      ? "text-red-400"
+      : level.startsWith("WARN")
+        ? "text-amber-400"
+        : "text-slate-500";
+  return (
+    <Card title="Daemon log">
+      <div className="mb-2 flex justify-end">
+        <button
+          className={
+            "rounded px-3 py-1 text-xs " +
+            (follow ? "bg-amber-400 text-slate-950" : "bg-slate-800 text-slate-400")
+          }
+          onClick={() => setFollow(!follow)}
+        >
+          {follow ? "following" : "follow"}
+        </button>
+      </div>
+      <div
+        ref={box}
+        onWheel={() => setFollow(false)}
+        className="max-h-[32rem] overflow-y-auto font-mono text-xs leading-relaxed"
+      >
+        {lines.map((l, i) => (
+          <div key={i} className="whitespace-pre-wrap break-all">
+            <span className="text-slate-600">
+              {new Date(l.time).toLocaleTimeString()}
+            </span>{" "}
+            <span className={color(l.level)}>{l.level}</span>{" "}
+            <span className="text-slate-300">{l.message}</span>
+            {l.attrs ? <span className="text-slate-500"> {l.attrs}</span> : null}
+          </div>
+        ))}
+        {lines.length === 0 && <p className="text-slate-500">nothing yet</p>}
       </div>
     </Card>
   );
