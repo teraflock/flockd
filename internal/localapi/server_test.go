@@ -15,6 +15,7 @@ import (
 
 	"github.com/teraflock/flockd/internal/engine"
 	"github.com/teraflock/flockd/internal/governor"
+	"github.com/teraflock/flockd/internal/localapi/gen"
 	rt "github.com/teraflock/flockd/internal/runtime"
 	typesv1 "github.com/teraflock/proto/gen/go/flock/types/v1"
 )
@@ -283,11 +284,11 @@ func TestAPIRequiresBearerToken(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("authenticated status = %d", resp.StatusCode)
 	}
-	var st StatusResponse
+	var st gen.Status
 	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
 		t.Fatal(err)
 	}
-	if st.NodeID != "node-test" || st.State != "serving" || st.DefaultModel != "mock-8b-instruct" {
+	if st.NodeId != "node-test" || st.State != "serving" || st.DefaultModel != "mock-8b-instruct" {
 		t.Errorf("status = %+v", st)
 	}
 }
@@ -295,7 +296,7 @@ func TestAPIRequiresBearerToken(t *testing.T) {
 func TestLimitsRoundTrip(t *testing.T) {
 	srv := newTestServer(t, servingGovernor(t))
 	resp := apiGet(t, srv, "/api/v1/limits")
-	var lim Limits
+	var lim gen.Limits
 	_ = json.NewDecoder(resp.Body).Decode(&lim)
 	resp.Body.Close()
 	if lim.ServePolicy != "always" {
@@ -316,7 +317,7 @@ func TestLimitsRoundTrip(t *testing.T) {
 		body, _ := io.ReadAll(putResp.Body)
 		t.Fatalf("put status = %d: %s", putResp.StatusCode, body)
 	}
-	var got Limits
+	var got gen.Limits
 	_ = json.NewDecoder(putResp.Body).Decode(&got)
 	if got.ServePolicy != "scheduled" || len(got.Schedule) != 1 || got.Schedule[0] != "22:00-08:00" {
 		t.Errorf("updated limits = %+v", got)
@@ -333,7 +334,7 @@ func TestEarningsEndpoint(t *testing.T) {
 
 	resp := apiGet(t, srv, "/api/v1/earnings")
 	defer resp.Body.Close()
-	var e EarningsResponse
+	var e gen.Earnings
 	if err := json.NewDecoder(resp.Body).Decode(&e); err != nil {
 		t.Fatal(err)
 	}
@@ -363,11 +364,11 @@ func TestEventsSSETicker(t *testing.T) {
 	for sc.Scan() {
 		line := sc.Text()
 		if strings.HasPrefix(line, "data: ") {
-			var st StatusResponse
+			var st gen.Status
 			if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &st); err != nil {
 				t.Fatalf("bad event payload: %v", err)
 			}
-			if st.NodeID != "node-test" {
+			if st.NodeId != "node-test" {
 				t.Errorf("event = %+v", st)
 			}
 			return // first event is enough

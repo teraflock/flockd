@@ -4,67 +4,48 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/teraflock/flockd/internal/config"
 	"github.com/teraflock/flockd/internal/events"
 	"github.com/teraflock/flockd/internal/governor"
+	"github.com/teraflock/flockd/internal/localapi/gen"
 	"github.com/teraflock/flockd/internal/logging"
 	"github.com/teraflock/flockd/internal/telemetry"
 )
 
-// StatusResponse is GET /api/v1/status (also streamed on /api/v1/events).
-type StatusResponse struct {
-	NodeID        string             `json:"node_id"`
-	Version       string             `json:"version"`
-	Standalone    bool               `json:"standalone"`
-	Enrolled      bool               `json:"enrolled"`
-	CertExpiresAt *time.Time         `json:"cert_expires_at,omitempty"`
-	State         string             `json:"state"`
-	UptimeSeconds int64              `json:"uptime_seconds"`
-	DefaultModel  string             `json:"default_model"`
-	ModelsLoaded  int                `json:"models_loaded"`
-	Inflight      int                `json:"inflight"`
-	OnBattery     bool               `json:"on_battery"`
-	TempCelsius   float64            `json:"temp_celsius"`
-	Hardware      *HardwareSummary   `json:"hardware,omitempty"`
-	Stats         telemetry.Snapshot `json:"stats"`
+// The management API's routes and wire types are generated from
+// api/openapi.yaml (make gen) — *Server implements gen.ServerInterface, so
+// the spec cannot drift from the implementation. Handlers here fill the
+// generated types from daemon internals.
+
+func statsToGen(s telemetry.Snapshot) gen.Stats {
+	return gen.Stats{
+		TokensPerSec1m:     s.TokensPerSec1m,
+		RequestsPerMin:     s.RequestsPerMin,
+		TotalRequests:      s.TotalRequests,
+		TotalTokens:        s.TotalTokens,
+		Inflight:           s.Inflight,
+		EarnedMicrocredits: s.EarnedMicrocred,
+	}
 }
 
-type HardwareSummary struct {
-	OS       string       `json:"os"`
-	Arch     string       `json:"arch"`
-	CPUModel string       `json:"cpu_model"`
-	CPUCores uint32       `json:"cpu_cores"`
-	RAMMB    uint64       `json:"ram_mb"`
-	GPUs     []GPUSummary `json:"gpus"`
-}
-
-type GPUSummary struct {
-	Vendor  string `json:"vendor"`
-	Model   string `json:"model"`
-	VRAMMB  uint64 `json:"vram_mb"`
-	Accel   string `json:"accel"`
-	Unified bool   `json:"unified_memory"`
-}
-
-func (s *Server) status() StatusResponse {
-	resp := StatusResponse{
-		NodeID:        s.deps.NodeID,
+func (s *Server) status() gen.Status {
+	resp := gen.Status{
+		NodeId:        s.deps.NodeID,
 		Version:       s.deps.Version,
 		Standalone:    s.deps.Standalone,
 		State:         "serving",
 		UptimeSeconds: int64(time.Since(s.start).Seconds()),
 		DefaultModel:  s.deps.Engine.DefaultModel(),
 		ModelsLoaded:  len(s.deps.Engine.Models()),
-		Stats:         s.deps.Engine.Stats().Snapshot(),
+		Stats:         statsToGen(s.deps.Engine.Stats().Snapshot()),
 	}
 	if m := s.deps.Mesh; m != nil {
 		ms := m()
 		resp.Enrolled = ms.Enrolled
 		if ms.NodeID != "" {
-			resp.NodeID = ms.NodeID
+			resp.NodeId = ms.NodeID
 		}
 		if !ms.CertExpiresAt.IsZero() {
 			t := ms.CertExpiresAt
@@ -79,17 +60,18 @@ func (s *Server) status() StatusResponse {
 		resp.TempCelsius = p.TempCelsius
 	}
 	if hw := s.deps.Hardware; hw != nil {
-		hs := &HardwareSummary{
-			OS:       hw.GetOs(),
+		hs := &gen.Hardware{
+			Os:       hw.GetOs(),
 			Arch:     hw.GetArch(),
-			CPUModel: hw.GetCpuModel(),
-			CPUCores: hw.GetCpuCores(),
-			RAMMB:    hw.GetRamTotalMb(),
+			CpuModel: hw.GetCpuModel(),
+			CpuCores: int64(hw.GetCpuCores()),
+			RamMb:    int64(hw.GetRamTotalMb()),
+			Gpus:     []gen.Gpu{},
 		}
 		for _, g := range hw.GetGpus() {
-			hs.GPUs = append(hs.GPUs, GPUSummary{
-				Vendor: g.GetVendor(), Model: g.GetModel(), VRAMMB: g.GetVramMb(),
-				Accel: g.GetAccel(), Unified: g.GetUnifiedMemory(),
+			hs.Gpus = append(hs.Gpus, gen.Gpu{
+				Vendor: g.GetVendor(), Model: g.GetModel(), VramMb: int64(g.GetVramMb()),
+				Accel: g.GetAccel(), UnifiedMemory: g.GetUnifiedMemory(),
 			})
 		}
 		resp.Hardware = hs
@@ -97,75 +79,73 @@ func (s *Server) status() StatusResponse {
 	return resp
 }
 
-func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+// GetStatus implements gen.ServerInterface.
+func (s *Server) GetStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.status())
+}
+
+// GetHealth is the one unauthenticated route: liveness for `tera up`,
+// service managers, and the desktop app's daemon probe.
+func (s *Server) GetHealth(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, gen.Health{Ok: true, Version: s.deps.Version})
 }
 
 // ---- models ----
 
-// ModelRow merges cache state with loaded state.
-type ModelRow struct {
-	ID        string    `json:"id"`
-	SizeBytes int64     `json:"size_bytes"`
-	Pinned    bool      `json:"pinned"`
-	LastUsed  time.Time `json:"last_used"`
-	State     string    `json:"state"`
-	Loaded    bool      `json:"loaded"`
-	Default   bool      `json:"default"`
-	// ReceivedBytes is live progress, present only while downloading.
-	ReceivedBytes int64 `json:"received_bytes,omitempty"`
-}
-
-func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
+// ListModels implements gen.ServerInterface.
+func (s *Server) ListModels(w http.ResponseWriter, r *http.Request) {
 	loaded := map[string]bool{}
 	for _, m := range s.deps.Engine.Models() {
 		loaded[m.Spec.ID] = true
 	}
 	def := s.deps.Engine.DefaultModel()
 
-	var rows []ModelRow
+	rows := []gen.ModelRow{}
 	if s.deps.Models != nil {
 		for _, i := range s.deps.Models.List() {
-			rows = append(rows, ModelRow{
-				ID: i.ID, SizeBytes: i.SizeBytes, Pinned: i.Pinned,
+			row := gen.ModelRow{
+				Id: i.ID, SizeBytes: i.SizeBytes, Pinned: i.Pinned,
 				LastUsed: i.LastUsed, State: i.State,
 				Loaded: loaded[i.ID], Default: i.ID == def,
-				ReceivedBytes: i.ReceivedBytes,
-			})
+			}
+			if i.State == "downloading" {
+				rb := i.ReceivedBytes
+				row.ReceivedBytes = &rb
+			}
+			rows = append(rows, row)
 			delete(loaded, i.ID)
 		}
 	}
 	for id := range loaded { // loaded but not cached (mock runtime)
-		rows = append(rows, ModelRow{ID: id, State: "ready", Loaded: true, Default: id == def})
+		rows = append(rows, gen.ModelRow{Id: id, State: "ready", Loaded: true, Default: id == def})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"models": rows})
+	writeJSON(w, http.StatusOK, gen.ModelList{Models: rows})
 }
 
-func (s *Server) handleModelPin(w http.ResponseWriter, r *http.Request) {
+// PinModel implements gen.ServerInterface.
+func (s *Server) PinModel(w http.ResponseWriter, r *http.Request, id gen.ModelID) {
 	if s.deps.Models == nil {
 		writeOpenAIError(w, http.StatusNotImplemented, "invalid_request_error", "model cache not enabled (mock runtime)")
 		return
 	}
-	var body struct {
-		Pinned bool `json:"pinned"`
-	}
+	var body gen.PinRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "invalid body")
 		return
 	}
-	if err := s.deps.Models.Pin(r.PathValue("id"), body.Pinned); err != nil {
+	if err := s.deps.Models.Pin(id, body.Pinned); err != nil {
 		writeOpenAIError(w, http.StatusNotFound, "invalid_request_error", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	writeJSON(w, http.StatusOK, gen.Ok{Ok: true})
 }
 
-func (s *Server) handleModelRemove(w http.ResponseWriter, r *http.Request) {
+// DeleteModel implements gen.ServerInterface.
+func (s *Server) DeleteModel(w http.ResponseWriter, r *http.Request, id gen.ModelID) {
 	if s.deps.Models == nil {
 		writeOpenAIError(w, http.StatusNotImplemented, "invalid_request_error", "model cache not enabled (mock runtime)")
 		return
 	}
-	id := r.PathValue("id")
 	if entry := s.deps.Engine.Unregister(id); entry != nil {
 		_ = entry.Instance.Shutdown(r.Context())
 	}
@@ -173,24 +153,15 @@ func (s *Server) handleModelRemove(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusNotFound, "invalid_request_error", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	writeJSON(w, http.StatusOK, gen.Ok{Ok: true})
 }
 
 // ---- earnings ----
 
-// EarningsResponse is standalone/demo accounting until the ledger exists
-// (Phase 2). Numbers are honest simulations, labelled as such.
-type EarningsResponse struct {
-	EarnedMicrocredits int64   `json:"earned_microcredits"`
-	EarnedCredits      float64 `json:"earned_credits"`
-	EstUSD             float64 `json:"est_usd"`
-	EstUSDPerDay       float64 `json:"est_usd_per_day"`
-	LifetimeTokens     int64   `json:"lifetime_tokens"`
-	Escrow             float64 `json:"escrow_credits"`
-	Note               string  `json:"note"`
-}
-
-func (s *Server) handleEarnings(w http.ResponseWriter, r *http.Request) {
+// GetEarnings implements gen.ServerInterface. Standalone/demo accounting
+// until the ledger exists (Phase 2); numbers are honest simulations,
+// labelled as such.
+func (s *Server) GetEarnings(w http.ResponseWriter, r *http.Request) {
 	snap := s.deps.Engine.Stats().Snapshot()
 	credits := float64(snap.EarnedMicrocred) / 1e6
 	usd := credits * 0.000001 * 1e6 // 1 credit = $0.000001 peg (SPEC §4.5)
@@ -199,11 +170,11 @@ func (s *Server) handleEarnings(w http.ResponseWriter, r *http.Request) {
 	if uptime > 0 {
 		perDay = usd / uptime * 24
 	}
-	writeJSON(w, http.StatusOK, EarningsResponse{
+	writeJSON(w, http.StatusOK, gen.Earnings{
 		EarnedMicrocredits: snap.EarnedMicrocred,
 		EarnedCredits:      credits,
-		EstUSD:             usd,
-		EstUSDPerDay:       perDay,
+		EstUsd:             usd,
+		EstUsdPerDay:       perDay,
 		LifetimeTokens:     snap.TotalTokens,
 		Note:               "simulated standalone earnings; real accrual starts when the node is enrolled with a coordinator (Phase 2 ledger)",
 	})
@@ -211,41 +182,32 @@ func (s *Server) handleEarnings(w http.ResponseWriter, r *http.Request) {
 
 // ---- limits ----
 
-// Limits mirrors the governor policy knobs exposed to operators.
-type Limits struct {
-	ServePolicy    string   `json:"serve_policy"`
-	IdleAfterSec   int      `json:"idle_after_seconds"`
-	YieldGraceSec  int      `json:"yield_grace_seconds"`
-	ServeOnBattery bool     `json:"serve_on_battery"`
-	MaxTempCelsius float64  `json:"max_temp_celsius"`
-	Schedule       []string `json:"schedule"`
-}
-
-func (s *Server) handleLimitsGet(w http.ResponseWriter, r *http.Request) {
+// GetLimits implements gen.ServerInterface.
+func (s *Server) GetLimits(w http.ResponseWriter, r *http.Request) {
 	g := s.deps.Governor
 	if g == nil {
 		writeOpenAIError(w, http.StatusNotImplemented, "invalid_request_error", "governor not enabled")
 		return
 	}
 	p := g.Policy()
-	lim := Limits{
-		ServePolicy:    p.Serve,
-		IdleAfterSec:   int(p.IdleAfter.Seconds()),
-		YieldGraceSec:  int(p.YieldGrace.Seconds()),
-		ServeOnBattery: p.ServeOnBattery,
-		MaxTempCelsius: p.MaxTempCelsius,
-		Schedule:       windowsToStrings(p.Schedule),
-	}
-	writeJSON(w, http.StatusOK, lim)
+	writeJSON(w, http.StatusOK, gen.Limits{
+		ServePolicy:       p.Serve,
+		IdleAfterSeconds:  int(p.IdleAfter.Seconds()),
+		YieldGraceSeconds: int(p.YieldGrace.Seconds()),
+		ServeOnBattery:    p.ServeOnBattery,
+		MaxTempCelsius:    p.MaxTempCelsius,
+		Schedule:          windowsToStrings(p.Schedule),
+	})
 }
 
-func (s *Server) handleLimitsPut(w http.ResponseWriter, r *http.Request) {
+// UpdateLimits implements gen.ServerInterface.
+func (s *Server) UpdateLimits(w http.ResponseWriter, r *http.Request) {
 	g := s.deps.Governor
 	if g == nil {
 		writeOpenAIError(w, http.StatusNotImplemented, "invalid_request_error", "governor not enabled")
 		return
 	}
-	var lim Limits
+	var lim gen.Limits
 	if err := json.NewDecoder(r.Body).Decode(&lim); err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "invalid body: "+err.Error())
 		return
@@ -263,11 +225,11 @@ func (s *Server) handleLimitsPut(w http.ResponseWriter, r *http.Request) {
 	}
 	p := g.Policy()
 	p.Serve = lim.ServePolicy
-	if lim.IdleAfterSec > 0 {
-		p.IdleAfter = time.Duration(lim.IdleAfterSec) * time.Second
+	if lim.IdleAfterSeconds > 0 {
+		p.IdleAfter = time.Duration(lim.IdleAfterSeconds) * time.Second
 	}
-	if lim.YieldGraceSec > 0 {
-		p.YieldGrace = time.Duration(lim.YieldGraceSec) * time.Second
+	if lim.YieldGraceSeconds > 0 {
+		p.YieldGrace = time.Duration(lim.YieldGraceSeconds) * time.Second
 	}
 	p.ServeOnBattery = lim.ServeOnBattery
 	p.MaxTempCelsius = lim.MaxTempCelsius
@@ -289,7 +251,7 @@ func (s *Server) handleLimitsPut(w http.ResponseWriter, r *http.Request) {
 			s.deps.Log.Warn("limits applied but not persisted", "err", err)
 		}
 	}
-	s.handleLimitsGet(w, r)
+	s.GetLimits(w, r)
 }
 
 func windowsToStrings(ws []governor.Window) []string {
@@ -303,22 +265,33 @@ func windowsToStrings(ws []governor.Window) []string {
 
 // ---- logs ----
 
-func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
+// GetLogs implements gen.ServerInterface.
+func (s *Server) GetLogs(w http.ResponseWriter, r *http.Request, params gen.GetLogsParams) {
 	n := 200
-	q := r.URL.Query().Get("n")
-	if q == "" {
-		q = r.URL.Query().Get("limit") // alias; both are natural to reach for
+	if params.N != nil {
+		n = *params.N
+	} else if params.Limit != nil {
+		n = *params.Limit
 	}
-	if q != "" {
-		if v, err := strconv.Atoi(q); err == nil && v > 0 && v <= 1024 {
-			n = v
+	if n < 1 || n > 1024 {
+		n = 200
+	}
+	entries := []gen.LogEntry{}
+	if s.deps.LogRing != nil {
+		for _, e := range s.deps.LogRing.Tail(n) {
+			entries = append(entries, logEntryToGen(e))
 		}
 	}
-	if s.deps.LogRing == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"logs": []any{}})
-		return
+	writeJSON(w, http.StatusOK, gen.LogList{Logs: entries})
+}
+
+func logEntryToGen(e logging.Entry) gen.LogEntry {
+	out := gen.LogEntry{Time: e.Time, Level: e.Level, Message: e.Message}
+	if e.Attrs != "" {
+		a := e.Attrs
+		out.Attrs = &a
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"logs": s.deps.LogRing.Tail(n)})
+	return out
 }
 
 // ---- SSE events ----
@@ -326,7 +299,9 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 // handleEvents streams live daemon events: a `status` snapshot every 2
 // seconds and immediately on governor transitions, `model_progress` during
 // downloads, `models_changed` on load/unload/default/download-complete, and
-// (with ?logs=1) each `log` line as it happens.
+// (with ?logs=1) each `log` line as it happens. Hand-written (SSE and the
+// query-token auth don't fit codegen); documented in api/openapi.yaml under
+// the `events` tag.
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	fl, ok := w.(http.Flusher)
 	if !ok {
@@ -359,10 +334,12 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		evCh = ch
 	}
 	var logCh <-chan logging.Entry
-	if wantLogs, _ := strconv.ParseBool(r.URL.Query().Get("logs")); wantLogs && s.deps.LogRing != nil {
-		ch, cancel := s.deps.LogRing.Subscribe()
-		defer cancel()
-		logCh = ch
+	if q := r.URL.Query().Get("logs"); q == "1" || q == "true" {
+		if s.deps.LogRing != nil {
+			ch, cancel := s.deps.LogRing.Subscribe()
+			defer cancel()
+			logCh = ch
+		}
 	}
 
 	if !sendStatus() {
@@ -392,7 +369,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		case e := <-logCh:
-			if !emit("log", e) {
+			if !emit("log", logEntryToGen(e)) {
 				return
 			}
 		}

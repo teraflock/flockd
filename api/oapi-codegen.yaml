@@ -1,0 +1,11 @@
+# oapi-codegen config for the management server (make gen).
+# The generated router + types are the implementation of api/openapi.yaml —
+# routes and wire types cannot drift from the spec.
+package: gen
+output: internal/localapi/gen/gen.go
+generate:
+  models: true
+  std-http-server: true
+output-options:
+  include-tags:
+    - management
