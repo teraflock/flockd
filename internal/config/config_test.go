@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -75,7 +76,10 @@ func TestValidateRejectsBadPolicy(t *testing.T) {
 func TestLimitsOverlayRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.toml")
-	if err := os.WriteFile(cfgPath, []byte("data_dir = \""+dir+"\"\n[governor]\nserve_policy = \"idle-only\"\n"), 0o600); err != nil {
+	// dir contains raw backslashes on Windows (t.TempDir()); %q escapes them
+	// the way TOML basic strings require, unlike naive quote-wrapping.
+	data := fmt.Sprintf("data_dir = %q\n[governor]\nserve_policy = \"idle-only\"\n", dir)
+	if err := os.WriteFile(cfgPath, []byte(data), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
