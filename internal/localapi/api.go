@@ -19,6 +19,8 @@ type StatusResponse struct {
 	NodeID        string             `json:"node_id"`
 	Version       string             `json:"version"`
 	Standalone    bool               `json:"standalone"`
+	Enrolled      bool               `json:"enrolled"`
+	CertExpiresAt *time.Time         `json:"cert_expires_at,omitempty"`
 	State         string             `json:"state"`
 	UptimeSeconds int64              `json:"uptime_seconds"`
 	DefaultModel  string             `json:"default_model"`
@@ -57,6 +59,17 @@ func (s *Server) status() StatusResponse {
 		DefaultModel:  s.deps.Engine.DefaultModel(),
 		ModelsLoaded:  len(s.deps.Engine.Models()),
 		Stats:         s.deps.Engine.Stats().Snapshot(),
+	}
+	if m := s.deps.Mesh; m != nil {
+		ms := m()
+		resp.Enrolled = ms.Enrolled
+		if ms.NodeID != "" {
+			resp.NodeID = ms.NodeID
+		}
+		if !ms.CertExpiresAt.IsZero() {
+			t := ms.CertExpiresAt
+			resp.CertExpiresAt = &t
+		}
 	}
 	if g := s.deps.Governor; g != nil {
 		resp.State = g.State().String()

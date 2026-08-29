@@ -46,6 +46,12 @@ type Deps struct {
 	// DataDir persists live limit edits (limits.toml overlay); empty
 	// disables persistence.
 	DataDir string
+	// Mesh reports live mesh membership (enrolled, node id, cert expiry).
+	// Nil falls back to the static NodeID with enrolled=false.
+	Mesh func() MeshStatus
+	// Enroll submits a claim code to the running daemon: enrollment plus
+	// tunnel (re)start. Nil (standalone) answers 501.
+	Enroll func(ctx context.Context, claimCode string) error
 	// RequireAuthV1 extends bearer auth to the OpenAI /v1 endpoints.
 	RequireAuthV1 bool
 	// Token authenticates /api/v1 (and /v1 when RequireAuthV1).
@@ -91,6 +97,7 @@ func New(deps Deps) *Server {
 	s.mux.HandleFunc("PUT /api/v1/limits", s.authAPI(s.handleLimitsPut))
 	s.mux.HandleFunc("GET /api/v1/logs", s.authAPI(s.handleLogs))
 	s.mux.HandleFunc("GET /api/v1/events", s.authSSE(s.handleEvents))
+	s.mux.HandleFunc("POST /api/v1/enroll", s.authAPI(s.handleEnroll))
 
 	// Embedded web dashboard at the root.
 	if deps.WebFS != nil {

@@ -345,3 +345,110 @@ func TestEventsStreamRicherEvents(t *testing.T) {
 		t.Fatalf("log data = %s", data)
 	}
 }
+
+func TestEnrollEndpoint(t *testing.T) {
+	var gotCode string
+	certExp := time.Date(2026, 9, 28, 0, 0, 0, 0, time.UTC)
+	enrolled := false
+	s := New(Deps{
+		Engine:  engine.New(nil, nil, nil),
+		Log:     quietLog(),
+		NodeID:  "fingerprint-abc",
+		Version: "test",
+		Token:   testToken,
+		Mesh: func() MeshStatus {
+			if enrolled {
+				return MeshStatus{Enrolled: true, NodeID: "node-assigned", CertExpiresAt: certExp}
+			}
+			return MeshStatus{NodeID: "fingerprint-abc"}
+		},
+		Enroll: func(_ context.Context, code string) error {
+			if code == "busy" {
+				return ErrEnrollInProgress
+			}
+			if code == "bad-code" {
+				return fmt.Errorf("coordinator: claim code rejected")
+			}
+			gotCode = code
+			enrolled = true
+			return nil
+		},
+	})
+	srv := httptest.NewServer(s.Handler())
+	t.Cleanup(srv.Close)
+
+	// Status before: not enrolled, fingerprint id.
+	resp := apiGet(t, srv, "/api/v1/status")
+	var st struct {
+		NodeID   string `json:"node_id"`
+		Enrolled bool   `json:"enrolled"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if st.Enrolled || st.NodeID != "fingerprint-abc" {
+		t.Fatalf("pre-enroll status = %+v", st)
+	}
+
+	// Empty and malformed codes 400.
+	resp = apiPost(t, srv, "/api/v1/enroll", `{"claim_code":"  "}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("empty code = %d, want 400", resp.StatusCode)
+	}
+
+	// Rejected code 502 with the coordinator's message.
+	resp = apiPost(t, srv, "/api/v1/enroll", `{"claim_code":"bad-code"}`)
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("bad code = %d, want 502", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Busy 409.
+	resp = apiPost(t, srv, "/api/v1/enroll", `{"claim_code":"busy"}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("busy = %d, want 409", resp.StatusCode)
+	}
+
+	// Happy path returns the new identity and status flips.
+	resp = apiPost(t, srv, "/api/v1/enroll", `{"claim_code":"tf-claim-xyz"}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("enroll = %d", resp.StatusCode)
+	}
+	var ok struct {
+		OK     bool   `json:"ok"`
+		NodeID string `json:"node_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&ok); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if !ok.OK || ok.NodeID != "node-assigned" || gotCode != "tf-claim-xyz" {
+		t.Fatalf("enroll response = %+v, gotCode = %q", ok, gotCode)
+	}
+
+	resp = apiGet(t, srv, "/api/v1/status")
+	var st2 struct {
+		NodeID        string     `json:"node_id"`
+		Enrolled      bool       `json:"enrolled"`
+		CertExpiresAt *time.Time `json:"cert_expires_at"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&st2); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if !st2.Enrolled || st2.NodeID != "node-assigned" || st2.CertExpiresAt == nil || !st2.CertExpiresAt.Equal(certExp) {
+		t.Fatalf("post-enroll status = %+v", st2)
+	}
+}
+
+func TestEnrollUnavailableWithoutDep(t *testing.T) {
+	srv := newTestServer(t, servingGovernor(t)) // Enroll dep nil
+	resp := apiPost(t, srv, "/api/v1/enroll", `{"claim_code":"x"}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotImplemented {
+		t.Fatalf("enroll without dep = %d, want 501", resp.StatusCode)
+	}
+}
