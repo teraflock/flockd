@@ -27,6 +27,8 @@ type Ring struct {
 	entries []Entry
 	next    int
 	full    bool
+	subs    map[int]chan Entry
+	nextSub int
 }
 
 // NewRing allocates a buffer of n entries.
@@ -44,6 +46,33 @@ func (r *Ring) add(e Entry) {
 	r.next = (r.next + 1) % len(r.entries)
 	if r.next == 0 {
 		r.full = true
+	}
+	// Live followers (SSE log streams). Non-blocking: logging must never
+	// stall on a slow consumer — they drop lines and still hold the ring.
+	for _, ch := range r.subs {
+		select {
+		case ch <- e:
+		default:
+		}
+	}
+}
+
+// Subscribe streams entries as they are logged; call the returned func to
+// detach. Fetch history with Tail — the channel carries only new entries.
+func (r *Ring) Subscribe() (<-chan Entry, func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.subs == nil {
+		r.subs = map[int]chan Entry{}
+	}
+	id := r.nextSub
+	r.nextSub++
+	ch := make(chan Entry, 128)
+	r.subs[id] = ch
+	return ch, func() {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		delete(r.subs, id)
 	}
 }
 

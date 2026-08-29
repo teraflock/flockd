@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/teraflock/flockd/internal/config"
+	"github.com/teraflock/flockd/internal/events"
 	"github.com/teraflock/flockd/internal/governor"
+	"github.com/teraflock/flockd/internal/logging"
 	"github.com/teraflock/flockd/internal/telemetry"
 )
 
@@ -308,8 +310,10 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 
 // ---- SSE events ----
 
-// handleEvents streams a status snapshot every 2 seconds — the live tok/s
-// ticker behind the TUI and web dashboard.
+// handleEvents streams live daemon events: a `status` snapshot every 2
+// seconds and immediately on governor transitions, `model_progress` during
+// downloads, `models_changed` on load/unload/default/download-complete, and
+// (with ?logs=1) each `log` line as it happens.
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	fl, ok := w.(http.Flusher)
 	if !ok {
@@ -320,18 +324,35 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
 
-	send := func() bool {
-		raw, err := json.Marshal(s.status())
+	emit := func(name string, v any) bool {
+		raw, err := json.Marshal(v)
 		if err != nil {
 			return false
 		}
-		if _, err := fmt.Fprintf(w, "event: status\ndata: %s\n\n", raw); err != nil {
+		if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", name, raw); err != nil {
 			return false
 		}
 		fl.Flush()
 		return true
 	}
-	if !send() {
+	sendStatus := func() bool { return emit("status", s.status()) }
+
+	// Nil channels block forever in select, which is exactly the wanted
+	// behavior when a source isn't wired.
+	var evCh <-chan events.Event
+	if s.deps.Events != nil {
+		ch, cancel := s.deps.Events.Subscribe()
+		defer cancel()
+		evCh = ch
+	}
+	var logCh <-chan logging.Entry
+	if wantLogs, _ := strconv.ParseBool(r.URL.Query().Get("logs")); wantLogs && s.deps.LogRing != nil {
+		ch, cancel := s.deps.LogRing.Subscribe()
+		defer cancel()
+		logCh = ch
+	}
+
+	if !sendStatus() {
 		return
 	}
 	t := time.NewTicker(2 * time.Second)
@@ -341,7 +362,24 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case <-t.C:
-			if !send() {
+			if !sendStatus() {
+				return
+			}
+		case ev := <-evCh:
+			// Governor transitions become an immediate fresh snapshot —
+			// clients already know how to read status, and the snapshot
+			// carries the new state plus everything it affects.
+			if ev.Type == "state_change" {
+				if !sendStatus() {
+					return
+				}
+				continue
+			}
+			if !emit(ev.Type, ev.Data) {
+				return
+			}
+		case e := <-logCh:
+			if !emit("log", e) {
 				return
 			}
 		}

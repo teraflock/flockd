@@ -20,6 +20,7 @@ import (
 	"github.com/teraflock/flockd/internal/config"
 	"github.com/teraflock/flockd/internal/engine"
 	"github.com/teraflock/flockd/internal/enroll"
+	"github.com/teraflock/flockd/internal/events"
 	"github.com/teraflock/flockd/internal/governor"
 	"github.com/teraflock/flockd/internal/hardware"
 	"github.com/teraflock/flockd/internal/localapi"
@@ -136,6 +137,20 @@ func run() error {
 	}, governor.NewPlatformIdleSource(), governor.NewPlatformPowerSource(), nil, log)
 	go gov.Run(ctx)
 
+	// ---- event bus (SSE) ----
+	hub := events.NewHub()
+	go func() {
+		ch := gov.Subscribe()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case st := <-ch:
+				hub.Publish("state_change", map[string]string{"state": st.String()})
+			}
+		}
+	}()
+
 	// ---- models & runtime ----
 	stats := telemetry.NewStats()
 	var mgr *models.Manager
@@ -148,6 +163,11 @@ func run() error {
 	touch := func(string) {}
 	if mgr != nil {
 		touch = mgr.Touch
+		mgr.OnProgress = func(id string, received, total int64) {
+			hub.Publish("model_progress", map[string]any{
+				"model": id, "received_bytes": received, "total_bytes": total,
+			})
+		}
 	}
 	eng := engine.New(gov, stats, touch)
 
@@ -182,6 +202,7 @@ func run() error {
 			ManifestPath: cfg.Models.ManifestPath,
 			ManifestURL:  cfg.Models.ManifestURL,
 			OnLoaded:     func(inst rt.Instance) { reportRuntimeBuild(hw, inst, log) },
+			Events:       hub,
 		}
 	}
 
@@ -249,6 +270,7 @@ func run() error {
 		Governor:      gov,
 		Models:        mgr,
 		ModelOps:      ops,
+		Events:        hub,
 		DataDir:       cfg.DataDir,
 		LogRing:       ring,
 		Hardware:      hw,

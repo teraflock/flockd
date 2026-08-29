@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/teraflock/flockd/internal/engine"
+	"github.com/teraflock/flockd/internal/events"
 	"github.com/teraflock/flockd/internal/models"
 	rt "github.com/teraflock/flockd/internal/runtime"
 )
@@ -51,6 +52,10 @@ type Service struct {
 	// OnLoaded is called after a model becomes servable (used to stamp the
 	// runtime build id into the capability profile). May be nil.
 	OnLoaded func(inst rt.Instance)
+
+	// Events receives models_changed on download-complete, load, unload and
+	// default switches. May be nil.
+	Events *events.Hub
 
 	mu        sync.Mutex
 	catalog   *models.Catalog
@@ -141,6 +146,7 @@ func (s *Service) StartDownload(ctx context.Context, id string) (bool, error) {
 			return
 		}
 		s.log().Info("download complete", "model", id)
+		s.Events.Publish("models_changed", map[string]string{"model": id, "change": "downloaded"})
 	}()
 	return true, nil
 }
@@ -228,6 +234,7 @@ func (s *Service) LoadInstance(ctx context.Context, id string) (rt.Instance, err
 		s.OnLoaded(inst)
 	}
 	s.log().Info("model loaded", "model", id)
+	s.Events.Publish("models_changed", map[string]string{"model": id, "change": "loaded"})
 	return inst, nil
 }
 
@@ -243,12 +250,17 @@ func (s *Service) Unload(ctx context.Context, id string) error {
 		s.log().Warn("unload shutdown", "model", id, "err", err)
 	}
 	s.log().Info("model unloaded", "model", id)
+	s.Events.Publish("models_changed", map[string]string{"model": id, "change": "unloaded"})
 	return nil
 }
 
 // SetDefault switches the model served when a request names none.
 func (s *Service) SetDefault(id string) error {
-	return s.Eng.SetDefault(id)
+	if err := s.Eng.SetDefault(id); err != nil {
+		return err
+	}
+	s.Events.Publish("models_changed", map[string]string{"model": id, "change": "default"})
+	return nil
 }
 
 func (s *Service) log() *slog.Logger {
