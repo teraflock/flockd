@@ -29,9 +29,12 @@ API or redeem for cash.
 macOS / Linux:
 
 ```sh
-brew install teraflock/tap/tera          # macOS + Linuxbrew
-curl -fsSL https://teraflock.ai/install.sh | sh   # anything else
+brew install teraflock/tap/tera                   # macOS (cask)
+curl -fsSL https://teraflock.ai/install.sh | sh   # Linux, or anything else
 ```
+
+We publish a Homebrew **cask**, which Homebrew supports only on macOS — on
+Linux use `install.sh`, or the `.deb` / `.rpm` on the release.
 
 Windows: grab the zip from the [latest release](https://github.com/teraflock/flockd/releases/latest)
 (`winget install Teraflock.tera` coming later).

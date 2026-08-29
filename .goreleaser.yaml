@@ -79,25 +79,41 @@ checksum:
 # and Windows Authenticode (Azure Trusted Signing) — required before public
 # distribution; unsigned daemons are dead on arrival (SPEC §A3).
 
-brews:
+# Homebrew distribution is a cask, not a formula: goreleaser hard-deprecated
+# `brews` in v2.16, and Homebrew's own guidance is that pre-built binaries
+# belong in casks rather than formulas that pretend to build from source.
+#
+# Casks are macOS-only. Linuxbrew cannot install them, so Linux users take
+# install.sh or the deb/rpm from nfpms above — install.sh only prefers brew
+# on darwin for exactly this reason.
+homebrew_casks:
   - name: tera
     ids: [default]
+    binaries: [flockd, tera]
     repository:
       owner: teraflock
       name: homebrew-tap
       # Local releases use the ambient GITHUB_TOKEN (gh auth); CI needs a
       # TAP_GITHUB_TOKEN PAT with write access to homebrew-tap.
       token: "{{ .Env.TAP_GITHUB_TOKEN }}"
-    directory: Formula
+    directory: Casks
     homepage: https://teraflock.ai
     description: Teraflock node daemon + CLI — earn credits serving LLM inference on idle hardware
-    license: Apache-2.0
-    install: |
-      bin.install "flockd"
-      bin.install "tera"
+    # Until Developer ID signing + notarization land (SPEC §A3), Gatekeeper
+    # quarantines anything downloaded by the cask and macOS reports the
+    # binaries as "damaged". Strip the xattr at install time so the beta is
+    # usable; this hook goes away when the binaries are properly notarized.
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/tera"]
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/flockd"]
+          end
     caveats: |
-      Binaries are not yet notarized (beta). To join the mesh you need an
-      invite from teraflock.ai — then:
+      Binaries are not yet notarized (beta); the cask strips the macOS
+      quarantine flag on install. To join the mesh you need an invite from
+      teraflock.ai — then:
         tera login      # opens the claim page in your browser
         tera up         # installs and starts the background service
         tera dashboard  # watch it earn
