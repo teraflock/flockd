@@ -82,13 +82,13 @@ insecure             = false    # dev only: plaintext gRPC to the coordinator
                                 # plaintext until mTLS termination lands)
 
 [enroll]
-login_url = "https://teraflock.dev/claim"   # browser page opened by `flock login`
+login_url = "https://teraflock.dev/claim"   # browser page opened by `tera login`
 ```
 
 ## Notes
 
 - **Durations** use Go syntax: `"90s"`, `"2m"`, `"1h30m"`.
-- **Limits set at runtime** (`flock limits`, `PUT /api/v1/limits`, web
+- **Limits set at runtime** (`tera limits`, `PUT /api/v1/limits`, web
   dashboard) apply live to the governor but are *not yet persisted* back to
   `config.toml`; they reset on daemon restart. TODO(persistence).
 - **Secrets on disk** (`node.key`, `local_api_token`, `node_creds.pem`) are

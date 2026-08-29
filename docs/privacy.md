@@ -10,7 +10,7 @@ What `flockd` does on your machine:
 
 - Detects hardware (GPU model/VRAM, CPU, RAM, disk free) and reports it to
   the coordinator so work can be scheduled sensibly. That's the
-  `CapabilityProfile` — you can inspect it with `flock status`.
+  `CapabilityProfile` — you can inspect it with `tera status`.
 - Downloads model files (GGUF) and a pinned `llama-server` build into
   `~/.teraflock`, both SHA256-verified before use. It refuses to run
   anything whose hash doesn't match the manifest.
@@ -41,7 +41,7 @@ The daemon is Apache-2.0 open source specifically so you can verify all of
 the above instead of trusting this document.
 
 Uninstall is one command and leaves nothing behind:
-`flock uninstall --purge`.
+`tera uninstall --purge`.
 
 ## For API customers
 

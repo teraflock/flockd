@@ -188,7 +188,7 @@ func (s *Server) authAPIOpts(next http.HandlerFunc, allowQuery bool) http.Handle
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !s.checkTokenOpts(r, allowQuery) {
 			writeOpenAIError(w, http.StatusUnauthorized, "invalid_request_error",
-				"missing or invalid bearer token (run `flock token` to print it, or read local_api_token in the daemon's data dir)")
+				"missing or invalid bearer token (run `tera token` to print it, or read local_api_token in the daemon's data dir)")
 			return
 		}
 		next(w, r)

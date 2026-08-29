@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// LoginFlow implements the `flock login` browser handoff: a PKCE-style
+// LoginFlow implements the `tera login` browser handoff: a PKCE-style
 // loopback callback that receives the claim code from the signup page.
 //
 //  1. generate code_verifier + S256 challenge

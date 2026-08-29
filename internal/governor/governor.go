@@ -157,7 +157,7 @@ func (g *Governor) Run(ctx context.Context) {
 	}
 }
 
-// SetPolicy swaps the policy at runtime (`flock limits` / PUT /api/v1/limits).
+// SetPolicy swaps the policy at runtime (`tera limits` / PUT /api/v1/limits).
 // The next evaluate() applies it.
 func (g *Governor) SetPolicy(p Policy) {
 	if p.YieldGrace <= 0 {

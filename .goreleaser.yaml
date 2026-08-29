@@ -20,9 +20,9 @@ builds:
         goarch: arm64
     ldflags:
       - -s -w -X main.version={{.Version}}
-  - id: flock
-    main: ./cmd/flock
-    binary: flock
+  - id: tera
+    main: ./cmd/tera
+    binary: tera
     env: [CGO_ENABLED=0]
     goos: [darwin, linux, windows]
     goarch: [amd64, arm64]
@@ -37,14 +37,14 @@ universal_binaries:
     ids: [flockd]
     name_template: flockd
     replace: true
-  - id: flock-universal
-    ids: [flock]
-    name_template: flock
+  - id: tera-universal
+    ids: [tera]
+    name_template: tera
     replace: true
 
 archives:
   - id: default
-    ids: [flockd, flock, flockd-universal, flock-universal]
+    ids: [flockd, tera, flockd-universal, tera-universal]
     formats: [tar.gz]
     format_overrides:
       - goos: windows
@@ -54,7 +54,7 @@ archives:
 nfpms:
   - id: packages
     package_name: teraflock
-    ids: [flockd, flock]
+    ids: [flockd, tera]
     vendor: Teraflock
     homepage: https://teraflock.ai
     maintainer: Teraflock <hello@teraflock.ai>
@@ -80,7 +80,7 @@ checksum:
 # distribution; unsigned daemons are dead on arrival (SPEC §A3).
 
 brews:
-  - name: flock
+  - name: tera
     ids: [default]
     repository:
       owner: teraflock
@@ -94,25 +94,25 @@ brews:
     license: Apache-2.0
     install: |
       bin.install "flockd"
-      bin.install "flock"
+      bin.install "tera"
     caveats: |
       Binaries are not yet notarized (beta). To join the mesh you need an
       invite from teraflock.ai — then:
-        flock login      # opens the claim page in your browser
-        flock up         # installs and starts the background service
-        flock dashboard  # watch it earn
+        tera login      # opens the claim page in your browser
+        tera up         # installs and starts the background service
+        tera dashboard  # watch it earn
     skip_upload: false
 
 winget:
-  - name: flock
+  - name: tera
     publisher: Teraflock
-    package_identifier: Teraflock.flock
+    package_identifier: Teraflock.tera
     short_description: Teraflock node daemon + CLI
     license: Apache-2.0
     repository:
       owner: teraflock
       name: winget-pkgs
-      branch: flock-{{.Version}}
+      branch: tera-{{.Version}}
     skip_upload: true # TODO(keys): flip when the publisher account exists
 
 release:

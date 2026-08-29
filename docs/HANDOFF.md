@@ -47,7 +47,7 @@ path.
   OpenAI error shapes; 503 on yield. 12-test suite.
 - **Telemetry**: rolling 1-minute tok/s window, counters, heartbeat
   assembly.
-- **CLI/TUI** (`cmd/flock`): up/down/status/login/models(list|pin|rm)/
+- **CLI/TUI** (`cmd/tera`): up/down/status/login/models(list|pin|rm)/
   limits/earnings/redeem/dashboard(TUI + --web)/version/uninstall(--purge).
   Bubbletea dashboard with sparkline, earnings ticker, model slots.
 - **Web dashboard** (`web/`): React+TS+Tailwind(4)+TanStack Query source,
@@ -72,8 +72,8 @@ path.
   real node — wire `models.Manager` + `engine.Register` in
   `cmd/flockd/startTunnel`).
 - **ConfigUpdate** from coordinator: logged, not applied mid-session.
-- **Enroll-without-restart**: `flock login` stores the claim code and the
-  daemon consumes it on next start (`flock down && flock up`). Triggering
+- **Enroll-without-restart**: `tera login` stores the claim code and the
+  daemon consumes it on next start (`tera down && tera up`). Triggering
   enrollment through the running daemon's local API is still TODO.
 - **Cert rotation**: `enroll.RotateIfNeeded` scaffolded (re-enrolls within
   7 days of expiry); needs the real coordinator's rotation semantics and a
@@ -114,12 +114,12 @@ path.
 A real daemon now joins a real coordinator end to end:
 
 ```sh
-flock login --claim-code <code>     # or the browser PKCE flow
+tera login --claim-code <code>     # or the browser PKCE flow
 FLOCKD_TUNNEL__COORDINATOR_ADDR=coordinator:9090 flockd
 ```
 
 - `enroll.{Save,Read,Clear}ClaimCode` own the `<data_dir>/claim_code`
-  handoff between the `flock` and `flockd` processes.
+  handoff between the `tera` and `flockd` processes.
 - `ensureEnrolled` (cmd/flockd) exchanges the code for credentials over a
   server-authenticated bootstrap dial, persists them, and clears the spent
   code. A failed enrollment keeps the code (an unreachable coordinator must
@@ -129,7 +129,7 @@ FLOCKD_TUNNEL__COORDINATOR_ADDR=coordinator:9090 flockd
   and every session was rejected with "unknown node". `fakecoord` now
   enforces the same rule so the test suite catches it
   (`TestSessionRejectsUnenrolledNodeID`).
-- `flock` resolves `data_dir` through the same config chain as `flockd`, so a
+- `tera` resolves `data_dir` through the same config chain as `flockd`, so a
   moved data dir cannot silently break the handoff.
 - `--standalone` enrolls into `<data_dir>/standalone/` so it can never
   overwrite a real mesh identity.
@@ -168,17 +168,17 @@ leading space produced an "invalid token" indistinguishable from a wrong
 one. `/api/v1/events` additionally accepts `?token=` because EventSource
 cannot set headers; every other route rejects query tokens.
 
-`flock token` prints the token (bare on stdout, hint on stderr, so
-`| pbcopy` works). The CLI resolves it from `--token`, then `$FLOCK_TOKEN`,
+`tera token` prints the token (bare on stdout, hint on stderr, so
+`| pbcopy` works). The CLI resolves it from `--token`, then `$TERA_TOKEN`,
 then `<data_dir>/local_api_token`, and a 401 names the path it searched —
-a data-dir mismatch between `flock` and `flockd` is the usual cause.
+a data-dir mismatch between `tera` and `flockd` is the usual cause.
 
 ## Deviations from SPEC (deliberate, Phase 0)
 
 - Tunnel transport is gRPC over H2/TLS behind the `Dialer` seam; QUIC is
   documented as the production transport but not implemented (SPEC allows
   the fallback; quic-go adds a lot of surface for zero Phase 0 value).
-- `flock up` installs a **user-level** service (LaunchAgent / systemd
+- `tera up` installs a **user-level** service (LaunchAgent / systemd
   --user), not a system daemon — no root, loopback only, simpler uninstall.
 - Earnings numbers in standalone mode are explicitly labelled simulated
   (55 µcredits/completion token ≈ SPEC §7 "small" payout class).
