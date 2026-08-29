@@ -22,6 +22,7 @@ import (
 	tunnelv1 "github.com/teraflock/proto/gen/go/flock/tunnel/v1"
 	typesv1 "github.com/teraflock/proto/gen/go/flock/types/v1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -75,12 +76,20 @@ func New() (*Coordinator, error) {
 		return nil, err
 	}
 	c := &Coordinator{
-		signPriv:   priv,
-		signPub:    pub,
-		caCert:     caCert,
-		caKey:      caKey,
-		lis:        bufconn.Listen(1 << 20),
-		srv:        grpc.NewServer(),
+		signPriv: priv,
+		signPub:  pub,
+		caCert:   caCert,
+		caKey:    caKey,
+		lis:      bufconn.Listen(1 << 20),
+		// Must mirror the real coordinator's enforcement policy. gRPC's
+		// default rejects clients pinging more often than every 5 minutes
+		// with GOAWAY "too_many_pings" — and the daemon pings every 20s
+		// (tunnel.PingInterval), so a default server here would drop every
+		// standalone session on a timer.
+		srv: grpc.NewServer(grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             10 * time.Second,
+			PermitWithoutStream: true,
+		})),
 		enrolled:   map[string]bool{},
 		pending:    map[string]chan *tunnelv1.TokenChunk{},
 		pendingEmb: map[string]chan *tunnelv1.EmbeddingResult{},
