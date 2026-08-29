@@ -23,6 +23,7 @@ import (
 	"github.com/teraflock/flockd/internal/engine"
 	"github.com/teraflock/flockd/internal/governor"
 	"github.com/teraflock/flockd/internal/logging"
+	"github.com/teraflock/flockd/internal/modelops"
 	"github.com/teraflock/flockd/internal/models"
 	typesv1 "github.com/teraflock/proto/gen/go/flock/types/v1"
 )
@@ -32,6 +33,7 @@ type Deps struct {
 	Engine     *engine.Engine
 	Governor   *governor.Governor // may be nil
 	Models     *models.Manager    // may be nil
+	ModelOps   *modelops.Service  // may be nil (mock/vllm runtimes)
 	LogRing    *logging.Ring      // may be nil
 	Hardware   *typesv1.CapabilityProfile
 	Log        *slog.Logger
@@ -39,6 +41,9 @@ type Deps struct {
 	NodeID     string
 	Version    string
 	Standalone bool
+	// DataDir persists live limit edits (limits.toml overlay); empty
+	// disables persistence.
+	DataDir string
 	// RequireAuthV1 extends bearer auth to the OpenAI /v1 endpoints.
 	RequireAuthV1 bool
 	// Token authenticates /api/v1 (and /v1 when RequireAuthV1).
@@ -66,10 +71,18 @@ func New(deps Deps) *Server {
 	s.mux.HandleFunc("POST /v1/completions", s.authV1(s.handleCompletions))
 	s.mux.HandleFunc("POST /v1/embeddings", s.authV1(s.handleEmbeddings))
 
-	// Daemon management API.
+	// Daemon management API. /health is deliberately unauthenticated:
+	// `tera up` and the desktop app probe it before they hold a token.
+	s.mux.HandleFunc("GET /api/v1/health", s.handleHealth)
 	s.mux.HandleFunc("GET /api/v1/status", s.authAPI(s.handleStatus))
+	s.mux.HandleFunc("GET /api/v1/catalog", s.authAPI(s.handleCatalog))
 	s.mux.HandleFunc("GET /api/v1/models", s.authAPI(s.handleModels))
 	s.mux.HandleFunc("POST /api/v1/models/{id}/pin", s.authAPI(s.handleModelPin))
+	s.mux.HandleFunc("POST /api/v1/models/{id}/download", s.authAPI(s.handleModelDownload))
+	s.mux.HandleFunc("DELETE /api/v1/models/{id}/download", s.authAPI(s.handleModelDownloadCancel))
+	s.mux.HandleFunc("POST /api/v1/models/{id}/load", s.authAPI(s.handleModelLoad))
+	s.mux.HandleFunc("POST /api/v1/models/{id}/unload", s.authAPI(s.handleModelUnload))
+	s.mux.HandleFunc("POST /api/v1/models/{id}/default", s.authAPI(s.handleModelDefault))
 	s.mux.HandleFunc("DELETE /api/v1/models/{id}", s.authAPI(s.handleModelRemove))
 	s.mux.HandleFunc("GET /api/v1/earnings", s.authAPI(s.handleEarnings))
 	s.mux.HandleFunc("GET /api/v1/limits", s.authAPI(s.handleLimitsGet))

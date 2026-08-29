@@ -89,8 +89,10 @@ login_url = "https://teraflock.dev/claim"   # browser page opened by `tera login
 
 - **Durations** use Go syntax: `"90s"`, `"2m"`, `"1h30m"`.
 - **Limits set at runtime** (`tera limits`, `PUT /api/v1/limits`, web
-  dashboard) apply live to the governor but are *not yet persisted* back to
-  `config.toml`; they reset on daemon restart. TODO(persistence).
+  dashboard, desktop app) apply live and persist to `<data_dir>/limits.toml`,
+  a daemon-owned overlay applied on top of `config.toml` at startup — your
+  `config.toml` is never rewritten. Delete `limits.toml` to fall back to
+  `config.toml`'s `[governor]` values.
 - **Secrets on disk** (`node.key`, `local_api_token`, `node_creds.pem`) are
   written 0600 under `data_dir`. Migration to OS keychain / DPAPI / secret
   service is a documented TODO (SPEC §A1.2).

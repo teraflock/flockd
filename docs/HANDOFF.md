@@ -87,8 +87,8 @@ path.
 2. **Phase 1 tunnel remainder**: QUIC `Dialer` (quic-go); cert rotation call
    site; ModelAssignment → download/load/evict. (Enrollment against the real
    coordinator now works — see below.)
-3. **Limits persistence**: PUT /api/v1/limits should write back to
-   config.toml (koanf marshal) — currently live-only.
+3. **Limits persistence**: DONE — PUT /api/v1/limits persists to a
+   daemon-owned `<data_dir>/limits.toml` overlay (config.toml untouched).
 4. **Keychain**: move `node.key` and `local_api_token` to
    Keychain/DPAPI/secret-service (files are 0600 today, documented).
 5. **Windows**: GetLastInputInfo idle source, GlobalMemoryStatusEx +
