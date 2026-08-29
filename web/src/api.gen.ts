@@ -572,7 +572,7 @@ export interface components {
                 "application/json": components["schemas"]["Error"];
             };
         };
-        /** @description Not available on this node (mock/vllm runtime, or standalone). */
+        /** @description Not available on this node (mock runtime, or standalone). */
         Unsupported: {
             headers: {
                 [name: string]: unknown;

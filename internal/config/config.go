@@ -46,7 +46,7 @@ type LocalAPI struct {
 }
 
 type Runtime struct {
-	// Kind selects the runtime adapter: "llamacpp", "vllm", or "mock".
+	// Kind selects the runtime adapter: "llamacpp" or "mock".
 	Kind string `koanf:"kind"`
 	// LlamaServerPath, when set, uses an existing llama-server binary
 	// instead of downloading one from the artifact manifest.
@@ -59,12 +59,6 @@ type Runtime struct {
 	MockTokensPerSec float64 `koanf:"mock_tokens_per_sec"`
 	// ContextLength override passed to llama-server (0 = model default).
 	ContextLength int `koanf:"context_length"`
-	// VLLMBaseURL is the base URL of a running vLLM server, e.g.
-	// "http://localhost:8000". Required when kind = "vllm".
-	VLLMBaseURL string `koanf:"vllm_base_url"`
-	// VLLMModel is the model name to use in vLLM requests. If empty, the
-	// first model reported by vLLM's /v1/models is used.
-	VLLMModel string `koanf:"vllm_model"`
 }
 
 type Governor struct {
@@ -280,12 +274,9 @@ func (c Config) Validate() error {
 		return fmt.Errorf("config: invalid governor.serve_policy %q (want always|idle-only|scheduled)", c.Governor.ServePolicy)
 	}
 	switch c.Runtime.Kind {
-	case "llamacpp", "vllm", "mock":
+	case "llamacpp", "mock":
 	default:
-		return fmt.Errorf("config: invalid runtime.kind %q (want llamacpp|vllm|mock)", c.Runtime.Kind)
-	}
-	if c.Runtime.Kind == "vllm" && c.Runtime.VLLMBaseURL == "" {
-		return fmt.Errorf("config: runtime.vllm_base_url is required when runtime.kind = \"vllm\"")
+		return fmt.Errorf("config: invalid runtime.kind %q (want llamacpp|mock)", c.Runtime.Kind)
 	}
 	if c.Budget.MaxVRAMPercent < 1 || c.Budget.MaxVRAMPercent > 100 {
 		return fmt.Errorf("config: budget.max_vram_percent must be 1-100, got %d", c.Budget.MaxVRAMPercent)

@@ -443,7 +443,7 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
     Unsupported:
-      description: Not available on this node (mock/vllm runtime, or standalone).
+      description: Not available on this node (mock runtime, or standalone).
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }

@@ -36,8 +36,8 @@ type Loader interface {
 	Load(ctx context.Context, m rt.ModelSpec, res rt.ResourceBudget) (rt.Instance, error)
 }
 
-// Service wires catalog + cache + runtime together. Nil Service (mock/vllm
-// runtimes) means the local API reports these operations unsupported.
+// Service wires catalog + cache + runtime together. Nil Service (mock
+// runtime) means the local API reports these operations unsupported.
 type Service struct {
 	Mgr    *models.Manager
 	Eng    *engine.Engine

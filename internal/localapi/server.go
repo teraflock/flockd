@@ -35,7 +35,7 @@ type Deps struct {
 	Engine     *engine.Engine
 	Governor   *governor.Governor // may be nil
 	Models     *models.Manager    // may be nil
-	ModelOps   *modelops.Service  // may be nil (mock/vllm runtimes)
+	ModelOps   *modelops.Service  // may be nil (mock runtime)
 	Events     *events.Hub        // may be nil (SSE then ticks status only)
 	LogRing    *logging.Ring      // may be nil
 	Hardware   *typesv1.CapabilityProfile

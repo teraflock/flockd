@@ -13,7 +13,7 @@ import (
 func (s *Server) modelOps(w http.ResponseWriter) *modelops.Service {
 	if s.deps.ModelOps == nil {
 		writeOpenAIError(w, http.StatusNotImplemented, "invalid_request_error",
-			"model operations need the llamacpp runtime (mock/vllm nodes manage models externally)")
+			"model operations need the llamacpp runtime (mock has no model catalog to operate on)")
 		return nil
 	}
 	return s.deps.ModelOps

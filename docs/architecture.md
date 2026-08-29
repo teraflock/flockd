@@ -48,8 +48,7 @@ cgo (SPEC §A1.3).
 
 ## Key seams
 
-- **`runtime.Runtime`** — llamacpp and mock today; vLLM adapter later
-  implements the same three methods.
+- **`runtime.Runtime`** — llamacpp and mock implement the same three methods.
 - **`tunnel.Dialer`** — swap gRPC/H2 for QUIC without touching session
   logic.
 - **`engine.Engine`** — the local API and coordinator dispatch share one

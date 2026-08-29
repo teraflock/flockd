@@ -98,36 +98,19 @@ for await (const chunk of stream) {
 }
 ```
 
-`/v1/completions` and `/v1/embeddings` work too. To serve a **real model**, choose a runtime adapter:
-
-**llamacpp** — flockd downloads and manages a llama-server subprocess:
+`/v1/completions` and `/v1/embeddings` work too. To serve a **real model**,
+point the daemon at a llama-server binary and a model catalog:
 
 ```toml
 # ~/.teraflock/config.toml
 [runtime]
 kind = "llamacpp"
-llama_server_path = "/opt/homebrew/bin/llama-server"   # or omit to auto-download
+llama_server_path = "/opt/homebrew/bin/llama-server"
 
 [models]
 manifest_path = "/path/to/catalog.yaml"   # teraflock/models format
 default = "llama-3.1-8b-instruct-q4_k_m"
 ```
-
-**vllm** — proxy to an already-running vLLM server (useful when vLLM is
-already loaded on a machine with a large GPU and you don't want to interrupt
-it):
-
-```toml
-# ~/.teraflock/config.toml
-[runtime]
-kind = "vllm"
-vllm_base_url = "http://localhost:8000"   # your vLLM server
-# vllm_model = "..."                      # optional; auto-detected from /v1/models
-```
-
-flockd health-gates the vLLM server on startup and proxies all
-OpenAI-compatible requests to it. vLLM's lifecycle is entirely external —
-`flockd --standalone` does not start or stop it.
 
 Then watch it work:
 
@@ -167,11 +150,9 @@ these are hard rules, enforced by the governor and its test suite:
 
 ```
 OpenAI SDKs ──▶ localhost:7777/v1 ─┐
-tera CLI/TUI ─▶ /api/v1 ───────────┼─▶ engine ─▶ governor ─▶ runtime adapter
-web dashboard ▶ / (go:embed) ──────┘        ▲         ├─ llamacpp  (llama-server subprocess)
-coordinator ◀── mTLS tunnel (outbound only) ┘         ├─ vllm      (proxy to existing vLLM server)
-                                                       └─ mock      (deterministic, for tests)
-(in-process fake coordinator in --standalone)
+tera CLI/TUI ─▶ /api/v1 ───────────┼─▶ engine ─▶ governor ─▶ runtime (llama-server subprocess / mock)
+web dashboard ▶ / (go:embed) ──────┘        ▲
+coordinator ◀── mTLS tunnel (outbound only) ┘   (in-process fake coordinator in --standalone)
 ```
 
 More in [docs/architecture.md](docs/architecture.md). Protocol contracts

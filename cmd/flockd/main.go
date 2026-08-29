@@ -30,7 +30,6 @@ import (
 	"github.com/teraflock/flockd/internal/models"
 	rt "github.com/teraflock/flockd/internal/runtime"
 	"github.com/teraflock/flockd/internal/runtime/llamacpp"
-	"github.com/teraflock/flockd/internal/runtime/vllm"
 	"github.com/teraflock/flockd/internal/telemetry"
 	"github.com/teraflock/flockd/internal/tunnel"
 	"github.com/teraflock/flockd/internal/tunnel/fakecoord"
@@ -179,8 +178,8 @@ func run() error {
 	}
 
 	// modelops backs both startup model loading and the local API's
-	// on-demand download/load/switch routes (llamacpp only: mock and vllm
-	// nodes have no catalog or artifact cache to operate on).
+	// on-demand download/load/switch routes (llamacpp only: the mock
+	// runtime has no catalog or artifact cache to operate on).
 	var ops *modelops.Service
 	if cfg.Runtime.Kind == "llamacpp" {
 		adapter := &llamacpp.Adapter{
@@ -411,22 +410,6 @@ func loadDefaultModel(ctx context.Context, cfg config.Config, hw *typesv1.Capabi
 		}
 		log.Info("llama-server loaded", "model", cfg.Models.Default)
 		return nil
-
-	case "vllm":
-		adapter := &vllm.Adapter{
-			BaseURL: cfg.Runtime.VLLMBaseURL,
-			Model:   cfg.Runtime.VLLMModel,
-		}
-		inst, err := adapter.Load(ctx, rt.ModelSpec{}, budget)
-		if err != nil {
-			return err
-		}
-		spec := rt.ModelSpec{ID: adapter.Model}
-		eng.Register(spec, inst)
-		reportRuntimeBuild(hw, inst, log)
-		log.Info("vllm proxy loaded", "model", adapter.Model, "base_url", cfg.Runtime.VLLMBaseURL)
-		return nil
-
 	default:
 		return fmt.Errorf("unknown runtime kind %q", cfg.Runtime.Kind)
 	}
