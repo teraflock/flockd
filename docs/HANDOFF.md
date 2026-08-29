@@ -72,9 +72,10 @@ path.
   real node — wire `models.Manager` + `engine.Register` in
   `cmd/flockd/startTunnel`).
 - **ConfigUpdate** from coordinator: logged, not applied mid-session.
-- **Enroll-without-restart**: `tera login` stores the claim code and the
-  daemon consumes it on next start (`tera down && tera up`). Triggering
-  enrollment through the running daemon's local API is still TODO.
+- **Enroll-without-restart**: DONE — `POST /api/v1/enroll` enrolls (or
+  re-enrolls after a mesh-CA rotation, which the startup path cannot do)
+  and swaps the tunnel client live. `tera login`'s claim-code file +
+  restart flow still works for the CLI.
 - **Cert rotation**: `enroll.RotateIfNeeded` scaffolded (re-enrolls within
   7 days of expiry); needs the real coordinator's rotation semantics and a
   call site on session start.
@@ -106,8 +107,10 @@ path.
 9. **Release eng**: wire real signing (cosign, notarytool) into
    `.goreleaser.yaml` — the config carries `TODO(keys)` markers; brew tap +
    winget publish once orgs/certs exist.
-10. **OpenAPI spec** for the local API (SPEC §A5.4) and generated TS types
-    for the dashboard.
+10. **OpenAPI spec**: DONE — `api/openapi.yaml` *generates* the management
+    router and wire types (oapi-codegen, `make gen`, CI-guarded via
+    `make gen-check`) plus the dashboard's and desktop app's TS types.
+    Never edit `internal/localapi/gen/` by hand.
 
 ## Mesh enrollment (Phase 1, working)
 
