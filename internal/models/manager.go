@@ -15,6 +15,7 @@ import (
 	"slices"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,6 +25,36 @@ import (
 // ErrSHAMismatch means a downloaded artifact failed verification. The
 // daemon refuses to serve hash-mismatched files (SPEC §6).
 var ErrSHAMismatch = errors.New("models: sha256 mismatch")
+
+// ErrInvalidID rejects a model id that is unsafe to use as a path component.
+var ErrInvalidID = errors.New("models: invalid model id")
+
+// maxIDLen bounds an id so a hostile catalog cannot produce an unusable path.
+const maxIDLen = 128
+
+// ValidateID rejects ids that must never reach filepath.Join. Catalog entries
+// arrive over the network (models.manifest_url is a remote default), so an id
+// such as "../../etc/cron.d/evil" would otherwise escape Dir and let a
+// compromised catalog write anywhere the daemon can.
+func ValidateID(id string) error {
+	if id == "" || len(id) > maxIDLen {
+		return fmt.Errorf("%w: %q", ErrInvalidID, id)
+	}
+	// "." is allowed inside an id (version suffixes like v1.5), so ".." has to
+	// be rejected explicitly — an allowlist of characters alone would pass it.
+	if strings.Contains(id, "..") || id[0] == '.' || id[0] == '-' {
+		return fmt.Errorf("%w: %q", ErrInvalidID, id)
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '.', r == '_', r == '-':
+		default:
+			return fmt.Errorf("%w: %q", ErrInvalidID, id)
+		}
+	}
+	return nil
+}
 
 // Manager owns <data_dir>/models: downloads, verification, pins and LRU
 // eviction under the disk budget.
@@ -75,6 +106,14 @@ func NewManager(dir string, maxDiskMB int64, log *slog.Logger) (*Manager, error)
 	if m.state.Entries == nil {
 		m.state.Entries = map[string]*cacheEntry{}
 	}
+	// A models.json written before ValidateID existed (or tampered with) must
+	// not seed the cache with ids that escape Dir when joined into a path.
+	for id := range m.state.Entries {
+		if err := ValidateID(id); err != nil {
+			log.Warn("models: dropping cache entry with unsafe id", "id", id)
+			delete(m.state.Entries, id)
+		}
+	}
 	return m, nil
 }
 
@@ -100,6 +139,10 @@ func (m *Manager) Ensure(ctx context.Context, spec *typesv1.ModelSpec) (string, 
 	// would be absurd, and since we do not own the file the LRU must never
 	// be allowed to delete it — so it is deliberately not registered in the
 	// cache state at all.
+	if err := ValidateID(spec.GetId()); err != nil {
+		return "", err
+	}
+
 	if path, ok := LocalArtifactPath(spec.GetArtifactUrl()); ok {
 		return m.ensureLocal(path, spec)
 	}
@@ -291,6 +334,12 @@ func (m *Manager) Pin(id string, pinned bool) error {
 
 // Remove deletes a model from the cache.
 func (m *Manager) Remove(id string) error {
+	// Reachable from the local API with an operator-supplied id, and the
+	// cache state on disk may predate ValidateID — so re-check before
+	// os.Remove turns an id into a path.
+	if err := ValidateID(id); err != nil {
+		return err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.state.Entries[id]; !ok {
