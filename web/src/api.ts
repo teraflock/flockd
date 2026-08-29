@@ -1,6 +1,6 @@
 // Typed client for the daemon's local API (/api/v1). The bearer token comes
 // from <data_dir>/local_api_token and is stored in localStorage after the
-// operator pastes it once (flock dashboard --web prints it).
+// operator pastes it once (tera dashboard --web prints it).
 
 export interface GpuSummary {
   vendor: string;

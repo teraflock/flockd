@@ -1,4 +1,4 @@
-// Command flock is the operator CLI/TUI for the Teraflock node daemon. All
+// Command tera is the operator CLI/TUI for the Teraflock node daemon. All
 // commands are clients of the daemon's local API on localhost:7777.
 package main
 
@@ -61,14 +61,14 @@ var (
 
 func main() {
 	root := &cobra.Command{
-		Use:           "flock",
+		Use:           "tera",
 		Short:         "Teraflock node CLI — earn credits serving open-weight LLM inference on idle hardware",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
 	root.PersistentFlags().StringVar(&flagAPI, "api", "http://127.0.0.1:7777", "daemon local API base URL")
 	root.PersistentFlags().StringVar(&flagDataDir, "data-dir", "", "daemon data directory (for the auth token)")
-	root.PersistentFlags().StringVar(&flagToken, "token", "", "local API bearer token (default: $FLOCK_TOKEN, else <data-dir>/local_api_token)")
+	root.PersistentFlags().StringVar(&flagToken, "token", "", "local API bearer token (default: $TERA_TOKEN, else <data-dir>/local_api_token)")
 
 	root.AddCommand(
 		cmdUp(), cmdDown(), cmdStatus(), cmdLogin(), cmdModels(), cmdLimits(),
@@ -81,7 +81,7 @@ func main() {
 	}
 }
 
-// findFlockd locates the daemon binary (next to flock, then PATH).
+// findFlockd locates the daemon binary (next to tera, then PATH).
 func findFlockd() (string, error) {
 	self, err := os.Executable()
 	if err == nil {
@@ -101,7 +101,7 @@ func cmdUp() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			bin, err := findFlockd()
 			if err != nil {
-				return fmt.Errorf("flockd binary not found (install it next to flock or on PATH): %w", err)
+				return fmt.Errorf("flockd binary not found (install it next to tera or on PATH): %w", err)
 			}
 			daemonArgs := []string{}
 			if standalone {
@@ -125,7 +125,7 @@ func cmdUp() *cobra.Command {
 			// The service manager returns as soon as the process exec'd —
 			// a daemon that dies during boot (missing runtime, bad config)
 			// looks identical to a healthy start. Poll the local API until
-			// it answers, so `flock up` fails loudly instead of leaving a
+			// it answers, so `tera up` fails loudly instead of leaving a
 			// crash-looping unit behind.
 			waitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 			defer cancel()
@@ -137,10 +137,10 @@ func cmdUp() *cobra.Command {
 						fmt.Println(styleDim.Render("    " + line))
 					}
 				}
-				return fmt.Errorf("daemon did not come up within 10s (try `flock down` to stop the restart loop): %w", err)
+				return fmt.Errorf("daemon did not come up within 10s (try `tera down` to stop the restart loop): %w", err)
 			}
 			fmt.Println(styleOK.Render("✓"), "flockd service installed and started")
-			fmt.Println(styleDim.Render("  check it with `flock status` or `flock dashboard`"))
+			fmt.Println(styleDim.Render("  check it with `tera status` or `tera dashboard`"))
 			return nil
 		},
 	}
@@ -319,7 +319,7 @@ func cmdLogin() *cobra.Command {
 				}
 				claimCode = res.ClaimCode
 			}
-			// The daemon consumes this on its next start (`flock`/`flockd` are
+			// The daemon consumes this on its next start (`tera`/`flockd` are
 			// separate processes, so the data dir is the handoff).
 			if err := enroll.SaveClaimCode(dataDir(), claimCode); err != nil {
 				return err
@@ -332,15 +332,15 @@ func cmdLogin() *cobra.Command {
 			if st, err := m.Status(cmd.Context()); err == nil && st == svc.StatusRunning {
 				fmt.Println("  restarting flockd to complete enrollment…")
 				if err := m.Stop(cmd.Context()); err != nil {
-					return fmt.Errorf("stop service: %w (run `flock down && flock up` manually)", err)
+					return fmt.Errorf("stop service: %w (run `tera down && tera up` manually)", err)
 				}
 				if err := m.Start(cmd.Context()); err != nil {
-					return fmt.Errorf("start service: %w (run `flock up` manually)", err)
+					return fmt.Errorf("start service: %w (run `tera up` manually)", err)
 				}
-				fmt.Println(styleOK.Render("✓"), "daemon restarted — check `flock status` in a moment")
+				fmt.Println(styleOK.Render("✓"), "daemon restarted — check `tera status` in a moment")
 				return nil
 			}
-			fmt.Println(styleDim.Render("  run `flock up` to start the daemon and complete enrollment"))
+			fmt.Println(styleDim.Render("  run `tera up` to start the daemon and complete enrollment"))
 			return nil
 		},
 	}
@@ -538,7 +538,7 @@ func cmdToken() *cobra.Command {
 				return fmt.Errorf("no token at %s — is this the data dir flockd uses? "+
 					"Override with --data-dir or FLOCKD_DATA_DIR", path)
 			}
-			// Bare token on stdout so `flock token | pbcopy` works; the hint
+			// Bare token on stdout so `tera token | pbcopy` works; the hint
 			// goes to stderr so it never pollutes a pipe.
 			fmt.Fprintln(os.Stderr, styleDim.Render("token from "+path+" — paste into http://127.0.0.1:7777"))
 			fmt.Println(strings.TrimSpace(string(raw)))
@@ -552,7 +552,7 @@ func cmdVersion() *cobra.Command {
 		Use:   "version",
 		Short: "Print version",
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Println("flock", version)
+			fmt.Println("tera", version)
 		},
 	}
 }

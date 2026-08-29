@@ -83,7 +83,7 @@ jobs:
         run: |
           go build ./...
           go build -o /dev/null ./cmd/flockd
-          go build -o /dev/null ./cmd/flock
+          go build -o /dev/null ./cmd/tera
 
   web:
     runs-on: ubuntu-latest

@@ -213,7 +213,7 @@ func TestFetcherBinaryPathMissing(t *testing.T) {
 	}
 }
 
-// Preflight is what `flock up` calls before installing a service unit —
+// Preflight is what `tera up` calls before installing a service unit —
 // it must reject platforms the catalog has no build for, so we don't
 // leave a crash-looping daemon behind. This is the exact bug that
 // prompted its introduction: a linux/amd64 CUDA box against a catalog

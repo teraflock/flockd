@@ -161,7 +161,7 @@ func sparkline(vals []float64, width int) string {
 func (m *dashModel) View() string {
 	if !m.haveOne {
 		if m.lastErr != nil {
-			return dashPanel.Render(dashAmber.Render("cannot reach flockd") + "\n" + m.lastErr.Error() + "\n\n" + dashLabel.Render("start it with `flock up` or `flockd --standalone`  ·  q to quit"))
+			return dashPanel.Render(dashAmber.Render("cannot reach flockd") + "\n" + m.lastErr.Error() + "\n\n" + dashLabel.Render("start it with `tera up` or `flockd --standalone`  ·  q to quit"))
 		}
 		return dashLabel.Render("connecting to flockd …")
 	}

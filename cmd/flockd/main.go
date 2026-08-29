@@ -204,7 +204,7 @@ func run() error {
 			log.Info("tunnel client started", "coordinator", cfg.Tunnel.CoordinatorAddr, "node_id", creds.NodeID)
 			nodeID = creds.NodeID
 		default:
-			log.Warn("node not enrolled: serving locally only", "hint", "run `flock login` to join the mesh, or start with --standalone")
+			log.Warn("node not enrolled: serving locally only", "hint", "run `tera login` to join the mesh, or start with --standalone")
 		}
 	}
 
@@ -421,7 +421,7 @@ func standaloneEnroll(ctx context.Context, cfg config.Config, dialer tunnel.Dial
 }
 
 // ensureEnrolled returns the node's mesh credentials, performing enrollment
-// first when `flock login` has left a claim code behind. It returns (nil, nil)
+// first when `tera login` has left a claim code behind. It returns (nil, nil)
 // when the node has neither credentials nor a pending claim code — that is
 // the ordinary "serving locally only" state, not an error.
 func ensureEnrolled(ctx context.Context, cfg config.Config, identity *enroll.Identity, hw *typesv1.CapabilityProfile, log *slog.Logger) (*enroll.Credentials, error) {

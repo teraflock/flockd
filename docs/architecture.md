@@ -1,6 +1,6 @@
 # flockd architecture
 
-`flockd` is a single static Go binary; `flock` (CLI/TUI) is its sibling.
+`flockd` is a single static Go binary; `tera` (CLI/TUI) is its sibling.
 Everything platform-specific is isolated behind build-tagged files or
 well-marked stubs. llama.cpp runs as a **supervised subprocess**, never
 cgo (SPEC §A1.3).
@@ -12,7 +12,7 @@ cgo (SPEC §A1.3).
    OpenAI SDKs ──HTTP──▶  │  localapi ───────┐                         │
    (localhost:7777/v1)    │   /v1 (OpenAI)   │                         │
                           │   /api/v1 (mgmt) │        ┌─────────────┐  │
-   flock CLI/TUI ──────▶   │   / (web dash,   ├──▶ engine ──▶ runtime │  │
+   tera CLI/TUI ──────▶   │   / (web dash,   ├──▶ engine ──▶ runtime │  │
    web dashboard          │      go:embed)   │   │  ▲      │ (iface) │  │
                           │                  │   │  │      └──┬──────┘  │
                           │                  │  governor      │ subprocess

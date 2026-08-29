@@ -53,7 +53,7 @@ func TestClaimCodeRoundTrip(t *testing.T) {
 
 func TestClaimCodeTrimsWhitespace(t *testing.T) {
 	dir := t.TempDir()
-	// `flock login` writes a trailing newline; operators pasting a code into
+	// `tera login` writes a trailing newline; operators pasting a code into
 	// the file by hand tend to add more.
 	if err := os.WriteFile(ClaimCodePath(dir), []byte("  claim-xyz \n\n"), 0o600); err != nil {
 		t.Fatal(err)

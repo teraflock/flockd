@@ -97,12 +97,12 @@ export default function App() {
                 <code className="text-slate-300">
                   &lt;data_dir&gt;/local_api_token
                 </code>{" "}
-                (or run <code className="text-slate-300">flock token</code>) and
+                (or run <code className="text-slate-300">tera token</code>) and
                 press connect. Whitespace is trimmed for you.
               </>
             ) : (
               <>{String(status.error?.message ?? status.error)} — is flockd
-                running? Try <code className="text-slate-300">flock up</code> or{" "}
+                running? Try <code className="text-slate-300">tera up</code> or{" "}
                 <code className="text-slate-300">flockd --standalone</code>.</>
             )}
           </p>

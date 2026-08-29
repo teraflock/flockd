@@ -10,7 +10,7 @@ help:
 build:
     mkdir -p dist/local
     go build -o dist/local/flockd ./cmd/flockd
-    go build -o dist/local/flock ./cmd/flock
+    go build -o dist/local/tera ./cmd/tera
 
 # Run all tests
 test:
@@ -42,7 +42,7 @@ web:
 
 # Live TUI against a running daemon
 dashboard:
-    go run ./cmd/flock dashboard
+    go run ./cmd/tera dashboard
 
 clean:
     rm -rf dist

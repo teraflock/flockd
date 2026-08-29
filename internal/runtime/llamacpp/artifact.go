@@ -55,7 +55,7 @@ type Fetcher struct {
 
 // Preflight checks that a runtime binary is *resolvable* for this
 // (GOOS, GOARCH, accel) without actually downloading the tarball. Used by
-// `flock up` to refuse installing a service unit that would crash-loop on
+// `tera up` to refuse installing a service unit that would crash-loop on
 // first start when the pinned catalog has no build for this machine.
 // Returns nil when either f.BinaryPath is present on disk or f.ManifestURL
 // advertises a matching artifact (cpu fallback included, same rule as

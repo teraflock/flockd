@@ -17,7 +17,7 @@ API or redeem for cash.
   [docs/privacy.md](docs/privacy.md) for exactly what the daemon can and
   cannot see — including the honest part about what node operators could
   theoretically observe.
-- 💰 **Earnings you can watch tick.** `flock dashboard` (terminal) and a
+- 💰 **Earnings you can watch tick.** `tera dashboard` (terminal) and a
   built-in web dashboard at `localhost:7777`.
 
 > **Status: Phase 0.** The single-node vertical slice works end to end
@@ -29,22 +29,22 @@ API or redeem for cash.
 macOS / Linux:
 
 ```sh
-brew install teraflock/tap/flock          # macOS + Linuxbrew
+brew install teraflock/tap/tera          # macOS + Linuxbrew
 curl -fsSL https://teraflock.ai/install.sh | sh   # anything else
 ```
 
 Windows: grab the zip from the [latest release](https://github.com/teraflock/flockd/releases/latest)
-(`winget install Teraflock.flock` coming later).
+(`winget install Teraflock.tera` coming later).
 
 Beta note: binaries are checksummed but not yet code-signed/notarized.
 Joining the mesh needs an invite from [teraflock.ai](https://teraflock.ai) —
-then `flock login`, `flock up`, `flock dashboard`.
+then `tera login`, `tera up`, `tera dashboard`.
 
 Build from source today:
 
 ```sh
 git clone https://github.com/teraflock/proto ../proto   # sibling checkout (see Development)
-go build ./cmd/flockd ./cmd/flock
+go build ./cmd/flockd ./cmd/tera
 ```
 
 ## Quickstart (standalone, no account needed)
@@ -129,21 +129,21 @@ OpenAI-compatible requests to it. vLLM's lifecycle is entirely external —
 Then watch it work:
 
 ```sh
-flock dashboard        # gorgeous terminal dashboard: tok/s sparkline, earnings ticker
-flock dashboard --web  # browser dashboard (prints the auth token to paste)
-flock status           # one-shot status
-flock limits --serve idle-only   # resource policy
+tera dashboard        # gorgeous terminal dashboard: tok/s sparkline, earnings ticker
+tera dashboard --web  # browser dashboard (prints the auth token to paste)
+tera status           # one-shot status
+tera limits --serve idle-only   # resource policy
 scripts/smoke.sh      # the whole Phase 0 exit criterion as a script
 ```
 
 ## Joining the mesh (Phase 1, soon)
 
 ```sh
-flock login   # browser handoff, claims this node to your account
-flock up      # install + start the service (launchd / systemd --user)
+tera login   # browser handoff, claims this node to your account
+tera up      # install + start the service (launchd / systemd --user)
 ```
 
-Until the hosted coordinator ships, `flock login` stores your claim code and
+Until the hosted coordinator ships, `tera login` stores your claim code and
 the daemon serves locally only.
 
 ## Resource governance promises
@@ -158,13 +158,13 @@ these are hard rules, enforced by the governor and its test suite:
 | never drain your battery | `serve_on_battery = false` by default |
 | never cook your laptop | `max_temp_celsius` pause threshold |
 | you set the schedule | `serve = scheduled` + windows like `22:00-08:00` |
-| clean exit | `flock uninstall --purge` removes everything |
+| clean exit | `tera uninstall --purge` removes everything |
 
 ## Architecture
 
 ```
 OpenAI SDKs ──▶ localhost:7777/v1 ─┐
-flock CLI/TUI ─▶ /api/v1 ───────────┼─▶ engine ─▶ governor ─▶ runtime adapter
+tera CLI/TUI ─▶ /api/v1 ───────────┼─▶ engine ─▶ governor ─▶ runtime adapter
 web dashboard ▶ / (go:embed) ──────┘        ▲         ├─ llamacpp  (llama-server subprocess)
 coordinator ◀── mTLS tunnel (outbound only) ┘         ├─ vllm      (proxy to existing vLLM server)
                                                        └─ mock      (deterministic, for tests)

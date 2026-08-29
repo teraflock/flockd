@@ -125,7 +125,7 @@ type Tunnel struct {
 }
 
 type Enroll struct {
-	// LoginURL is the browser URL opened by `flock login`.
+	// LoginURL is the browser URL opened by `tera login`.
 	LoginURL string `koanf:"login_url"`
 }
 

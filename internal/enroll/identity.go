@@ -1,6 +1,6 @@
 // Package enroll manages node identity (Ed25519 keypair that never leaves
 // the device), CSR generation, the Enroll RPC, credential storage, and the
-// `flock login` PKCE-style browser handoff (SPEC §4.1, §6).
+// `tera login` PKCE-style browser handoff (SPEC §4.1, §6).
 package enroll
 
 import (

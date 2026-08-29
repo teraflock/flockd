@@ -1,5 +1,5 @@
 // Package svc installs and controls flockd as an OS service: launchd
-// (macOS), systemd (Linux) and Windows SCM (stub). `flock up|down|uninstall`
+// (macOS), systemd (Linux) and Windows SCM (stub). `tera up|down|uninstall`
 // drive this.
 package svc
 
