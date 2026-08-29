@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -88,6 +89,63 @@ func TestEnsureDownloadVerifyAndCache(t *testing.T) {
 	srv.Close()
 	if _, err := m.Ensure(context.Background(), spec("model-a", blob, srv.URL)); err != nil {
 		t.Fatalf("cache hit failed: %v", err)
+	}
+}
+
+func TestValidateID(t *testing.T) {
+	valid := []string{
+		"llama-3.2-3b-instruct-q4_k_m",
+		"nomic-embed-text-v1.5-q8_0",
+		"a",
+	}
+	for _, id := range valid {
+		if err := ValidateID(id); err != nil {
+			t.Errorf("ValidateID(%q) = %v, want nil", id, err)
+		}
+	}
+	invalid := []string{
+		"",
+		"../../etc/cron.d/evil",
+		"..",
+		"a/../../b",
+		"sub/dir",
+		`sub\dir`,
+		".hidden",
+		"-leading-dash",
+		"has space",
+		"nul\x00byte",
+		strings.Repeat("x", maxIDLen+1),
+	}
+	for _, id := range invalid {
+		if err := ValidateID(id); !errors.Is(err, ErrInvalidID) {
+			t.Errorf("ValidateID(%q) = %v, want ErrInvalidID", id, err)
+		}
+	}
+}
+
+// A catalog is fetched over the network, so a hostile entry must not be able
+// to turn its id into a path outside the models dir.
+func TestEnsureRejectsTraversalID(t *testing.T) {
+	blob := []byte("payload")
+	srv := artifactServer(t, map[string][]byte{"evil": blob})
+	defer srv.Close()
+
+	dir := t.TempDir()
+	m, _ := NewManager(dir, 0, quietLog())
+	sp := spec("../../evil", blob, srv.URL)
+	if _, err := m.Ensure(context.Background(), sp); !errors.Is(err, ErrInvalidID) {
+		t.Fatalf("err = %v, want ErrInvalidID", err)
+	}
+	// Nothing may have been written outside the cache dir.
+	if _, err := os.Stat(filepath.Join(filepath.Dir(filepath.Dir(dir)), "evil.gguf")); !errors.Is(err, os.ErrNotExist) {
+		t.Error("traversal wrote outside the models dir")
+	}
+}
+
+func TestRemoveRejectsTraversalID(t *testing.T) {
+	m, _ := NewManager(t.TempDir(), 0, quietLog())
+	if err := m.Remove("../../etc/passwd"); !errors.Is(err, ErrInvalidID) {
+		t.Fatalf("err = %v, want ErrInvalidID", err)
 	}
 }
 
