@@ -64,8 +64,20 @@ type Manager struct {
 	Client    *http.Client
 	Log       *slog.Logger
 
-	mu    sync.Mutex
-	state cacheState
+	// OnProgress, when set, receives byte progress during downloads
+	// (throttled). total is 0 when the server sent no length and the
+	// catalog carries no size.
+	OnProgress func(id string, received, total int64)
+
+	mu       sync.Mutex
+	state    cacheState
+	progress map[string]Progress
+}
+
+// Progress is live byte progress for an in-flight download.
+type Progress struct {
+	ReceivedBytes int64 `json:"received_bytes"`
+	TotalBytes    int64 `json:"total_bytes"`
 }
 
 // cacheState is persisted to models.json alongside the artifacts.
@@ -96,6 +108,7 @@ func NewManager(dir string, maxDiskMB int64, log *slog.Logger) (*Manager, error)
 		Client:    &http.Client{}, // long downloads: no client timeout, ctx governs
 		Log:       log,
 		state:     cacheState{Entries: map[string]*cacheEntry{}},
+		progress:  map[string]Progress{},
 	}
 	if raw, err := os.ReadFile(m.statePath()); err == nil {
 		if err := json.Unmarshal(raw, &m.state); err != nil {
@@ -170,9 +183,31 @@ func (m *Manager) Ensure(ctx context.Context, spec *typesv1.ModelSpec) (string, 
 		return "", err
 	}
 
+	// The entry exists (state "downloading") for the whole transfer so the
+	// local API can report it; a crash leaves it behind, and the .partial
+	// file makes the next attempt resume instead of restart.
+	m.mu.Lock()
+	m.state.Entries[spec.GetId()] = &cacheEntry{
+		ID:        spec.GetId(),
+		SHA256:    spec.GetSha256(),
+		SizeBytes: int64(spec.GetSizeBytes()),
+		LastUsed:  time.Now(),
+		State:     "downloading",
+	}
+	m.saveLocked()
+	m.mu.Unlock()
+
 	if err := m.download(ctx, spec, dest); err != nil {
+		m.mu.Lock()
+		delete(m.state.Entries, spec.GetId())
+		delete(m.progress, spec.GetId())
+		m.saveLocked()
+		m.mu.Unlock()
 		return "", err
 	}
+	m.mu.Lock()
+	delete(m.progress, spec.GetId())
+	m.mu.Unlock()
 
 	fi, err := os.Stat(dest)
 	if err != nil {
@@ -228,7 +263,25 @@ func (m *Manager) download(ctx context.Context, spec *typesv1.ModelSpec, dest st
 	if err != nil {
 		return fmt.Errorf("models: open %s: %w", tmp, err)
 	}
-	_, cpErr := io.Copy(out, resp.Body)
+	// Total: the catalog's size when known, else offset + Content-Length.
+	// A truncating (200) response restarts the byte count from zero.
+	if resp.StatusCode == http.StatusOK {
+		offset = 0
+	}
+	total := int64(spec.GetSizeBytes())
+	if total == 0 && resp.ContentLength > 0 {
+		total = offset + resp.ContentLength
+	}
+	cw := &countingWriter{
+		w: out,
+		n: offset,
+		report: func(n int64) {
+			m.setProgress(spec.GetId(), n, total)
+		},
+	}
+	cw.report(offset)
+	_, cpErr := io.Copy(cw, resp.Body)
+	cw.flush()
 	closeErr := out.Close()
 	if cpErr != nil {
 		return fmt.Errorf("models: write %s: %w", spec.GetId(), cpErr) // .partial kept for resume
@@ -246,6 +299,44 @@ func (m *Manager) download(ctx context.Context, spec *typesv1.ModelSpec, dest st
 	}
 	m.Log.Info("model downloaded and verified", "model", spec.GetId(), "sha256", spec.GetSha256())
 	return nil
+}
+
+// countingWriter tees byte counts into a throttled progress callback so a
+// 20 GB download does not turn into 20 GB of lock traffic.
+type countingWriter struct {
+	w      io.Writer
+	n      int64
+	report func(n int64)
+	last   time.Time
+}
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n += int64(n)
+	if now := time.Now(); now.Sub(c.last) >= 250*time.Millisecond {
+		c.last = now
+		c.report(c.n)
+	}
+	return n, err
+}
+
+func (c *countingWriter) flush() { c.report(c.n) }
+
+func (m *Manager) setProgress(id string, received, total int64) {
+	m.mu.Lock()
+	m.progress[id] = Progress{ReceivedBytes: received, TotalBytes: total}
+	m.mu.Unlock()
+	if m.OnProgress != nil {
+		m.OnProgress(id, received, total)
+	}
+}
+
+// DownloadProgress reports live byte progress for an in-flight download.
+func (m *Manager) DownloadProgress(id string) (Progress, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p, ok := m.progress[id]
+	return p, ok
 }
 
 // Verify re-hashes a cached artifact against its recorded SHA. Serving
@@ -370,6 +461,8 @@ type Info struct {
 	Pinned    bool      `json:"pinned"`
 	LastUsed  time.Time `json:"last_used"`
 	State     string    `json:"state"`
+	// ReceivedBytes is live progress, present only while downloading.
+	ReceivedBytes int64 `json:"received_bytes,omitempty"`
 }
 
 // List returns cache contents sorted by id.
@@ -378,7 +471,14 @@ func (m *Manager) List() []Info {
 	defer m.mu.Unlock()
 	out := make([]Info, 0, len(m.state.Entries))
 	for _, e := range m.state.Entries {
-		out = append(out, Info{ID: e.ID, SizeBytes: e.SizeBytes, Pinned: e.Pinned, LastUsed: e.LastUsed, State: e.State})
+		row := Info{ID: e.ID, SizeBytes: e.SizeBytes, Pinned: e.Pinned, LastUsed: e.LastUsed, State: e.State}
+		if p, ok := m.progress[e.ID]; ok {
+			row.ReceivedBytes = p.ReceivedBytes
+			if row.SizeBytes == 0 {
+				row.SizeBytes = p.TotalBytes
+			}
+		}
+		out = append(out, row)
 	}
 	slices.SortFunc(out, func(a, b Info) int {
 		if a.ID < b.ID {

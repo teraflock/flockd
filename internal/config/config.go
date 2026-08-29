@@ -214,10 +214,62 @@ func Load(path string) (Config, error) {
 	if err := k.Unmarshal("", &cfg); err != nil {
 		return cfg, fmt.Errorf("config: unmarshal: %w", err)
 	}
+
+	// Live-edited limits (PUT /api/v1/limits) persist in a daemon-owned
+	// overlay so the operator's config.toml — comments and all — is never
+	// rewritten by the API. The overlay is the operator's most recent
+	// intent, so it wins over config.toml and env for the keys it holds.
+	overlay := LimitsPath(cfg.DataDir)
+	if _, err := os.Stat(overlay); err == nil {
+		if err := k.Load(file.Provider(overlay), toml.Parser()); err != nil {
+			return cfg, fmt.Errorf("config: load %s: %w", overlay, err)
+		}
+		if err := k.Unmarshal("", &cfg); err != nil {
+			return cfg, fmt.Errorf("config: unmarshal %s: %w", overlay, err)
+		}
+	}
+
 	if err := cfg.Validate(); err != nil {
 		return cfg, err
 	}
 	return cfg, nil
+}
+
+// LimitsPath is the daemon-owned governor-limits overlay location.
+func LimitsPath(dataDir string) string {
+	return filepath.Join(dataDir, "limits.toml")
+}
+
+// SaveLimits persists live-edited governor limits to the overlay file that
+// Load applies on the next start. Only the operator-facing limit knobs are
+// written; poll_interval and the rest stay wherever the operator set them.
+func SaveLimits(dataDir string, g Governor) error {
+	var b strings.Builder
+	b.WriteString("# Written by flockd when limits change via the API or app.\n")
+	b.WriteString("# These override [governor] in config.toml; delete this file to undo.\n\n")
+	b.WriteString("[governor]\n")
+	fmt.Fprintf(&b, "serve_policy = %q\n", g.ServePolicy)
+	fmt.Fprintf(&b, "idle_after = %q\n", g.IdleAfter.String())
+	fmt.Fprintf(&b, "yield_grace = %q\n", g.YieldGrace.String())
+	fmt.Fprintf(&b, "serve_on_battery = %t\n", g.ServeOnBattery)
+	fmt.Fprintf(&b, "max_temp_celsius = %g\n", g.MaxTempCelsius)
+	b.WriteString("schedule = [")
+	for i, w := range g.Schedule {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		fmt.Fprintf(&b, "%q", w)
+	}
+	b.WriteString("]\n")
+
+	tmp := LimitsPath(dataDir) + ".tmp"
+	if err := os.WriteFile(tmp, []byte(b.String()), 0o600); err != nil {
+		return fmt.Errorf("config: write %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, LimitsPath(dataDir)); err != nil {
+		return fmt.Errorf("config: finalize limits overlay: %w", err)
+	}
+	return nil
 }
 
 // Validate rejects nonsensical configurations early.

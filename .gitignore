@@ -19,3 +19,4 @@ web/*.tsbuildinfo
 *.log
 .DS_Store
 /tmp/
+bin/

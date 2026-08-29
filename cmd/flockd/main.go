@@ -24,6 +24,7 @@ import (
 	"github.com/teraflock/flockd/internal/hardware"
 	"github.com/teraflock/flockd/internal/localapi"
 	"github.com/teraflock/flockd/internal/logging"
+	"github.com/teraflock/flockd/internal/modelops"
 	"github.com/teraflock/flockd/internal/models"
 	rt "github.com/teraflock/flockd/internal/runtime"
 	"github.com/teraflock/flockd/internal/runtime/llamacpp"
@@ -155,7 +156,36 @@ func run() error {
 		MaxRAMMB:       cfg.Budget.MaxRAMMB,
 		MaxConcurrent:  cfg.Budget.MaxConcurrent,
 	}
-	if err := loadDefaultModel(ctx, cfg, hw, mgr, eng, budget, log); err != nil {
+
+	// modelops backs both startup model loading and the local API's
+	// on-demand download/load/switch routes (llamacpp only: mock and vllm
+	// nodes have no catalog or artifact cache to operate on).
+	var ops *modelops.Service
+	if cfg.Runtime.Kind == "llamacpp" {
+		adapter := &llamacpp.Adapter{
+			Fetcher: &llamacpp.Fetcher{
+				ManifestURL: cfg.Runtime.ArtifactManifestURL,
+				BinaryPath:  cfg.Runtime.LlamaServerPath,
+				CacheDir:    filepath.Join(cfg.DataDir, "runtimes"),
+			},
+			Accel:         hardware.BestAccel(hw),
+			VRAMMB:        hardware.BestVRAMMB(hw),
+			Log:           log,
+			ContextLength: cfg.Runtime.ContextLength,
+		}
+		ops = &modelops.Service{
+			Mgr:          mgr,
+			Eng:          eng,
+			Loader:       adapter,
+			Budget:       budget,
+			Log:          log,
+			ManifestPath: cfg.Models.ManifestPath,
+			ManifestURL:  cfg.Models.ManifestURL,
+			OnLoaded:     func(inst rt.Instance) { reportRuntimeBuild(hw, inst, log) },
+		}
+	}
+
+	if err := loadDefaultModel(ctx, cfg, hw, ops, mgr, eng, budget, log); err != nil {
 		return err
 	}
 	defer func() {
@@ -218,6 +248,8 @@ func run() error {
 		Engine:        eng,
 		Governor:      gov,
 		Models:        mgr,
+		ModelOps:      ops,
+		DataDir:       cfg.DataDir,
 		LogRing:       ring,
 		Hardware:      hw,
 		Log:           log,
@@ -235,9 +267,10 @@ func run() error {
 	return srv.ListenAndServe(ctx, cfg.LocalAPI.Listen)
 }
 
-// loadDefaultModel makes one model servable at startup (Phase 0). Further
-// models arrive via coordinator ModelAssignment.
-func loadDefaultModel(ctx context.Context, cfg config.Config, hw *typesv1.CapabilityProfile, mgr *models.Manager, eng *engine.Engine, budget rt.ResourceBudget, log *slog.Logger) error {
+// loadDefaultModel makes one model servable at startup. Further models
+// arrive on demand through the local API (modelops) or the coordinator's
+// ModelAssignment.
+func loadDefaultModel(ctx context.Context, cfg config.Config, hw *typesv1.CapabilityProfile, ops *modelops.Service, mgr *models.Manager, eng *engine.Engine, budget rt.ResourceBudget, log *slog.Logger) error {
 	switch cfg.Runtime.Kind {
 	case "mock":
 		mock := rt.NewMockRuntime(cfg.Runtime.MockTokensPerSec)
@@ -256,52 +289,19 @@ func loadDefaultModel(ctx context.Context, cfg config.Config, hw *typesv1.Capabi
 		return nil
 
 	case "llamacpp":
-		catalog, err := models.LoadCatalog(ctx, cfg.Models.ManifestPath, cfg.Models.ManifestURL, nil)
-		if err != nil {
-			return fmt.Errorf("load model catalog: %w", err)
-		}
-		entry, ok := catalog.Find(cfg.Models.Default)
-		if !ok {
-			return fmt.Errorf("default model %q not in catalog", cfg.Models.Default)
-		}
-		pspec := entry.Spec()
-		log.Info("ensuring model artifact", "model", pspec.GetId(), "size_mb", pspec.GetSizeBytes()/1024/1024)
-		path, err := mgr.Ensure(ctx, pspec)
-		if err != nil {
-			return err
+		// Catalog fetch + artifact ensure + runtime load + registration all
+		// live in modelops now, shared with the on-demand API routes.
+		// OnLoaded stamps the runtime build id (reportRuntimeBuild).
+		log.Info("ensuring default model", "model", cfg.Models.Default)
+		if _, err := ops.LoadInstance(ctx, cfg.Models.Default); err != nil {
+			return fmt.Errorf("load default model %q: %w", cfg.Models.Default, err)
 		}
 		for _, pin := range cfg.Models.Pin {
-			if pin == pspec.GetId() {
+			if pin == cfg.Models.Default {
 				_ = mgr.Pin(pin, true)
 			}
 		}
-		adapter := &llamacpp.Adapter{
-			Fetcher: &llamacpp.Fetcher{
-				ManifestURL: cfg.Runtime.ArtifactManifestURL,
-				BinaryPath:  cfg.Runtime.LlamaServerPath,
-				CacheDir:    filepath.Join(cfg.DataDir, "runtimes"),
-			},
-			Accel:         hardware.BestAccel(hw),
-			VRAMMB:        hardware.BestVRAMMB(hw),
-			Log:           log,
-			ContextLength: cfg.Runtime.ContextLength,
-		}
-		spec := rt.ModelSpec{
-			ID:            pspec.GetId(),
-			Family:        pspec.GetFamily(),
-			Quant:         pspec.GetQuant(),
-			SHA256:        pspec.GetSha256(),
-			Path:          path,
-			ContextLength: int(pspec.GetContextLength()),
-			Embeddings:    pspec.GetEmbeddings(),
-		}
-		inst, err := adapter.Load(ctx, spec, budget)
-		if err != nil {
-			return err
-		}
-		eng.Register(spec, inst)
-		reportRuntimeBuild(hw, inst, log)
-		log.Info("llama-server loaded", "model", spec.ID)
+		log.Info("llama-server loaded", "model", cfg.Models.Default)
 		return nil
 
 	case "vllm":

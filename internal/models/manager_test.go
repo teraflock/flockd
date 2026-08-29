@@ -1,6 +1,7 @@
 package models
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -290,5 +291,85 @@ func TestStatePersistsAcrossRestarts(t *testing.T) {
 	got := m2.List()
 	if len(got) != 1 || !got[0].Pinned {
 		t.Fatalf("restarted state = %+v", got)
+	}
+}
+
+func TestDownloadProgressAndDownloadingState(t *testing.T) {
+	blob := bytes.Repeat([]byte("x"), 64*1024)
+	gate := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// First half, then hold until released — the test inspects state
+		// mid-download.
+		_, _ = w.Write(blob[:32*1024])
+		w.(http.Flusher).Flush()
+		<-gate
+		_, _ = w.Write(blob[32*1024:])
+	}))
+	defer srv.Close()
+	defer close(gate)
+
+	m, err := NewManager(t.TempDir(), 0, quietLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sp := &typesv1.ModelSpec{
+		Id: "prog-model", Sha256: shaOf(blob),
+		ArtifactUrl: srv.URL + "/blob", SizeBytes: uint64(len(blob)),
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := m.Ensure(context.Background(), sp)
+		done <- err
+	}()
+
+	// Mid-download: entry is "downloading" with live byte progress.
+	deadline := time.After(5 * time.Second)
+	for {
+		rows := m.List()
+		if len(rows) == 1 && rows[0].State == "downloading" && rows[0].ReceivedBytes > 0 {
+			if rows[0].SizeBytes != int64(len(blob)) {
+				t.Fatalf("SizeBytes = %d, want %d", rows[0].SizeBytes, len(blob))
+			}
+			if p, ok := m.DownloadProgress("prog-model"); !ok || p.TotalBytes != int64(len(blob)) {
+				t.Fatalf("DownloadProgress = %+v ok=%v", p, ok)
+			}
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("never observed downloading state: %+v", rows)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	gate <- struct{}{}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	rows := m.List()
+	if len(rows) != 1 || rows[0].State != "ready" || rows[0].ReceivedBytes != 0 {
+		t.Fatalf("after download: %+v", rows)
+	}
+	if _, ok := m.DownloadProgress("prog-model"); ok {
+		t.Fatal("progress should be cleared after completion")
+	}
+}
+
+func TestFailedDownloadLeavesNoEntry(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "nope", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	m, err := NewManager(t.TempDir(), 0, quietLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sp := &typesv1.ModelSpec{Id: "failing", Sha256: shaOf([]byte("y")), ArtifactUrl: srv.URL + "/x", SizeBytes: 1}
+	if _, err := m.Ensure(context.Background(), sp); err == nil {
+		t.Fatal("expected error")
+	}
+	if rows := m.List(); len(rows) != 0 {
+		t.Fatalf("failed download left entries: %+v", rows)
 	}
 }

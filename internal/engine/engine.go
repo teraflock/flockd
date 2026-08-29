@@ -85,6 +85,19 @@ func (e *Engine) Unregister(id string) *ModelEntry {
 	return entry
 }
 
+// SetDefault names the model used when a request omits one. The model must
+// be loaded — a default pointing at nothing would turn every bare request
+// into a 404.
+func (e *Engine) SetDefault(id string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if _, ok := e.models[id]; !ok {
+		return fmt.Errorf("%w: %q", ErrModelNotFound, id)
+	}
+	e.defaultID = id
+	return nil
+}
+
 // DefaultModel returns the fallback model id.
 func (e *Engine) DefaultModel() string {
 	e.mu.RLock()

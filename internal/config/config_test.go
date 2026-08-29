@@ -71,3 +71,41 @@ func TestValidateRejectsBadPolicy(t *testing.T) {
 		t.Fatal("expected error for bad serve_policy")
 	}
 }
+
+func TestLimitsOverlayRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(cfgPath, []byte("data_dir = \""+dir+"\"\n[governor]\nserve_policy = \"idle-only\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Without an overlay, config.toml wins.
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Governor.ServePolicy != "idle-only" {
+		t.Fatalf("serve_policy = %q", cfg.Governor.ServePolicy)
+	}
+
+	// SaveLimits then reload: the overlay wins.
+	if err := SaveLimits(dir, Governor{
+		ServePolicy:    "always",
+		IdleAfter:      90 * time.Second,
+		YieldGrace:     3 * time.Second,
+		ServeOnBattery: true,
+		MaxTempCelsius: 85,
+		Schedule:       []string{"22:00-08:00"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := cfg.Governor
+	if g.ServePolicy != "always" || g.IdleAfter != 90*time.Second || g.YieldGrace != 3*time.Second ||
+		!g.ServeOnBattery || g.MaxTempCelsius != 85 || len(g.Schedule) != 1 || g.Schedule[0] != "22:00-08:00" {
+		t.Fatalf("overlay not applied: %+v", g)
+	}
+}

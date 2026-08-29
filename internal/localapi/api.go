@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/teraflock/flockd/internal/config"
 	"github.com/teraflock/flockd/internal/governor"
 	"github.com/teraflock/flockd/internal/telemetry"
 )
@@ -96,6 +97,8 @@ type ModelRow struct {
 	State     string    `json:"state"`
 	Loaded    bool      `json:"loaded"`
 	Default   bool      `json:"default"`
+	// ReceivedBytes is live progress, present only while downloading.
+	ReceivedBytes int64 `json:"received_bytes,omitempty"`
 }
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
@@ -112,6 +115,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 				ID: i.ID, SizeBytes: i.SizeBytes, Pinned: i.Pinned,
 				LastUsed: i.LastUsed, State: i.State,
 				Loaded: loaded[i.ID], Default: i.ID == def,
+				ReceivedBytes: i.ReceivedBytes,
 			})
 			delete(loaded, i.ID)
 		}
@@ -254,8 +258,22 @@ func (s *Server) handleLimitsPut(w http.ResponseWriter, r *http.Request) {
 	p.MaxTempCelsius = lim.MaxTempCelsius
 	p.Schedule = windows
 	g.SetPolicy(p)
-	// NOTE: persistence of limits back to config.toml is a TODO; changes
-	// apply live but reset on daemon restart (documented in config.md).
+	// Persist to the daemon-owned overlay (never the operator's
+	// config.toml) so limits survive restarts. A write failure loses only
+	// persistence, not the live change — log it and answer normally.
+	if s.deps.DataDir != "" {
+		err := config.SaveLimits(s.deps.DataDir, config.Governor{
+			ServePolicy:    p.Serve,
+			IdleAfter:      p.IdleAfter,
+			YieldGrace:     p.YieldGrace,
+			ServeOnBattery: p.ServeOnBattery,
+			MaxTempCelsius: p.MaxTempCelsius,
+			Schedule:       lim.Schedule,
+		})
+		if err != nil {
+			s.deps.Log.Warn("limits applied but not persisted", "err", err)
+		}
+	}
 	s.handleLimitsGet(w, r)
 }
 
@@ -272,7 +290,11 @@ func windowsToStrings(ws []governor.Window) []string {
 
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	n := 200
-	if q := r.URL.Query().Get("n"); q != "" {
+	q := r.URL.Query().Get("n")
+	if q == "" {
+		q = r.URL.Query().Get("limit") // alias; both are natural to reach for
+	}
+	if q != "" {
 		if v, err := strconv.Atoi(q); err == nil && v > 0 && v <= 1024 {
 			n = v
 		}
