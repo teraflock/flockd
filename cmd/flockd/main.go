@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -223,6 +224,28 @@ func run() error {
 	// identifies the enrolled node, and only the latter is what a session
 	// may announce. Unenrolled daemons serve locally under the fingerprint.
 	nodeID := identity.Fingerprint()
+	mesh := &meshRunner{}
+	// connectLocked (re)starts the tunnel client for creds; the previous
+	// client, if any, is stopped first. Callers hold mesh.mu.
+	connectLocked := func(creds *enroll.Credentials) error {
+		dialer, err := meshDialer(cfg, identity, creds)
+		if err != nil {
+			return err
+		}
+		tctx, cancel := context.WithCancel(ctx)
+		if err := startTunnel(tctx, cfg, dialer, cfg.Tunnel.CoordinatorAddr, creds.CoordinatorPubKey, creds.NodeID, identity, hw, gov, stats, eng, mgr, budget, log); err != nil {
+			cancel()
+			return err
+		}
+		if mesh.stop != nil {
+			mesh.stop()
+		}
+		mesh.stop = cancel
+		mesh.creds = creds
+		return nil
+	}
+
+	var enrollNow func(ctx context.Context, code string) error
 	if cfg.Tunnel.Standalone {
 		coord, err := fakecoord.New()
 		if err != nil {
@@ -245,17 +268,58 @@ func run() error {
 		}
 		switch {
 		case creds != nil:
-			dialer, err := meshDialer(cfg, identity, creds)
+			mesh.mu.Lock()
+			err := connectLocked(creds)
+			mesh.mu.Unlock()
 			if err != nil {
-				return err
-			}
-			if err := startTunnel(ctx, cfg, dialer, cfg.Tunnel.CoordinatorAddr, creds.CoordinatorPubKey, creds.NodeID, identity, hw, gov, stats, eng, mgr, budget, log); err != nil {
 				return err
 			}
 			log.Info("tunnel client started", "coordinator", cfg.Tunnel.CoordinatorAddr, "node_id", creds.NodeID)
 			nodeID = creds.NodeID
 		default:
-			log.Warn("node not enrolled: serving locally only", "hint", "run `tera login` to join the mesh, or start with --standalone")
+			log.Warn("node not enrolled: serving locally only", "hint", "run `tera login` to join the mesh, use the desktop app, or start with --standalone")
+		}
+
+		// Enrollment over the API (POST /api/v1/enroll): enroll — or
+		// re-enroll, which the startup path can't do while old credentials
+		// exist — and swap the tunnel live, no restart.
+		enrollNow = func(rctx context.Context, code string) error {
+			mesh.mu.Lock()
+			if mesh.enrolling {
+				mesh.mu.Unlock()
+				return localapi.ErrEnrollInProgress
+			}
+			mesh.enrolling = true
+			mesh.mu.Unlock()
+			defer func() {
+				mesh.mu.Lock()
+				mesh.enrolling = false
+				mesh.mu.Unlock()
+			}()
+
+			conn, err := bootstrapDialer(cfg).Dial(rctx, cfg.Tunnel.CoordinatorAddr)
+			if err != nil {
+				return fmt.Errorf("enrollment dial %s: %w", cfg.Tunnel.CoordinatorAddr, err)
+			}
+			defer conn.Close()
+			ectx, cancel := context.WithTimeout(rctx, 30*time.Second)
+			defer cancel()
+			creds, err := enroll.Enroll(ectx, tunnelv1.NewTunnelServiceClient(conn), identity, code, hw, cfg.DataDir)
+			if err != nil {
+				return err
+			}
+
+			mesh.mu.Lock()
+			err = connectLocked(creds)
+			mesh.mu.Unlock()
+			if err != nil {
+				return fmt.Errorf("enrolled (node %s) but tunnel start failed: %w", creds.NodeID, err)
+			}
+			log.Info("enrolled via API", "node_id", creds.NodeID, "cert_expires", creds.CertExpiresAt.Format(time.RFC3339))
+			// SSE subscribers get a fresh status snapshot immediately —
+			// it now carries enrolled=true and the new node id.
+			hub.Publish("state_change", map[string]string{"state": gov.State().String()})
+			return nil
 		}
 	}
 
@@ -279,6 +343,19 @@ func run() error {
 		NodeID:        nodeID,
 		Version:       version,
 		Standalone:    cfg.Tunnel.Standalone,
+		Mesh: func() localapi.MeshStatus {
+			mesh.mu.Lock()
+			defer mesh.mu.Unlock()
+			if mesh.creds != nil {
+				return localapi.MeshStatus{
+					Enrolled:      true,
+					NodeID:        mesh.creds.NodeID,
+					CertExpiresAt: mesh.creds.CertExpiresAt,
+				}
+			}
+			return localapi.MeshStatus{NodeID: nodeID}
+		},
+		Enroll: enrollNow,
 		RequireAuthV1: cfg.LocalAPI.RequireAuthV1,
 		Token:         token,
 	})
@@ -287,6 +364,15 @@ func run() error {
 		"dashboard", "http://"+cfg.LocalAPI.Listen+"/",
 		"openai_base_url", "http://"+cfg.LocalAPI.Listen+"/v1")
 	return srv.ListenAndServe(ctx, cfg.LocalAPI.Listen)
+}
+
+// meshRunner owns the live tunnel-client lifecycle so enrollment over the
+// API can start or replace it without a daemon restart.
+type meshRunner struct {
+	mu        sync.Mutex
+	creds     *enroll.Credentials
+	stop      context.CancelFunc
+	enrolling bool
 }
 
 // loadDefaultModel makes one model servable at startup. Further models
