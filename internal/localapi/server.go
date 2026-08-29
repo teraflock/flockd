@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/teraflock/flockd/internal/engine"
+	"github.com/teraflock/flockd/internal/events"
 	"github.com/teraflock/flockd/internal/governor"
 	"github.com/teraflock/flockd/internal/logging"
 	"github.com/teraflock/flockd/internal/modelops"
@@ -34,6 +35,7 @@ type Deps struct {
 	Governor   *governor.Governor // may be nil
 	Models     *models.Manager    // may be nil
 	ModelOps   *modelops.Service  // may be nil (mock/vllm runtimes)
+	Events     *events.Hub        // may be nil (SSE then ticks status only)
 	LogRing    *logging.Ring      // may be nil
 	Hardware   *typesv1.CapabilityProfile
 	Log        *slog.Logger

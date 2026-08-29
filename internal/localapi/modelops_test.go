@@ -1,6 +1,7 @@
 package localapi
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -17,6 +18,8 @@ import (
 
 	"github.com/teraflock/flockd/internal/config"
 	"github.com/teraflock/flockd/internal/engine"
+	"github.com/teraflock/flockd/internal/events"
+	"github.com/teraflock/flockd/internal/logging"
 	"github.com/teraflock/flockd/internal/modelops"
 	"github.com/teraflock/flockd/internal/models"
 	rt "github.com/teraflock/flockd/internal/runtime"
@@ -269,4 +272,76 @@ func newTestServerWithDataDir(t *testing.T, dir string) *httptest.Server {
 	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+func TestEventsStreamRicherEvents(t *testing.T) {
+	hub := events.NewHub()
+	log, ring := logging.New("info", "text")
+	eng := engine.New(nil, nil, nil)
+	s := New(Deps{
+		Engine:  eng,
+		Events:  hub,
+		LogRing: ring,
+		Log:     quietLog(),
+		NodeID:  "node-test",
+		Version: "test",
+		Token:   testToken,
+	})
+	srv := httptest.NewServer(s.Handler())
+	t.Cleanup(srv.Close)
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/events?logs=1&token="+testToken, nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+
+	events := make(chan [2]string, 16) // [event, data]
+	go func() {
+		sc := bufio.NewScanner(resp.Body)
+		var ev string
+		for sc.Scan() {
+			line := sc.Text()
+			if strings.HasPrefix(line, "event: ") {
+				ev = strings.TrimPrefix(line, "event: ")
+			}
+			if strings.HasPrefix(line, "data: ") {
+				events <- [2]string{ev, strings.TrimPrefix(line, "data: ")}
+			}
+		}
+	}()
+
+	next := func(wantType string) string {
+		t.Helper()
+		deadline := time.After(5 * time.Second)
+		for {
+			select {
+			case e := <-events:
+				if e[0] == wantType {
+					return e[1]
+				}
+				// Interleaved status ticks are expected; skip them.
+			case <-deadline:
+				t.Fatalf("no %q event", wantType)
+			}
+		}
+	}
+
+	next("status") // initial snapshot
+
+	hub.Publish("model_progress", map[string]any{"model": "m1", "received_bytes": 10, "total_bytes": 100})
+	data := next("model_progress")
+	if !strings.Contains(data, `"model":"m1"`) {
+		t.Fatalf("model_progress data = %s", data)
+	}
+
+	hub.Publish("models_changed", map[string]string{"model": "m1", "change": "loaded"})
+	next("models_changed")
+
+	log.Info("streamed line", "req", "x")
+	data = next("log")
+	if !strings.Contains(data, "streamed line") {
+		t.Fatalf("log data = %s", data)
+	}
 }

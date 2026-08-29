@@ -2,6 +2,7 @@ package logging
 
 import (
 	"testing"
+	"time"
 )
 
 func TestRingCapturesAndTails(t *testing.T) {
@@ -48,5 +49,29 @@ func TestLevelFiltering(t *testing.T) {
 	entries := ring.Tail(0)
 	if len(entries) != 1 || entries[0].Message != "shown" {
 		t.Errorf("entries = %+v", entries)
+	}
+}
+
+func TestRingSubscribeFollows(t *testing.T) {
+	log, ring := New("info", "text")
+	ch, cancel := ring.Subscribe()
+	defer cancel()
+	log.Info("hello follower", "k", "v")
+	select {
+	case e := <-ch:
+		if e.Message != "hello follower" || e.Attrs != "k=v" {
+			t.Fatalf("entry = %+v", e)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no entry delivered to subscriber")
+	}
+	cancel()
+	log.Info("after cancel")
+	select {
+	case e := <-ch:
+		if e.Message == "after cancel" {
+			t.Fatal("received after cancel")
+		}
+	default:
 	}
 }
