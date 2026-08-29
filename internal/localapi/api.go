@@ -99,6 +99,8 @@ type ModelRow struct {
 	State     string    `json:"state"`
 	Loaded    bool      `json:"loaded"`
 	Default   bool      `json:"default"`
+	// ReceivedBytes is live progress, present only while downloading.
+	ReceivedBytes int64 `json:"received_bytes,omitempty"`
 }
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
@@ -115,6 +117,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 				ID: i.ID, SizeBytes: i.SizeBytes, Pinned: i.Pinned,
 				LastUsed: i.LastUsed, State: i.State,
 				Loaded: loaded[i.ID], Default: i.ID == def,
+				ReceivedBytes: i.ReceivedBytes,
 			})
 			delete(loaded, i.ID)
 		}
