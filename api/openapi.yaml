@@ -1,0 +1,685 @@
+openapi: 3.0.3
+info:
+  title: flockd local API
+  description: |
+    The Teraflock node daemon's loopback HTTP surface on `localhost:7777`.
+
+    Two halves:
+    - **management** (`/api/v1/*`): the REST+SSE API behind the CLI, TUI,
+      embedded web dashboard, and desktop app. Bearer-token auth (the token
+      lives at `<data_dir>/local_api_token`, 0600 — same-user access is the
+      security model). This spec **generates the daemon's router and types**
+      (oapi-codegen, `make gen`): it cannot drift from the implementation.
+    - **openai** (`/v1/*`): the OpenAI-compatible inference surface. Wire
+      format follows the OpenAI API; endpooints are documented here for
+      completeness but their schemas are owned by that external standard.
+      Keyless on loopback unless `local_api.require_auth_v1` is set.
+  version: "1.0"
+servers:
+  - url: http://127.0.0.1:7777
+tags:
+  - name: management
+    description: Daemon management (generated server)
+  - name: events
+    description: Server-sent events (hand-written handler; documented here)
+  - name: openai
+    description: OpenAI-compatible inference (external standard; hand-written)
+
+security:
+  - bearerAuth: []
+
+paths:
+  /api/v1/health:
+    get:
+      tags: [management]
+      operationId: getHealth
+      summary: Liveness probe
+      description: >
+        The one unauthenticated management route: `tera up`, service
+        managers, and the desktop app probe it before they hold a token.
+      security: []
+      responses:
+        "200":
+          description: Daemon is up.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+
+  /api/v1/status:
+    get:
+      tags: [management]
+      operationId: getStatus
+      summary: Node status snapshot
+      responses:
+        "200":
+          description: Current node status.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Status" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/catalog:
+    get:
+      tags: [management]
+      operationId: getCatalog
+      summary: Model catalog merged with local state
+      parameters:
+        - name: refresh
+          in: query
+          required: false
+          schema: { type: boolean }
+          description: Force a refetch instead of the cached copy (15 min TTL).
+      responses:
+        "200":
+          description: Catalog entries with installed/loaded/default state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CatalogList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "501": { $ref: "#/components/responses/Unsupported" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /api/v1/models:
+    get:
+      tags: [management]
+      operationId: listModels
+      summary: Locally installed models
+      responses:
+        "200":
+          description: Cache contents merged with runtime state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ModelList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/models/{id}/pin:
+    post:
+      tags: [management]
+      operationId: pinModel
+      summary: Pin or unpin a model (pinned models are never LRU-evicted)
+      parameters: [{ $ref: "#/components/parameters/ModelID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PinRequest" }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "501": { $ref: "#/components/responses/Unsupported" }
+
+  /api/v1/models/{id}/download:
+    post:
+      tags: [management]
+      operationId: startModelDownload
+      summary: Start downloading a catalog model in the background
+      description: >
+        202 when a download starts (or is already in flight); 200 when the
+        model is already cached and ready. Progress streams over
+        `/api/v1/events` as `model_progress` and shows in `received_bytes`
+        on the model list.
+      parameters: [{ $ref: "#/components/parameters/ModelID" }]
+      responses:
+        "200":
+          description: Already downloaded and verified.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DownloadStatus" }
+        "202":
+          description: Download running.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DownloadStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "501": { $ref: "#/components/responses/Unsupported" }
+        "502": { $ref: "#/components/responses/Upstream" }
+    delete:
+      tags: [management]
+      operationId: cancelModelDownload
+      summary: Cancel an in-flight download (the .partial file is kept for resume)
+      parameters: [{ $ref: "#/components/parameters/ModelID" }]
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "501": { $ref: "#/components/responses/Unsupported" }
+
+  /api/v1/models/{id}/load:
+    post:
+      tags: [management]
+      operationId: loadModel
+      summary: Load a model into the serving runtime
+      description: >
+        Synchronous — llama-server startup takes seconds and the caller
+        wants the verdict. Downloads first if the artifact isn't cached.
+      parameters: [{ $ref: "#/components/parameters/ModelID" }]
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "501": { $ref: "#/components/responses/Unsupported" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /api/v1/models/{id}/unload:
+    post:
+      tags: [management]
+      operationId: unloadModel
+      summary: Unload a model from the runtime (the artifact stays cached)
+      parameters: [{ $ref: "#/components/parameters/ModelID" }]
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "501": { $ref: "#/components/responses/Unsupported" }
+
+  /api/v1/models/{id}/default:
+    post:
+      tags: [management]
+      operationId: setDefaultModel
+      summary: Serve this model when a request names none (must be loaded)
+      parameters: [{ $ref: "#/components/parameters/ModelID" }]
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "501": { $ref: "#/components/responses/Unsupported" }
+
+  /api/v1/models/{id}:
+    delete:
+      tags: [management]
+      operationId: deleteModel
+      summary: Delete a model from disk (and unload it if loaded)
+      parameters: [{ $ref: "#/components/parameters/ModelID" }]
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "501": { $ref: "#/components/responses/Unsupported" }
+
+  /api/v1/earnings:
+    get:
+      tags: [management]
+      operationId: getEarnings
+      summary: Node earnings (simulated until enrolled with a real ledger)
+      responses:
+        "200":
+          description: Earnings snapshot.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Earnings" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/limits:
+    get:
+      tags: [management]
+      operationId: getLimits
+      summary: Live governor limits
+      responses:
+        "200":
+          description: Active limits.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Limits" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "501": { $ref: "#/components/responses/Unsupported" }
+    put:
+      tags: [management]
+      operationId: updateLimits
+      summary: Update governor limits
+      description: >
+        Applies live and persists to the daemon-owned
+        `<data_dir>/limits.toml` overlay; the operator's config.toml is
+        never rewritten.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Limits" }
+      responses:
+        "200":
+          description: The applied limits.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Limits" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "501": { $ref: "#/components/responses/Unsupported" }
+
+  /api/v1/logs:
+    get:
+      tags: [management]
+      operationId: getLogs
+      summary: Recent daemon log entries (ring buffer)
+      parameters:
+        - name: n
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 1024 }
+          description: Max entries to return (default 200). `limit` is an accepted alias.
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 1024 }
+          description: Alias for `n`.
+      responses:
+        "200":
+          description: Oldest-first log entries.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LogList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/enroll:
+    post:
+      tags: [management]
+      operationId: enrollNode
+      summary: Enroll (or re-enroll) this node with the coordinator
+      description: >
+        Submits a claim code to the running daemon: enrollment plus a live
+        tunnel (re)start, no restart required. Re-enrollment — needed when
+        the mesh CA rotates — is only possible through this route; the
+        startup path ignores claim codes while credentials exist.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EnrollRequest" }
+      responses:
+        "200":
+          description: Enrolled; the tunnel is running.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EnrollResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409":
+          description: Another enrollment is already in progress.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "501": { $ref: "#/components/responses/Unsupported" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
+  /api/v1/events:
+    get:
+      tags: [events]
+      operationId: getEvents
+      summary: Live daemon events (SSE)
+      description: |
+        `text/event-stream`. Event types:
+        - `status`: a full Status snapshot — every 2s, and immediately on
+          governor state transitions and after enrollment.
+        - `model_progress`: `{model, received_bytes, total_bytes}` during
+          downloads (throttled).
+        - `models_changed`: `{model, change}` where change is
+          downloaded|loaded|unloaded|default.
+        - `log` (only with `?logs=1`): one LogEntry per line as logged.
+
+        EventSource cannot send headers, so this route additionally accepts
+        the bearer token as `?token=`. Hand-written handler — documented
+        here, excluded from codegen.
+      parameters:
+        - name: logs
+          in: query
+          required: false
+          schema: { type: boolean }
+        - name: token
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: SSE stream.
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/models:
+    get:
+      tags: [openai]
+      operationId: openaiListModels
+      summary: OpenAI-compatible model list
+      security: []
+      responses:
+        "200":
+          description: OpenAI `list` object of loaded models.
+          content:
+            application/json:
+              schema: { type: object }
+  /v1/chat/completions:
+    post:
+      tags: [openai]
+      operationId: openaiChatCompletions
+      summary: OpenAI-compatible chat completions (streaming supported)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        "200":
+          description: "Completion (or SSE stream when `stream: true`)."
+          content:
+            application/json:
+              schema: { type: object }
+        "503":
+          description: The governor refuses inference right now (state in the message).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /v1/completions:
+    post:
+      tags: [openai]
+      operationId: openaiCompletions
+      summary: OpenAI-compatible text completions
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        "200":
+          description: Completion.
+          content:
+            application/json:
+              schema: { type: object }
+  /v1/embeddings:
+    post:
+      tags: [openai]
+      operationId: openaiEmbeddings
+      summary: OpenAI-compatible embeddings
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        "200":
+          description: Embeddings.
+          content:
+            application/json:
+              schema: { type: object }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Contents of `<data_dir>/local_api_token`.
+
+  parameters:
+    ModelID:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+      description: Model id (catalog id or cache id).
+
+  responses:
+    Ok:
+      description: Success.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Ok" }
+    Unauthorized:
+      description: Missing or invalid bearer token.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Unknown model or resource.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    BadRequest:
+      description: Malformed request.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unsupported:
+      description: Not available on this node (mock/vllm runtime, or standalone).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Upstream:
+      description: An upstream (catalog host, coordinator, runtime) failed.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [message, type]
+          properties:
+            message: { type: string }
+            type: { type: string }
+
+    Ok:
+      type: object
+      required: [ok]
+      properties:
+        ok: { type: boolean }
+
+    Health:
+      type: object
+      required: [ok, version]
+      properties:
+        ok: { type: boolean }
+        version: { type: string }
+
+    Status:
+      type: object
+      required:
+        [node_id, version, standalone, enrolled, state, uptime_seconds,
+         default_model, models_loaded, inflight, on_battery, temp_celsius,
+         stats]
+      properties:
+        node_id:
+          type: string
+          description: Key fingerprint until enrolled; coordinator-assigned id after.
+        version: { type: string }
+        standalone: { type: boolean }
+        enrolled: { type: boolean }
+        cert_expires_at:
+          type: string
+          format: date-time
+          description: Client-certificate expiry; present when enrolled.
+        state:
+          type: string
+          description: serving | yielded | paused-battery | paused-thermal | outside-schedule
+        uptime_seconds: { type: integer, format: int64 }
+        default_model: { type: string }
+        models_loaded: { type: integer }
+        inflight: { type: integer }
+        on_battery: { type: boolean }
+        temp_celsius: { type: number, format: double }
+        hardware: { $ref: "#/components/schemas/Hardware" }
+        stats: { $ref: "#/components/schemas/Stats" }
+
+    Hardware:
+      type: object
+      required: [os, arch, cpu_model, cpu_cores, ram_mb, gpus]
+      properties:
+        os: { type: string }
+        arch: { type: string }
+        cpu_model: { type: string }
+        cpu_cores: { type: integer, format: int64 }
+        ram_mb: { type: integer, format: int64 }
+        gpus:
+          type: array
+          items: { $ref: "#/components/schemas/Gpu" }
+
+    Gpu:
+      type: object
+      required: [vendor, model, vram_mb, accel, unified_memory]
+      properties:
+        vendor: { type: string }
+        model: { type: string }
+        vram_mb: { type: integer, format: int64 }
+        accel: { type: string }
+        unified_memory: { type: boolean }
+
+    Stats:
+      type: object
+      required:
+        [tokens_per_sec_1m, requests_per_min, total_requests, total_tokens,
+         inflight, earned_microcredits]
+      properties:
+        tokens_per_sec_1m: { type: number, format: double }
+        requests_per_min: { type: number, format: double }
+        total_requests: { type: integer, format: int64 }
+        total_tokens: { type: integer, format: int64 }
+        inflight: { type: integer }
+        earned_microcredits: { type: integer, format: int64 }
+
+    ModelRow:
+      type: object
+      required: [id, size_bytes, pinned, last_used, state, loaded, default]
+      properties:
+        id: { type: string }
+        size_bytes: { type: integer, format: int64 }
+        pinned: { type: boolean }
+        last_used: { type: string, format: date-time }
+        state:
+          type: string
+          description: downloading | ready
+        loaded: { type: boolean }
+        default: { type: boolean }
+        received_bytes:
+          type: integer
+          format: int64
+          description: Live progress; present only while downloading.
+
+    ModelList:
+      type: object
+      required: [models]
+      properties:
+        models:
+          type: array
+          items: { $ref: "#/components/schemas/ModelRow" }
+
+    CatalogEntry:
+      type: object
+      description: A catalog model merged with this node's local state.
+      required:
+        [id, family, params_b, quant, sha256, min_vram_mb, min_ram_mb,
+         license, artifact_url, size_bytes, payout_class, context_length,
+         embeddings, installed, loaded, default]
+      properties:
+        id: { type: string }
+        family: { type: string }
+        params_b: { type: number, format: double }
+        quant: { type: string }
+        sha256: { type: string }
+        min_vram_mb: { type: integer, format: int64 }
+        min_ram_mb: { type: integer, format: int64 }
+        license: { type: string }
+        artifact_url: { type: string }
+        size_bytes: { type: integer, format: int64 }
+        payout_class: { type: string }
+        context_length: { type: integer, format: int64 }
+        embeddings: { type: boolean }
+        installed: { type: boolean }
+        state:
+          type: string
+          description: downloading | ready; present when the artifact is local.
+        received_bytes: { type: integer, format: int64 }
+        loaded: { type: boolean }
+        default: { type: boolean }
+
+    CatalogList:
+      type: object
+      required: [models]
+      properties:
+        models:
+          type: array
+          items: { $ref: "#/components/schemas/CatalogEntry" }
+
+    Earnings:
+      type: object
+      required:
+        [earned_microcredits, earned_credits, est_usd, est_usd_per_day,
+         lifetime_tokens, escrow_credits, note]
+      properties:
+        earned_microcredits: { type: integer, format: int64 }
+        earned_credits: { type: number, format: double }
+        est_usd: { type: number, format: double }
+        est_usd_per_day: { type: number, format: double }
+        lifetime_tokens: { type: integer, format: int64 }
+        escrow_credits: { type: number, format: double }
+        note: { type: string }
+
+    Limits:
+      type: object
+      required:
+        [serve_policy, idle_after_seconds, yield_grace_seconds,
+         serve_on_battery, max_temp_celsius, schedule]
+      properties:
+        serve_policy:
+          type: string
+          description: always | idle-only | scheduled
+        idle_after_seconds: { type: integer }
+        yield_grace_seconds: { type: integer }
+        serve_on_battery: { type: boolean }
+        max_temp_celsius: { type: number, format: double }
+        schedule:
+          type: array
+          items: { type: string }
+          description: Windows like "22:00-08:00" (overnight wraps).
+
+    LogEntry:
+      type: object
+      required: [time, level, message]
+      properties:
+        time: { type: string, format: date-time }
+        level: { type: string }
+        message: { type: string }
+        attrs: { type: string }
+
+    LogList:
+      type: object
+      required: [logs]
+      properties:
+        logs:
+          type: array
+          items: { $ref: "#/components/schemas/LogEntry" }
+
+    PinRequest:
+      type: object
+      required: [pinned]
+      properties:
+        pinned: { type: boolean }
+
+    DownloadStatus:
+      type: object
+      required: [ok, state]
+      properties:
+        ok: { type: boolean }
+        state:
+          type: string
+          description: downloading | ready
+
+    EnrollRequest:
+      type: object
+      required: [claim_code]
+      properties:
+        claim_code: { type: string }
+
+    EnrollResponse:
+      type: object
+      required: [ok, node_id, cert_expires_at]
+      properties:
+        ok: { type: boolean }
+        node_id: { type: string }
+        cert_expires_at: { type: string, format: date-time }

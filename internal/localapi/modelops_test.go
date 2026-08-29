@@ -19,6 +19,7 @@ import (
 	"github.com/teraflock/flockd/internal/config"
 	"github.com/teraflock/flockd/internal/engine"
 	"github.com/teraflock/flockd/internal/events"
+	"github.com/teraflock/flockd/internal/localapi/gen"
 	"github.com/teraflock/flockd/internal/logging"
 	"github.com/teraflock/flockd/internal/modelops"
 	"github.com/teraflock/flockd/internal/models"
@@ -152,7 +153,7 @@ func TestCatalogDownloadLoadFlow(t *testing.T) {
 	for {
 		resp = apiGet(t, srv, "/api/v1/models")
 		var list struct {
-			Models []ModelRow `json:"models"`
+			Models []gen.ModelRow `json:"models"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
 			t.Fatal(err)
@@ -160,7 +161,7 @@ func TestCatalogDownloadLoadFlow(t *testing.T) {
 		resp.Body.Close()
 		var ready bool
 		for _, m := range list.Models {
-			if m.ID == "cat-model" && m.State == "ready" {
+			if m.Id == "cat-model" && m.State == "ready" {
 				ready = true
 			}
 		}

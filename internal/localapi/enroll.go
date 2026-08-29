@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/teraflock/flockd/internal/localapi/gen"
 )
 
 // ErrEnrollInProgress is returned by the Enroll dep while another enrollment
@@ -16,23 +18,21 @@ var ErrEnrollInProgress = errors.New("enrollment already in progress")
 // Before enrollment NodeID is the key fingerprint; after, the
 // coordinator-assigned id.
 type MeshStatus struct {
-	Enrolled      bool      `json:"enrolled"`
-	NodeID        string    `json:"node_id"`
-	CertExpiresAt time.Time `json:"cert_expires_at"`
+	Enrolled      bool
+	NodeID        string
+	CertExpiresAt time.Time
 }
 
-// handleEnroll submits a claim code to the running daemon: enrollment (or
-// re-enrollment — the one path that works while old credentials exist) plus
-// a tunnel (re)start, no restart required.
-func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
+// EnrollNode implements gen.ServerInterface: submit a claim code to the
+// running daemon — enrollment (or re-enrollment, the one path that works
+// while old credentials exist) plus a tunnel (re)start, no restart required.
+func (s *Server) EnrollNode(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Enroll == nil {
 		writeOpenAIError(w, http.StatusNotImplemented, "invalid_request_error",
 			"enrollment is not available on this node (standalone mode)")
 		return
 	}
-	var body struct {
-		ClaimCode string `json:"claim_code"`
-	}
+	var body gen.EnrollRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "invalid body: "+err.Error())
 		return
@@ -52,11 +52,11 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusBadGateway, "server_error", err.Error())
 		return
 	}
-	resp := map[string]any{"ok": true}
+	resp := gen.EnrollResponse{Ok: true}
 	if s.deps.Mesh != nil {
 		m := s.deps.Mesh()
-		resp["node_id"] = m.NodeID
-		resp["cert_expires_at"] = m.CertExpiresAt
+		resp.NodeId = m.NodeID
+		resp.CertExpiresAt = m.CertExpiresAt
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

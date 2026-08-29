@@ -23,6 +23,7 @@ import (
 	"github.com/teraflock/flockd/internal/engine"
 	"github.com/teraflock/flockd/internal/events"
 	"github.com/teraflock/flockd/internal/governor"
+	"github.com/teraflock/flockd/internal/localapi/gen"
 	"github.com/teraflock/flockd/internal/logging"
 	"github.com/teraflock/flockd/internal/modelops"
 	"github.com/teraflock/flockd/internal/models"
@@ -79,25 +80,18 @@ func New(deps Deps) *Server {
 	s.mux.HandleFunc("POST /v1/completions", s.authV1(s.handleCompletions))
 	s.mux.HandleFunc("POST /v1/embeddings", s.authV1(s.handleEmbeddings))
 
-	// Daemon management API. /health is deliberately unauthenticated:
-	// `tera up` and the desktop app probe it before they hold a token.
-	s.mux.HandleFunc("GET /api/v1/health", s.handleHealth)
-	s.mux.HandleFunc("GET /api/v1/status", s.authAPI(s.handleStatus))
-	s.mux.HandleFunc("GET /api/v1/catalog", s.authAPI(s.handleCatalog))
-	s.mux.HandleFunc("GET /api/v1/models", s.authAPI(s.handleModels))
-	s.mux.HandleFunc("POST /api/v1/models/{id}/pin", s.authAPI(s.handleModelPin))
-	s.mux.HandleFunc("POST /api/v1/models/{id}/download", s.authAPI(s.handleModelDownload))
-	s.mux.HandleFunc("DELETE /api/v1/models/{id}/download", s.authAPI(s.handleModelDownloadCancel))
-	s.mux.HandleFunc("POST /api/v1/models/{id}/load", s.authAPI(s.handleModelLoad))
-	s.mux.HandleFunc("POST /api/v1/models/{id}/unload", s.authAPI(s.handleModelUnload))
-	s.mux.HandleFunc("POST /api/v1/models/{id}/default", s.authAPI(s.handleModelDefault))
-	s.mux.HandleFunc("DELETE /api/v1/models/{id}", s.authAPI(s.handleModelRemove))
-	s.mux.HandleFunc("GET /api/v1/earnings", s.authAPI(s.handleEarnings))
-	s.mux.HandleFunc("GET /api/v1/limits", s.authAPI(s.handleLimitsGet))
-	s.mux.HandleFunc("PUT /api/v1/limits", s.authAPI(s.handleLimitsPut))
-	s.mux.HandleFunc("GET /api/v1/logs", s.authAPI(s.handleLogs))
+	// Daemon management API: routes come from api/openapi.yaml via
+	// oapi-codegen (make gen) — the spec is the router, so the two cannot
+	// drift. Auth is a middleware over every generated route; /health is
+	// exempted there (probes run before anyone holds a token).
+	gen.HandlerWithOptions(s, gen.StdHTTPServerOptions{
+		BaseRouter:  s.mux,
+		Middlewares: []gen.MiddlewareFunc{s.authManagement},
+	})
+
+	// SSE is hand-written (streaming + ?token= auth for EventSource);
+	// documented in the spec under the `events` tag.
 	s.mux.HandleFunc("GET /api/v1/events", s.authSSE(s.handleEvents))
-	s.mux.HandleFunc("POST /api/v1/enroll", s.authAPI(s.handleEnroll))
 
 	// Embedded web dashboard at the root.
 	if deps.WebFS != nil {
@@ -196,6 +190,20 @@ func (s *Server) checkTokenOpts(r *http.Request, allowQuery bool) bool {
 // authAPI always requires the bearer token.
 func (s *Server) authAPI(next http.HandlerFunc) http.HandlerFunc {
 	return s.authAPIOpts(next, false)
+}
+
+// authManagement is the middleware over every generated management route.
+// /health is exempt: probes (`tera up`, the desktop app, service managers)
+// run before anyone holds a token, and it reveals nothing an unauthenticated
+// local process couldn't learn from the port being open.
+func (s *Server) authManagement(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		s.authAPI(next.ServeHTTP)(w, r)
+	})
 }
 
 // authSSE additionally accepts `?token=`, because EventSource cannot send an
