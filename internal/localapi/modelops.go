@@ -44,11 +44,20 @@ func (s *Server) GetCatalog(w http.ResponseWriter, r *http.Request, params gen.G
 	}
 	def := s.deps.Engine.DefaultModel()
 
+	// optStr maps "unset in a pre-display_name catalog" to an absent field
+	// rather than an empty string the UI would render.
+	optStr := func(s string) *string {
+		if s == "" {
+			return nil
+		}
+		return &s
+	}
 	rows := make([]gen.CatalogEntry, 0, len(cat.Models))
 	for _, m := range cat.Models {
 		row := gen.CatalogEntry{
 			Id:            m.ID,
 			Family:        m.Family,
+			DisplayName:   optStr(m.DisplayName),
 			ParamsB:       m.ParamsB,
 			Quant:         m.Quant,
 			Sha256:        m.SHA256,

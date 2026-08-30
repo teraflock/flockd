@@ -578,6 +578,13 @@ components:
          embeddings, installed, loaded, default]
       properties:
         id: { type: string }
+        display_name:
+          type: string
+          description: >-
+            Human-readable name incl. quant ("Qwen3.8 27B · Q4_K_M") — show
+            this, not the id: ids are ambiguous now that model lines carry
+            point versions (qwen3-8b vs qwen3.8-27b). Optional: absent when
+            the daemon's catalog predates the field.
         family: { type: string }
         params_b: { type: number, format: double }
         quant: { type: string }

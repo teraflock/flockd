@@ -16,9 +16,12 @@ import (
 
 // CatalogEntry A catalog model merged with this node's local state.
 type CatalogEntry struct {
-	ArtifactUrl   string  `json:"artifact_url"`
-	ContextLength int64   `json:"context_length"`
-	Default       bool    `json:"default"`
+	ArtifactUrl   string `json:"artifact_url"`
+	ContextLength int64  `json:"context_length"`
+	Default       bool   `json:"default"`
+
+	// DisplayName Human-readable name incl. quant ("Qwen3.8 27B · Q4_K_M") — show this, not the id: ids are ambiguous now that model lines carry point versions (qwen3-8b vs qwen3.8-27b). Optional: absent when the daemon's catalog predates the field.
+	DisplayName   *string `json:"display_name,omitempty"`
 	Embeddings    bool    `json:"embeddings"`
 	Family        string  `json:"family"`
 	Id            string  `json:"id"`

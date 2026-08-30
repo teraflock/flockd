@@ -25,7 +25,11 @@ type Catalog struct {
 
 // CatalogModel is one curated model entry.
 type CatalogModel struct {
-	ID            string  `yaml:"id" json:"id"`
+	ID string `yaml:"id" json:"id"`
+	// DisplayName is the human-readable name (incl. quant) UIs show —
+	// ids are ambiguous now that model lines carry point versions
+	// (qwen3-8b vs qwen3.8-27b). Empty in pre-field catalogs.
+	DisplayName   string  `yaml:"display_name" json:"display_name"`
 	Family        string  `yaml:"family" json:"family"`
 	ParamsB       float64 `yaml:"params_b" json:"params_b"`
 	Quant         string  `yaml:"quant" json:"quant"`
