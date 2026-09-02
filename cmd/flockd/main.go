@@ -14,10 +14,13 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
+	"github.com/teraflock/flockd/internal/assign"
 	"github.com/teraflock/flockd/internal/config"
 	"github.com/teraflock/flockd/internal/engine"
 	"github.com/teraflock/flockd/internal/enroll"
@@ -209,6 +212,26 @@ func run() error {
 	if err := loadDefaultModel(ctx, cfg, hw, ops, mgr, eng, budget, log); err != nil {
 		return err
 	}
+
+	// ---- mesh placement (plan 05) ----
+	// The coordinator may place models here inside the operator's consent:
+	// the mesh_managed switch (live-editable from the dashboard, persisted
+	// in the limits overlay), max_disk_mb, pin and exclude. Mock nodes
+	// decline everything with a reason so the coordinator backs off.
+	var meshManaged atomic.Bool
+	meshManaged.Store(cfg.Models.MeshManaged)
+	asg := &assign.Service{
+		Ops: ops, Mgr: mgr, Eng: eng, Events: hub, Log: log,
+		OnBattery: func() bool { return gov.Power().OnBattery },
+		Policy: func() assign.Policy {
+			return assign.Policy{
+				MeshManaged: meshManaged.Load(),
+				Exclude:     slices.Clone(cfg.Models.Exclude),
+				Pinned:      slices.Clone(cfg.Models.Pin),
+			}
+		},
+	}
+	go asg.Run(ctx)
 	defer func() {
 		shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -232,7 +255,7 @@ func run() error {
 			return err
 		}
 		tctx, cancel := context.WithCancel(ctx)
-		if err := startTunnel(tctx, cfg, dialer, cfg.Tunnel.CoordinatorAddr, creds.CoordinatorPubKey, creds.NodeID, identity, hw, gov, stats, eng, mgr, budget, log); err != nil {
+		if err := startTunnel(tctx, cfg, dialer, cfg.Tunnel.CoordinatorAddr, creds.CoordinatorPubKey, creds.NodeID, identity, hw, gov, stats, eng, mgr, asg, budget, log); err != nil {
 			cancel()
 			return err
 		}
@@ -255,7 +278,7 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		if err := startTunnel(ctx, cfg, coord.Dialer(), coord.Addr(), coord.PubKey(), creds.NodeID, identity, hw, gov, stats, eng, mgr, budget, log); err != nil {
+		if err := startTunnel(ctx, cfg, coord.Dialer(), coord.Addr(), coord.PubKey(), creds.NodeID, identity, hw, gov, stats, eng, mgr, asg, budget, log); err != nil {
 			return err
 		}
 		nodeID = creds.NodeID
@@ -329,19 +352,19 @@ func run() error {
 		webFS = nil
 	}
 	srv := localapi.New(localapi.Deps{
-		Engine:        eng,
-		Governor:      gov,
-		Models:        mgr,
-		ModelOps:      ops,
-		Events:        hub,
-		DataDir:       cfg.DataDir,
-		LogRing:       ring,
-		Hardware:      hw,
-		Log:           log,
-		WebFS:         webFS,
-		NodeID:        nodeID,
-		Version:       version,
-		Standalone:    cfg.Tunnel.Standalone,
+		Engine:     eng,
+		Governor:   gov,
+		Models:     mgr,
+		ModelOps:   ops,
+		Events:     hub,
+		DataDir:    cfg.DataDir,
+		LogRing:    ring,
+		Hardware:   hw,
+		Log:        log,
+		WebFS:      webFS,
+		NodeID:     nodeID,
+		Version:    version,
+		Standalone: cfg.Tunnel.Standalone,
 		Mesh: func() localapi.MeshStatus {
 			mesh.mu.Lock()
 			defer mesh.mu.Unlock()
@@ -354,7 +377,13 @@ func run() error {
 			}
 			return localapi.MeshStatus{NodeID: nodeID}
 		},
-		Enroll: enrollNow,
+		Enroll:      enrollNow,
+		Assign:      asg,
+		MeshManaged: meshManaged.Load,
+		SetMeshManaged: func(on bool) {
+			meshManaged.Store(on)
+			log.Info("mesh-managed models switched", "on", on)
+		},
 		RequireAuthV1: cfg.LocalAPI.RequireAuthV1,
 		Token:         token,
 	})
@@ -431,7 +460,7 @@ func reportRuntimeBuild(hw *typesv1.CapabilityProfile, inst rt.Instance, log *sl
 // startTunnel runs the session client in the background. nodeID must be the
 // coordinator-assigned ID from enrollment — the session is rejected
 // otherwise.
-func startTunnel(ctx context.Context, cfg config.Config, dialer tunnel.Dialer, addr string, coordKey []byte, nodeID string, identity *enroll.Identity, hw *typesv1.CapabilityProfile, gov *governor.Governor, stats *telemetry.Stats, eng *engine.Engine, mgr *models.Manager, budget rt.ResourceBudget, log *slog.Logger) error {
+func startTunnel(ctx context.Context, cfg config.Config, dialer tunnel.Dialer, addr string, coordKey []byte, nodeID string, identity *enroll.Identity, hw *typesv1.CapabilityProfile, gov *governor.Governor, stats *telemetry.Stats, eng *engine.Engine, mgr *models.Manager, asg *assign.Service, budget rt.ResourceBudget, log *slog.Logger) error {
 	protoBudget := &typesv1.ResourceBudget{
 		MaxVramPercent:        uint32(cfg.Budget.MaxVRAMPercent),
 		MaxRamMb:              uint64(max(cfg.Budget.MaxRAMMB, 0)),
@@ -441,12 +470,15 @@ func startTunnel(ctx context.Context, cfg config.Config, dialer tunnel.Dialer, a
 		MaxTempCelsius:        uint32(cfg.Governor.MaxTempCelsius),
 		ServePolicy:           cfg.Governor.ServePolicy,
 	}
+	// Ready models plus in-flight placements (assigned/downloading), so the
+	// coordinator counts a replica that is on its way and does not push
+	// the same assignment again next round.
 	modelStates := func() []*typesv1.ModelState {
 		var out []*typesv1.ModelState
 		for _, m := range eng.Models() {
 			out = append(out, &typesv1.ModelState{ModelId: m.Spec.ID, State: "ready"})
 		}
-		return out
+		return append(out, asg.States()...)
 	}
 
 	client, err := tunnel.NewClient(tunnel.Options{
@@ -456,6 +488,7 @@ func startTunnel(ctx context.Context, cfg config.Config, dialer tunnel.Dialer, a
 		CoordinatorPubKey: coordKey,
 		Engine:            eng,
 		Admit:             gov,
+		MaxConcurrent:     cfg.Budget.MaxConcurrent,
 		HeartbeatInterval: cfg.Tunnel.HeartbeatInterval,
 		ReconnectMin:      cfg.Tunnel.ReconnectMin,
 		ReconnectMax:      cfg.Tunnel.ReconnectMax,
@@ -480,14 +513,16 @@ func startTunnel(ctx context.Context, cfg config.Config, dialer tunnel.Dialer, a
 			})
 		},
 		OnModelAssignment: func(ctx context.Context, ma *tunnelv1.ModelAssignment) {
-			// Phase 1: download+load assigned models, evict listed ones.
-			// Requires the llamacpp runtime; logged for now on mock nodes.
 			log.Info("model assignment received", "assign", len(ma.GetAssign()), "evict", len(ma.GetEvictModelIds()))
+			asg.Apply(ctx, ma)
 		},
 	})
 	if err != nil {
 		return err
 	}
+	// Assignment progress reports ride this session; a reconnect installs
+	// the new client's send (Hello/heartbeats carry live states anyway).
+	asg.SetReporter(client.SendModelState)
 	go client.Run(ctx)
 	return nil
 }

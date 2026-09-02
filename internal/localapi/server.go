@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/teraflock/flockd/internal/assign"
 	"github.com/teraflock/flockd/internal/engine"
 	"github.com/teraflock/flockd/internal/events"
 	"github.com/teraflock/flockd/internal/governor"
@@ -53,6 +54,14 @@ type Deps struct {
 	// Enroll submits a claim code to the running daemon: enrollment plus
 	// tunnel (re)start. Nil (standalone) answers 501.
 	Enroll func(ctx context.Context, claimCode string) error
+	// Assign exposes coordinator placement status (model rows carry it).
+	// May be nil.
+	Assign *assign.Service
+	// MeshManaged / SetMeshManaged back the limits toggle that lets the
+	// coordinator place models on this node. Nil = not switchable (reads
+	// as on).
+	MeshManaged    func() bool
+	SetMeshManaged func(bool)
 	// RequireAuthV1 extends bearer auth to the OpenAI /v1 endpoints.
 	RequireAuthV1 bool
 	// Token authenticates /api/v1 (and /v1 when RequireAuthV1).

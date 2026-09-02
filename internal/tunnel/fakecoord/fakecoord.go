@@ -40,17 +40,18 @@ type Coordinator struct {
 	lis *bufconn.Listener
 	srv *grpc.Server
 
-	mu         sync.Mutex
-	session    *session
-	heartbeats []*tunnelv1.Heartbeat
-	hello      *tunnelv1.Hello
-	enrolled   map[string]bool
-	reqSeq     int
-	pending    map[string]chan *tunnelv1.TokenChunk
-	pendingEmb map[string]chan *tunnelv1.EmbeddingResult
-	pendingCh  map[string]chan *tunnelv1.ChallengeResponse
-	acks       map[string]chan *tunnelv1.DispatchAck
-	sessionUp  chan struct{}
+	mu          sync.Mutex
+	session     *session
+	heartbeats  []*tunnelv1.Heartbeat
+	modelStates []*typesv1.ModelState
+	hello       *tunnelv1.Hello
+	enrolled    map[string]bool
+	reqSeq      int
+	pending     map[string]chan *tunnelv1.TokenChunk
+	pendingEmb  map[string]chan *tunnelv1.EmbeddingResult
+	pendingCh   map[string]chan *tunnelv1.ChallengeResponse
+	acks        map[string]chan *tunnelv1.DispatchAck
+	sessionUp   chan struct{}
 }
 
 type session struct {
@@ -267,6 +268,7 @@ func (c *Coordinator) handleNodeMessage(msg *tunnelv1.NodeMessage) {
 	case *tunnelv1.NodeMessage_Goodbye:
 		// Node draining/shutting down; nothing to route in the fake.
 	case *tunnelv1.NodeMessage_ModelState:
+		c.modelStates = append(c.modelStates, m.ModelState.GetModel())
 	case *tunnelv1.NodeMessage_Hello:
 	}
 }
@@ -286,6 +288,23 @@ func (c *Coordinator) WaitForSession(timeout time.Duration) bool {
 		time.Sleep(5 * time.Millisecond)
 	}
 	return false
+}
+
+// ModelStates returns every ModelStateUpdate received so far (assignment
+// progress reports).
+func (c *Coordinator) ModelStates() []*typesv1.ModelState {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]*typesv1.ModelState(nil), c.modelStates...)
+}
+
+// PushConfig sends a ConfigUpdate down the session.
+func (c *Coordinator) PushConfig(cu *tunnelv1.ConfigUpdate) error {
+	sess, err := c.sessionOrErr()
+	if err != nil {
+		return err
+	}
+	return sess.send(&tunnelv1.CoordinatorMessage{Msg: &tunnelv1.CoordinatorMessage_Config{Config: cu}})
 }
 
 // Heartbeats returns all heartbeats received so far.

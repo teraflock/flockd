@@ -181,6 +181,13 @@ func (s *Service) Load(ctx context.Context, id string) error {
 
 // LoadInstance is Load returning the runtime instance (startup needs it).
 func (s *Service) LoadInstance(ctx context.Context, id string) (rt.Instance, error) {
+	return s.LoadInstanceOrigin(ctx, id, models.OriginOperator)
+}
+
+// LoadInstanceOrigin is LoadInstance with ownership of a fresh download
+// (models.OriginMesh for coordinator placements: the fetch may then only
+// evict other mesh-placed models to make room).
+func (s *Service) LoadInstanceOrigin(ctx context.Context, id, origin string) (rt.Instance, error) {
 	for _, m := range s.Eng.Models() {
 		if m.Spec.ID == id {
 			return m.Instance, nil
@@ -212,7 +219,7 @@ func (s *Service) LoadInstance(ctx context.Context, id string) (rt.Instance, err
 		return nil, fmt.Errorf("%w: %q", ErrUnknownModel, id)
 	}
 	pspec := entry.Spec()
-	path, err := s.Mgr.Ensure(ctx, pspec)
+	path, err := s.Mgr.EnsureOrigin(ctx, pspec, origin)
 	if err != nil {
 		return nil, err
 	}

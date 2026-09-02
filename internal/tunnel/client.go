@@ -59,6 +59,13 @@ type Options struct {
 	Hello func() *tunnelv1.Hello
 	// OnModelAssignment is invoked for coordinator model placement pushes.
 	OnModelAssignment func(ctx context.Context, ma *tunnelv1.ModelAssignment)
+	// OnConfigUpdate observes coordinator ConfigUpdates after the client
+	// has applied what it owns (heartbeat cadence, concurrency cap).
+	OnConfigUpdate func(cu *tunnelv1.ConfigUpdate)
+	// MaxConcurrent is the operator's dispatch concurrency ceiling
+	// (budget.max_concurrent). The coordinator may lower the effective cap
+	// with ConfigUpdate.max_concurrent_requests, never raise it. 0 = no cap.
+	MaxConcurrent int
 
 	HeartbeatInterval time.Duration
 	ReconnectMin      time.Duration
@@ -74,6 +81,12 @@ type Client struct {
 	inflight map[string]context.CancelFunc
 	draining bool
 	sessions int // completed handshakes, for tests/telemetry
+	// cur is the live session's send side (nil between sessions).
+	cur *sessionStream
+	// coordCap is the coordinator's concurrency cap (0 = none).
+	coordCap int
+	// hbSet delivers a new heartbeat interval to the running loop.
+	hbSet chan time.Duration
 }
 
 // NewClient validates options and builds a client.
@@ -102,7 +115,39 @@ func NewClient(o Options) (*Client, error) {
 	if o.ReconnectMax <= 0 {
 		o.ReconnectMax = 2 * time.Minute
 	}
-	return &Client{o: o, inflight: map[string]context.CancelFunc{}}, nil
+	return &Client{o: o, inflight: map[string]context.CancelFunc{}, hbSet: make(chan time.Duration, 1)}, nil
+}
+
+// SendModelState pushes a ModelStateUpdate on the live session (model
+// assignment progress). Errors when no session is up.
+func (c *Client) SendModelState(m *typesv1.ModelState) error {
+	c.mu.Lock()
+	ss := c.cur
+	c.mu.Unlock()
+	if ss == nil {
+		return errors.New("tunnel: no session")
+	}
+	return ss.send(&tunnelv1.NodeMessage{Msg: &tunnelv1.NodeMessage_ModelState{
+		ModelState: &tunnelv1.ModelStateUpdate{Model: m},
+	}})
+}
+
+// EffectiveMaxConcurrent is min(operator cap, coordinator cap), 0 = none.
+func (c *Client) EffectiveMaxConcurrent() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return effectiveCap(c.o.MaxConcurrent, c.coordCap)
+}
+
+func effectiveCap(operator, coordinator int) int {
+	switch {
+	case operator <= 0:
+		return coordinator
+	case coordinator <= 0:
+		return operator
+	default:
+		return min(operator, coordinator)
+	}
 }
 
 // Sessions returns the number of successful handshakes (reconnect tests).
@@ -189,7 +234,15 @@ func (c *Client) runSession(ctx context.Context) error {
 	c.mu.Lock()
 	c.sessions++
 	c.draining = false
+	c.cur = ss
 	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		if c.cur == ss {
+			c.cur = nil
+		}
+		c.mu.Unlock()
+	}()
 	c.o.Log.Info("tunnel session established", "session_id", ack.GetSessionId())
 
 	hbInterval := c.o.HeartbeatInterval
@@ -232,6 +285,10 @@ func (c *Client) heartbeatLoop(ctx context.Context, ss *sessionStream, interval 
 		select {
 		case <-ctx.Done():
 			return
+		case d := <-c.hbSet:
+			// ConfigUpdate changed the cadence: applies now, not next session.
+			t.Reset(d)
+			continue
 		case <-t.C:
 			hb := &tunnelv1.Heartbeat{}
 			if c.o.Heartbeat != nil {
@@ -262,11 +319,37 @@ func (c *Client) handle(ctx context.Context, ss *sessionStream, msg *tunnelv1.Co
 		c.draining = true
 		c.mu.Unlock()
 	case *tunnelv1.CoordinatorMessage_Config:
-		// ConfigUpdate: heartbeat cadence changes take effect next session;
-		// concurrency is enforced by the governor/budget. Logged for now.
-		c.o.Log.Info("config update received", "heartbeat_s", m.Config.GetHeartbeatIntervalSeconds())
+		c.applyConfig(m.Config)
 	case *tunnelv1.CoordinatorMessage_HelloAck:
 		// Duplicate ack: ignore.
+	}
+}
+
+// applyConfig applies a ConfigUpdate mid-session: heartbeat cadence to
+// the running loop, the concurrency cap as a ceiling the coordinator may
+// lower but not raise above the operator's budget.
+func (c *Client) applyConfig(cu *tunnelv1.ConfigUpdate) {
+	if s := cu.GetHeartbeatIntervalSeconds(); s > 0 {
+		d := time.Duration(s) * time.Second
+		select {
+		case c.hbSet <- d:
+		default:
+			// An older value is still queued; replace it with the latest.
+			select {
+			case <-c.hbSet:
+			default:
+			}
+			c.hbSet <- d
+		}
+	}
+	c.mu.Lock()
+	c.coordCap = int(cu.GetMaxConcurrentRequests())
+	eff := effectiveCap(c.o.MaxConcurrent, c.coordCap)
+	c.mu.Unlock()
+	c.o.Log.Info("config update applied", "heartbeat_s", cu.GetHeartbeatIntervalSeconds(),
+		"max_concurrent", cu.GetMaxConcurrentRequests(), "effective_max_concurrent", eff)
+	if c.o.OnConfigUpdate != nil {
+		c.o.OnConfigUpdate(cu)
 	}
 }
 
@@ -286,9 +369,17 @@ func (c *Client) handleDispatch(ctx context.Context, ss *sessionStream, d *tunne
 	}
 	c.mu.Lock()
 	draining := c.draining
+	over := false
+	if capN := effectiveCap(c.o.MaxConcurrent, c.coordCap); capN > 0 && len(c.inflight) >= capN {
+		over = true
+	}
 	c.mu.Unlock()
 	if draining {
 		c.reject(ss, id, "draining")
+		return
+	}
+	if over {
+		c.reject(ss, id, "over-capacity")
 		return
 	}
 	reqCtx, release, err := c.o.Admit.Admit(ctx, id)

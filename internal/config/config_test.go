@@ -100,7 +100,7 @@ func TestLimitsOverlayRoundTrip(t *testing.T) {
 		ServeOnBattery: true,
 		MaxTempCelsius: 85,
 		Schedule:       []string{"22:00-08:00"},
-	}); err != nil {
+	}, false); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err = Load(cfgPath)
@@ -111,5 +111,9 @@ func TestLimitsOverlayRoundTrip(t *testing.T) {
 	if g.ServePolicy != "always" || g.IdleAfter != 90*time.Second || g.YieldGrace != 3*time.Second ||
 		!g.ServeOnBattery || g.MaxTempCelsius != 85 || len(g.Schedule) != 1 || g.Schedule[0] != "22:00-08:00" {
 		t.Fatalf("overlay not applied: %+v", g)
+	}
+	// The mesh_managed switch rides the same overlay (default is on).
+	if cfg.Models.MeshManaged {
+		t.Fatal("overlay mesh_managed=false not applied")
 	}
 }

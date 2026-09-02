@@ -275,6 +275,9 @@ export interface paths {
          *       downloads (throttled).
          *     - `models_changed`: `{model, change}` where change is
          *       downloaded|loaded|unloaded|default.
+         *     - `model_assignment`: `{model, state, error}` as a coordinator
+         *       placement moves through assigned|downloading|ready|declined|
+         *       failed|evicted.
          *     - `log` (only with `?logs=1`): one LogEntry per line as logged.
          *
          *     EventSource cannot send headers, so this route additionally accepts
@@ -437,15 +440,27 @@ export interface components {
             pinned: boolean;
             /** Format: date-time */
             last_used: string;
-            /** @description downloading | ready */
+            /** @description assigned | downloading | ready. `assigned` is a coordinator placement queued behind other work (nothing on disk yet). */
             state: string;
             loaded: boolean;
             default: boolean;
+            /** @description Who installed it: `operator` (you, via the app/CLI/config) or `mesh` (coordinator placement). The mesh can only evict its own; yours are never touched. */
+            origin: string;
             /**
              * Format: int64
              * @description Live progress; present only while downloading.
              */
             received_bytes?: number;
+            assignment?: components["schemas"]["Assignment"];
+        };
+        /** @description Coordinator placement status for this model, when the mesh asked for it. Failures and refusals stay visible for ten minutes. */
+        Assignment: {
+            /** @description assigned | downloading | ready | declined | failed | evicted */
+            state: string;
+            /** Format: date-time */
+            since: string;
+            /** @description Why it was declined or failed. */
+            error?: string;
         };
         ModelList: {
             models: components["schemas"]["ModelRow"][];
@@ -453,6 +468,8 @@ export interface components {
         /** @description A catalog model merged with this node's local state. */
         CatalogEntry: {
             id: string;
+            /** @description Human-readable name incl. quant ("Qwen3.8 27B · Q4_K_M") — show this, not the id: ids are ambiguous now that model lines carry point versions (qwen3-8b vs qwen3.8-27b). Optional: absent when the daemon's catalog predates the field. */
+            display_name?: string;
             family: string;
             /** Format: double */
             params_b: number;
@@ -506,6 +523,8 @@ export interface components {
             max_temp_celsius: number;
             /** @description Windows like "22:00-08:00" (overnight wraps). */
             schedule: string[];
+            /** @description Let the mesh place models on this node (download, load, and evict what it placed) inside `models.max_disk_mb`, minus your pinned and excluded models. Off means the node serves only what you installed. Omitted on PUT = unchanged. */
+            mesh_managed?: boolean;
         };
         LogEntry: {
             /** Format: date-time */

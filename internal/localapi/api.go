@@ -4,13 +4,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"time"
 
+	"github.com/teraflock/flockd/internal/assign"
 	"github.com/teraflock/flockd/internal/config"
 	"github.com/teraflock/flockd/internal/events"
 	"github.com/teraflock/flockd/internal/governor"
 	"github.com/teraflock/flockd/internal/localapi/gen"
 	"github.com/teraflock/flockd/internal/logging"
+	"github.com/teraflock/flockd/internal/models"
 	"github.com/teraflock/flockd/internal/telemetry"
 )
 
@@ -100,26 +103,70 @@ func (s *Server) ListModels(w http.ResponseWriter, r *http.Request) {
 	}
 	def := s.deps.Engine.DefaultModel()
 
+	// Coordinator placements: attached to their cache row, or shown as a
+	// row of their own while still queued (nothing on disk yet).
+	assignments := map[string]assign.Pending{}
+	if s.deps.Assign != nil {
+		for _, p := range s.deps.Assign.Pending() {
+			assignments[p.ID] = p
+		}
+	}
 	rows := []gen.ModelRow{}
 	if s.deps.Models != nil {
 		for _, i := range s.deps.Models.List() {
 			row := gen.ModelRow{
 				Id: i.ID, SizeBytes: i.SizeBytes, Pinned: i.Pinned,
-				LastUsed: i.LastUsed, State: i.State,
+				LastUsed: i.LastUsed, State: i.State, Origin: i.Origin,
 				Loaded: loaded[i.ID], Default: i.ID == def,
 			}
 			if i.State == "downloading" {
 				rb := i.ReceivedBytes
 				row.ReceivedBytes = &rb
 			}
+			if p, ok := assignments[i.ID]; ok {
+				row.Assignment = assignmentToGen(p)
+				delete(assignments, i.ID)
+			}
 			rows = append(rows, row)
 			delete(loaded, i.ID)
 		}
 	}
 	for id := range loaded { // loaded but not cached (mock runtime)
-		rows = append(rows, gen.ModelRow{Id: id, State: "ready", Loaded: true, Default: id == def})
+		rows = append(rows, gen.ModelRow{Id: id, State: "ready", Loaded: true, Default: id == def, Origin: models.OriginOperator})
+		delete(assignments, id)
 	}
+	for _, p := range assignments {
+		if p.State == assign.StateEvicted {
+			continue // gone; nothing to show
+		}
+		state := "assigned"
+		if p.State != assign.StateAssigned && p.State != assign.StateDownloading {
+			state = p.State // declined/failed: visible, actionable
+		}
+		rows = append(rows, gen.ModelRow{
+			Id: p.ID, State: state, Origin: models.OriginMesh, LastUsed: p.Since,
+			Assignment: assignmentToGen(p),
+		})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Id < rows[j].Id })
 	writeJSON(w, http.StatusOK, gen.ModelList{Models: rows})
+}
+
+func assignmentToGen(p assign.Pending) *gen.Assignment {
+	a := &gen.Assignment{State: p.State, Since: p.Since}
+	if p.Error != "" {
+		e := p.Error
+		a.Error = &e
+	}
+	return a
+}
+
+// meshManaged reads the live toggle (defaults on when not switchable).
+func (s *Server) meshManaged() bool {
+	if s.deps.MeshManaged == nil {
+		return true
+	}
+	return s.deps.MeshManaged()
 }
 
 // PinModel implements gen.ServerInterface.
@@ -190,6 +237,7 @@ func (s *Server) GetLimits(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := g.Policy()
+	mm := s.meshManaged()
 	writeJSON(w, http.StatusOK, gen.Limits{
 		ServePolicy:       p.Serve,
 		IdleAfterSeconds:  int(p.IdleAfter.Seconds()),
@@ -197,6 +245,7 @@ func (s *Server) GetLimits(w http.ResponseWriter, r *http.Request) {
 		ServeOnBattery:    p.ServeOnBattery,
 		MaxTempCelsius:    p.MaxTempCelsius,
 		Schedule:          windowsToStrings(p.Schedule),
+		MeshManaged:       &mm,
 	})
 }
 
@@ -235,6 +284,9 @@ func (s *Server) UpdateLimits(w http.ResponseWriter, r *http.Request) {
 	p.MaxTempCelsius = lim.MaxTempCelsius
 	p.Schedule = windows
 	g.SetPolicy(p)
+	if lim.MeshManaged != nil && s.deps.SetMeshManaged != nil {
+		s.deps.SetMeshManaged(*lim.MeshManaged)
+	}
 	// Persist to the daemon-owned overlay (never the operator's
 	// config.toml) so limits survive restarts. A write failure loses only
 	// persistence, not the live change — log it and answer normally.
@@ -246,7 +298,7 @@ func (s *Server) UpdateLimits(w http.ResponseWriter, r *http.Request) {
 			ServeOnBattery: p.ServeOnBattery,
 			MaxTempCelsius: p.MaxTempCelsius,
 			Schedule:       lim.Schedule,
-		})
+		}, s.meshManaged())
 		if err != nil {
 			s.deps.Log.Warn("limits applied but not persisted", "err", err)
 		}

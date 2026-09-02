@@ -29,6 +29,10 @@ var ErrSHAMismatch = errors.New("models: sha256 mismatch")
 // ErrInvalidID rejects a model id that is unsafe to use as a path component.
 var ErrInvalidID = errors.New("models: invalid model id")
 
+// ErrOverBudget means a model cannot fit inside max_disk_mb even after
+// evicting everything eviction is allowed to touch.
+var ErrOverBudget = errors.New("models: cannot fit")
+
 // maxIDLen bounds an id so a hostile catalog cannot produce an unusable path.
 const maxIDLen = 128
 
@@ -92,7 +96,19 @@ type cacheEntry struct {
 	Pinned    bool      `json:"pinned"`
 	LastUsed  time.Time `json:"last_used"`
 	State     string    `json:"state"` // "downloading", "ready"
+	// Origin records who put the model here: "operator" (dashboard, CLI,
+	// config default) or "mesh" (coordinator placement). Mesh-triggered
+	// evictions may only touch mesh-origin entries; the operator's own
+	// models are never the mesh's to delete. Empty = operator (pre-field
+	// cache files).
+	Origin string `json:"origin,omitempty"`
 }
+
+// Origins for cache entries.
+const (
+	OriginOperator = "operator"
+	OriginMesh     = "mesh"
+)
 
 // NewManager loads (or initializes) the cache state.
 func NewManager(dir string, maxDiskMB int64, log *slog.Logger) (*Manager, error) {
@@ -144,8 +160,17 @@ func (m *Manager) saveLocked() {
 }
 
 // Ensure makes the model available locally: verified cache hit, resumed
-// partial download, or full download. Returns the local path.
+// partial download, or full download. Returns the local path. The entry
+// is operator-owned; see EnsureOrigin.
 func (m *Manager) Ensure(ctx context.Context, spec *typesv1.ModelSpec) (string, error) {
+	return m.EnsureOrigin(ctx, spec, OriginOperator)
+}
+
+// EnsureOrigin is Ensure with ownership: a mesh-origin fetch may only
+// evict other mesh-origin models to make room (the operator's models are
+// off limits to the coordinator), and a model the operator already has is
+// never re-labelled as the mesh's.
+func (m *Manager) EnsureOrigin(ctx context.Context, spec *typesv1.ModelSpec, origin string) (string, error) {
 	// A file:// artifact is a model the operator already has on disk (an
 	// LM Studio or ollama collection, a hand-built quant). Serve it in
 	// place: copying a 20GB GGUF into our cache to satisfy bookkeeping
@@ -179,7 +204,7 @@ func (m *Manager) Ensure(ctx context.Context, spec *typesv1.ModelSpec) (string, 
 	}
 	m.mu.Unlock()
 
-	if err := m.evictForLocked(ctx, int64(spec.GetSizeBytes())); err != nil {
+	if err := m.evictForLocked(ctx, int64(spec.GetSizeBytes()), origin == OriginMesh); err != nil {
 		return "", err
 	}
 
@@ -193,6 +218,7 @@ func (m *Manager) Ensure(ctx context.Context, spec *typesv1.ModelSpec) (string, 
 		SizeBytes: int64(spec.GetSizeBytes()),
 		LastUsed:  time.Now(),
 		State:     "downloading",
+		Origin:    origin,
 	}
 	m.saveLocked()
 	m.mu.Unlock()
@@ -220,6 +246,7 @@ func (m *Manager) Ensure(ctx context.Context, spec *typesv1.ModelSpec) (string, 
 		SizeBytes: fi.Size(),
 		LastUsed:  time.Now(),
 		State:     "ready",
+		Origin:    origin,
 	}
 	m.saveLocked()
 	m.mu.Unlock()
@@ -370,7 +397,10 @@ func verifySHA(path, want string) error {
 
 // evictForLocked frees space so a new artifact of size need fits inside
 // MaxDiskMB, evicting least-recently-used unpinned models first.
-func (m *Manager) evictForLocked(_ context.Context, need int64) error {
+// evictForLocked frees LRU space under the disk budget for need bytes.
+// meshOnly restricts candidates to mesh-origin entries (a coordinator
+// placement never costs the operator one of their own models).
+func (m *Manager) evictForLocked(_ context.Context, need int64, meshOnly bool) error {
 	if m.MaxDiskMB <= 0 {
 		return nil // unlimited
 	}
@@ -382,7 +412,7 @@ func (m *Manager) evictForLocked(_ context.Context, need int64) error {
 	var candidates []*cacheEntry
 	for _, e := range m.state.Entries {
 		total += e.SizeBytes
-		if !e.Pinned && e.State == "ready" {
+		if !e.Pinned && e.State == "ready" && (!meshOnly || e.Origin == OriginMesh) {
 			candidates = append(candidates, e)
 		}
 	}
@@ -405,9 +435,23 @@ func (m *Manager) evictForLocked(_ context.Context, need int64) error {
 	}
 	m.saveLocked()
 	if total > budget {
-		return fmt.Errorf("models: cannot fit %d MB within disk budget %d MB (pinned models occupy the rest)", need/1024/1024, m.MaxDiskMB)
+		return fmt.Errorf("%w: %d MB within disk budget %d MB (pinned or operator-owned models occupy the rest)", ErrOverBudget, need/1024/1024, m.MaxDiskMB)
 	}
 	return nil
+}
+
+// Origin reports who owns a cached model ("" when not cached).
+func (m *Manager) Origin(id string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e, ok := m.state.Entries[id]
+	if !ok {
+		return ""
+	}
+	if e.Origin == "" {
+		return OriginOperator
+	}
+	return e.Origin
 }
 
 // Pin marks a model exempt from eviction; unpin re-allows it.
@@ -461,6 +505,8 @@ type Info struct {
 	Pinned    bool      `json:"pinned"`
 	LastUsed  time.Time `json:"last_used"`
 	State     string    `json:"state"`
+	// Origin is "operator" or "mesh" (who installed it).
+	Origin string `json:"origin"`
 	// ReceivedBytes is live progress, present only while downloading.
 	ReceivedBytes int64 `json:"received_bytes,omitempty"`
 }
@@ -471,7 +517,10 @@ func (m *Manager) List() []Info {
 	defer m.mu.Unlock()
 	out := make([]Info, 0, len(m.state.Entries))
 	for _, e := range m.state.Entries {
-		row := Info{ID: e.ID, SizeBytes: e.SizeBytes, Pinned: e.Pinned, LastUsed: e.LastUsed, State: e.State}
+		row := Info{ID: e.ID, SizeBytes: e.SizeBytes, Pinned: e.Pinned, LastUsed: e.LastUsed, State: e.State, Origin: e.Origin}
+		if row.Origin == "" {
+			row.Origin = OriginOperator
+		}
 		if p, ok := m.progress[e.ID]; ok {
 			row.ReceivedBytes = p.ReceivedBytes
 			if row.SizeBytes == 0 {

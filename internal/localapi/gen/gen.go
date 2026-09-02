@@ -14,6 +14,16 @@ import (
 	"github.com/oapi-codegen/runtime"
 )
 
+// Assignment Coordinator placement status for this model, when the mesh asked for it. Failures and refusals stay visible for ten minutes.
+type Assignment struct {
+	// Error Why it was declined or failed.
+	Error *string   `json:"error,omitempty"`
+	Since time.Time `json:"since"`
+
+	// State assigned | downloading | ready | declined | failed | evicted
+	State string `json:"state"`
+}
+
 // CatalogEntry A catalog model merged with this node's local state.
 type CatalogEntry struct {
 	ArtifactUrl   string `json:"artifact_url"`
@@ -115,6 +125,9 @@ type Limits struct {
 	IdleAfterSeconds int     `json:"idle_after_seconds"`
 	MaxTempCelsius   float64 `json:"max_temp_celsius"`
 
+	// MeshManaged Let the mesh place models on this node (download, load, and evict what it placed) inside `models.max_disk_mb`, minus your pinned and excluded models. Off means the node serves only what you installed. Omitted on PUT = unchanged.
+	MeshManaged *bool `json:"mesh_managed,omitempty"`
+
 	// Schedule Windows like "22:00-08:00" (overnight wraps).
 	Schedule       []string `json:"schedule"`
 	ServeOnBattery bool     `json:"serve_on_battery"`
@@ -144,17 +157,22 @@ type ModelList struct {
 
 // ModelRow defines model for ModelRow.
 type ModelRow struct {
-	Default  bool      `json:"default"`
-	Id       string    `json:"id"`
-	LastUsed time.Time `json:"last_used"`
-	Loaded   bool      `json:"loaded"`
-	Pinned   bool      `json:"pinned"`
+	// Assignment Coordinator placement status for this model, when the mesh asked for it. Failures and refusals stay visible for ten minutes.
+	Assignment *Assignment `json:"assignment,omitempty"`
+	Default    bool        `json:"default"`
+	Id         string      `json:"id"`
+	LastUsed   time.Time   `json:"last_used"`
+	Loaded     bool        `json:"loaded"`
+
+	// Origin Who installed it: `operator` (you, via the app/CLI/config) or `mesh` (coordinator placement). The mesh can only evict its own; yours are never touched.
+	Origin string `json:"origin"`
+	Pinned bool   `json:"pinned"`
 
 	// ReceivedBytes Live progress; present only while downloading.
 	ReceivedBytes *int64 `json:"received_bytes,omitempty"`
 	SizeBytes     int64  `json:"size_bytes"`
 
-	// State downloading | ready
+	// State assigned | downloading | ready. `assigned` is a coordinator placement queued behind other work (nothing on disk yet).
 	State string `json:"state"`
 }
 

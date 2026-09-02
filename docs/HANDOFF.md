@@ -67,11 +67,23 @@ path.
   headless boxes, warned once). Battery/thermal via sysfs are real.
 - **Reputation panel** in the TUI: placeholder until the trust engine
   exists (Phase 3).
-- **ModelAssignment handling**: dispatch plumbing exists; the handler
-  currently logs (download+load+evict loop needs the llamacpp runtime on a
-  real node — wire `models.Manager` + `engine.Register` in
-  `cmd/flockd/startTunnel`).
-- **ConfigUpdate** from coordinator: logged, not applied mid-session.
+- **ModelAssignment handling**: DONE (plan 05, 2026-09-01) —
+  `internal/assign` runs coordinator placements under the operator's
+  consent: `[models] mesh_managed` (default on; live toggle via
+  `PUT /api/v1/limits`, persisted in the limits overlay), `max_disk_mb`
+  (a placement that cannot fit after evicting other *mesh-placed* models is
+  declined), `pin`/`exclude`, and cache **origin** (`operator` vs `mesh`;
+  the mesh can only evict what it placed — `models.Manager.EnsureOrigin`
+  scopes LRU eviction to mesh-origin entries for mesh fetches). Downloads
+  wait for AC power. Every step is reported as a `ModelState`
+  (`assigned`/`downloading`/`ready`, one-shot `declined`/`failed`,
+  `evicted`) and surfaces in `/api/v1/models` (`origin`, `assignment`)
+  and the `model_assignment` SSE event. Mock-runtime nodes decline with a
+  reason so the coordinator backs off.
+- **ConfigUpdate** from coordinator: DONE — heartbeat cadence re-arms the
+  running loop; `max_concurrent_requests` becomes a ceiling
+  (min(operator budget, coordinator)) enforced at dispatch admission
+  (`over-capacity` reject).
 - **Enroll-without-restart**: DONE — `POST /api/v1/enroll` enrolls (or
   re-enrolls after a mesh-CA rotation, which the startup path cannot do)
   and swaps the tunnel client live. `tera login`'s claim-code file +
@@ -86,8 +98,8 @@ path.
    artifact manifest, and add an opt-in integration test
    (`FLOCKD_TEST_LLAMA_SERVER_PATH=… go test -tags realllama`).
 2. **Phase 1 tunnel remainder**: QUIC `Dialer` (quic-go); cert rotation call
-   site; ModelAssignment → download/load/evict. (Enrollment against the real
-   coordinator now works — see below.)
+   site. (ModelAssignment and ConfigUpdate are done; enrollment against the
+   real coordinator works — see below.)
 3. **Limits persistence**: DONE — PUT /api/v1/limits persists to a
    daemon-owned `<data_dir>/limits.toml` overlay (config.toml untouched).
 4. **Keychain**: move `node.key` and `local_api_token` to

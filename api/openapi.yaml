@@ -315,6 +315,9 @@ paths:
           downloads (throttled).
         - `models_changed`: `{model, change}` where change is
           downloaded|loaded|unloaded|default.
+        - `model_assignment`: `{model, state, error}` as a coordinator
+          placement moves through assigned|downloading|ready|declined|
+          failed|evicted.
         - `log` (only with `?logs=1`): one LogEntry per line as logged.
 
         EventSource cannot send headers, so this route additionally accepts
@@ -545,7 +548,7 @@ components:
 
     ModelRow:
       type: object
-      required: [id, size_bytes, pinned, last_used, state, loaded, default]
+      required: [id, size_bytes, pinned, last_used, state, loaded, default, origin]
       properties:
         id: { type: string }
         size_bytes: { type: integer, format: int64 }
@@ -553,13 +556,37 @@ components:
         last_used: { type: string, format: date-time }
         state:
           type: string
-          description: downloading | ready
+          description: >
+            assigned | downloading | ready. `assigned` is a coordinator
+            placement queued behind other work (nothing on disk yet).
         loaded: { type: boolean }
         default: { type: boolean }
+        origin:
+          type: string
+          description: >
+            Who installed it: `operator` (you, via the app/CLI/config) or
+            `mesh` (coordinator placement). The mesh can only evict its
+            own; yours are never touched.
         received_bytes:
           type: integer
           format: int64
           description: Live progress; present only while downloading.
+        assignment: { $ref: "#/components/schemas/Assignment" }
+
+    Assignment:
+      type: object
+      description: >
+        Coordinator placement status for this model, when the mesh asked
+        for it. Failures and refusals stay visible for ten minutes.
+      required: [state, since]
+      properties:
+        state:
+          type: string
+          description: assigned | downloading | ready | declined | failed | evicted
+        since: { type: string, format: date-time }
+        error:
+          type: string
+          description: Why it was declined or failed.
 
     ModelList:
       type: object
@@ -644,6 +671,13 @@ components:
           type: array
           items: { type: string }
           description: Windows like "22:00-08:00" (overnight wraps).
+        mesh_managed:
+          type: boolean
+          description: >
+            Let the mesh place models on this node (download, load, and
+            evict what it placed) inside `models.max_disk_mb`, minus your
+            pinned and excluded models. Off means the node serves only what
+            you installed. Omitted on PUT = unchanged.
 
     LogEntry:
       type: object

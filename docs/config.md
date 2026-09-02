@@ -61,8 +61,13 @@ manifest_path = ""              # local catalog file (teraflock/models YAML/JSON
 manifest_url  = ""              # or a catalog URL; one of the two is required for llamacpp
 default       = "mock-8b-instruct"  # model served at startup
 max_disk_mb   = 61440           # model-cache budget; LRU eviction below it
-pin           = []              # model ids exempt from eviction
-exclude       = []              # model ids never assigned to this node
+pin           = []              # model ids exempt from eviction (yours or the mesh's)
+exclude       = []              # model ids the mesh may never place here
+mesh_managed  = true            # let the coordinator place models inside max_disk_mb
+                                # (download/load/evict what IT placed; never your own
+                                # installs). Also a live toggle in the app/dashboard,
+                                # persisted in <data_dir>/limits.toml. Off = serve only
+                                # what you installed.
 
 [tunnel]
 coordinator_addr     = "tunnel.teraflock.dev:443"

@@ -98,6 +98,11 @@ type Models struct {
 	// Pin lists model ids exempt from eviction; Exclude are never assigned.
 	Pin     []string `koanf:"pin"`
 	Exclude []string `koanf:"exclude"`
+	// MeshManaged lets the coordinator place models on this node (download,
+	// load, and later evict what it placed) inside max_disk_mb, minus pin
+	// and exclude. Off = the node serves only what the operator installed.
+	// Default on: an enrolled node that never takes placements never earns.
+	MeshManaged bool `koanf:"mesh_managed"`
 }
 
 type Tunnel struct {
@@ -159,6 +164,7 @@ func Default() Config {
 			ManifestURL: "https://teraflock-downloads.s3.amazonaws.com/catalog/catalog.json",
 			Default:     "llama-3.2-3b-instruct-q4_k_m",
 			MaxDiskMB:   60 * 1024,
+			MeshManaged: true,
 		},
 		Tunnel: Tunnel{
 			CoordinatorAddr:   "tunnel.teraflock.ai:443",
@@ -234,10 +240,11 @@ func LimitsPath(dataDir string) string {
 	return filepath.Join(dataDir, "limits.toml")
 }
 
-// SaveLimits persists live-edited governor limits to the overlay file that
-// Load applies on the next start. Only the operator-facing limit knobs are
+// SaveLimits persists live-edited limits to the overlay file that Load
+// applies on the next start. Only the operator-facing limit knobs are
 // written; poll_interval and the rest stay wherever the operator set them.
-func SaveLimits(dataDir string, g Governor) error {
+// meshManaged is the [models] switch the same dashboard toggle edits.
+func SaveLimits(dataDir string, g Governor, meshManaged bool) error {
 	var b strings.Builder
 	b.WriteString("# Written by flockd when limits change via the API or app.\n")
 	b.WriteString("# These override [governor] in config.toml; delete this file to undo.\n\n")
@@ -255,6 +262,8 @@ func SaveLimits(dataDir string, g Governor) error {
 		fmt.Fprintf(&b, "%q", w)
 	}
 	b.WriteString("]\n")
+	b.WriteString("\n[models]\n")
+	fmt.Fprintf(&b, "mesh_managed = %t\n", meshManaged)
 
 	tmp := LimitsPath(dataDir) + ".tmp"
 	if err := os.WriteFile(tmp, []byte(b.String()), 0o600); err != nil {

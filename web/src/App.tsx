@@ -270,8 +270,19 @@ function ModelsPage() {
                 {m.loaded ? "● " : "○ "}
                 {m.id}
                 {m.default && <span className="text-slate-500"> (default)</span>}
+                {m.origin === "mesh" && (
+                  <span className="ml-2 rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wide bg-amber-300/10 text-amber-300"
+                    title="Placed by the mesh; it can evict this one, never yours.">
+                    mesh
+                  </span>
+                )}
               </td>
-              <td>{m.state}</td>
+              <td>
+                {m.state}
+                {m.assignment?.error && (
+                  <span className="text-red-400 text-xs" title={m.assignment.error}> — {m.assignment.state}</span>
+                )}
+              </td>
               <td>{m.size_bytes ? `${(m.size_bytes / 1e9).toFixed(1)}GB` : "—"}</td>
               <td>
                 <button

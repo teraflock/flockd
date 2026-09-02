@@ -401,3 +401,107 @@ func TestSessionRejectsUnenrolledNodeID(t *testing.T) {
 		t.Fatal("session established for a node that never enrolled")
 	}
 }
+
+// A ConfigUpdate applies mid-session: the heartbeat cadence changes on
+// the running loop and the concurrency cap becomes a ceiling.
+func TestConfigUpdateAppliesLive(t *testing.T) {
+	h := newHarness(t, func(o *tunnel.Options) {
+		o.HeartbeatInterval = time.Hour // nothing until the update lands
+		o.MaxConcurrent = 8
+	})
+	if err := h.coord.PushConfig(&tunnelv1.ConfigUpdate{HeartbeatIntervalSeconds: 1, MaxConcurrentRequests: 1}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.After(5 * time.Second)
+	for len(h.coord.Heartbeats()) < 2 {
+		select {
+		case <-deadline:
+			t.Fatalf("heartbeat cadence not re-armed: %d heartbeats", len(h.coord.Heartbeats()))
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	if got := h.client.EffectiveMaxConcurrent(); got != 1 {
+		t.Fatalf("effective cap = %d, want 1 (min of operator 8, coordinator 1)", got)
+	}
+	// The coordinator can only lower, never raise past the operator.
+	if err := h.coord.PushConfig(&tunnelv1.ConfigUpdate{MaxConcurrentRequests: 50}); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.After(2 * time.Second)
+	for h.client.EffectiveMaxConcurrent() != 8 {
+		select {
+		case <-deadline:
+			t.Fatalf("effective cap = %d, want 8", h.client.EffectiveMaxConcurrent())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// Over the effective cap, dispatches are rejected fast (over-capacity)
+// so the coordinator retries elsewhere instead of queueing here.
+func TestOverCapacityRejects(t *testing.T) {
+	coord, err := fakecoord.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(coord.Stop)
+	coord.Allow("n")
+	mock := rt.NewMockRuntime(20) // slow: the first dispatch stays in flight
+	inst, _ := mock.Load(context.Background(), rt.ModelSpec{ID: "mock-8b"}, rt.ResourceBudget{MaxConcurrent: 4})
+	client, err := tunnel.NewClient(tunnel.Options{
+		Dialer: coord.Dialer(), Addr: coord.Addr(), NodeID: "n",
+		CoordinatorPubKey: coord.PubKey(), Engine: engine{inst}, Log: quietLog(),
+		MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go client.Run(ctx)
+	if !coord.WaitForSession(5 * time.Second) {
+		t.Fatal("no session")
+	}
+	opts := fakecoord.DispatchOpts{
+		ModelID:  "mock-8b",
+		Kind:     typesv1.RequestKind_REQUEST_KIND_CHAT,
+		Messages: []*typesv1.ChatMessage{{Role: "user", Content: "long"}},
+		Params:   &typesv1.GenerationParams{Seed: 1, MaxTokens: 10000},
+	}
+	id1, acks1, tokens1, err := coord.Dispatch(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a := <-acks1; !a.GetAccepted() {
+		t.Fatalf("first dispatch rejected: %s", a.GetRejectReason())
+	}
+	<-tokens1 // in flight
+	_, acks2, _, err := coord.Dispatch(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a := <-acks2; a.GetAccepted() || a.GetRejectReason() != "over-capacity" {
+		t.Fatalf("second dispatch ack = %+v, want over-capacity reject", a)
+	}
+	_ = coord.Cancel(id1, "done")
+}
+
+func TestSendModelStateReachesCoordinator(t *testing.T) {
+	h := newHarness(t, nil)
+	if err := h.client.SendModelState(&typesv1.ModelState{ModelId: "m", State: "downloading"}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.After(2 * time.Second)
+	for {
+		for _, m := range h.coord.ModelStates() {
+			if m.GetModelId() == "m" && m.GetState() == "downloading" {
+				return
+			}
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("model state never arrived: %v", h.coord.ModelStates())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
