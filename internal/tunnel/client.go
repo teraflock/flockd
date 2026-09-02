@@ -187,16 +187,34 @@ func jitter(d time.Duration) time.Duration {
 	return time.Duration(float64(d) * f)
 }
 
-// sessionStream is the mutex-guarded send side of the bidi stream.
+// sessionStream is the mutex-guarded send side of the bidi stream. Send
+// and CloseSend are not safe to call concurrently on a gRPC stream, so
+// both go through the same lock, and nothing is sent after the close.
 type sessionStream struct {
-	mu sync.Mutex
-	s  grpc.BidiStreamingClient[tunnelv1.NodeMessage, tunnelv1.CoordinatorMessage]
+	mu     sync.Mutex
+	s      grpc.BidiStreamingClient[tunnelv1.NodeMessage, tunnelv1.CoordinatorMessage]
+	closed bool
 }
+
+var errSessionClosed = errors.New("tunnel: session send side closed")
 
 func (ss *sessionStream) send(m *tunnelv1.NodeMessage) error {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
+	if ss.closed {
+		return errSessionClosed
+	}
 	return ss.s.Send(m)
+}
+
+func (ss *sessionStream) closeSend() error {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	if ss.closed {
+		return nil
+	}
+	ss.closed = true
+	return ss.s.CloseSend()
 }
 
 func (c *Client) runSession(ctx context.Context) error {
@@ -263,7 +281,7 @@ func (c *Client) runSession(ctx context.Context) error {
 		_ = ss.send(&tunnelv1.NodeMessage{Msg: &tunnelv1.NodeMessage_Goodbye{
 			Goodbye: &tunnelv1.Goodbye{Reason: "shutdown", InflightRequestIds: ids},
 		}})
-		_ = stream.CloseSend()
+		_ = ss.closeSend()
 	}()
 
 	for {
