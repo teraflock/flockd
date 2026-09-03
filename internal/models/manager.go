@@ -20,6 +20,9 @@ import (
 	"time"
 
 	typesv1 "github.com/teraflock/proto/gen/go/flock/types/v1"
+
+	"github.com/teraflock/flockd/internal/activity"
+	"github.com/teraflock/flockd/internal/hardware"
 )
 
 // ErrSHAMismatch means a downloaded artifact failed verification. The
@@ -63,20 +66,43 @@ func ValidateID(id string) error {
 // Manager owns <data_dir>/models: downloads, verification, pins and LRU
 // eviction under the disk budget.
 type Manager struct {
-	Dir       string
-	MaxDiskMB int64
-	Client    *http.Client
-	Log       *slog.Logger
+	Dir    string
+	Client *http.Client
+	Log    *slog.Logger
 
 	// OnProgress, when set, receives byte progress during downloads
 	// (throttled). total is 0 when the server sent no length and the
 	// catalog carries no size.
 	OnProgress func(id string, received, total int64)
+	// Activity receives store events (downloads, evictions, missing
+	// files). May be nil.
+	Activity *activity.Ring
+	// IsLoaded reports whether a model is currently loaded in a runtime;
+	// retention never evicts a loaded model. Nil = nothing is loaded.
+	IsLoaded func(id string) bool
 
-	mu       sync.Mutex
-	state    cacheState
-	progress map[string]Progress
+	mu            sync.Mutex
+	maxDiskMB     int64
+	retentionDays int
+	state         cacheState
+	progress      map[string]Progress
+	missingSeen   map[string]bool
 }
+
+// States a cache entry moves through.
+const (
+	StateDownloading = "downloading"
+	StateReady       = "ready"
+	// StateMissing is reported (never stored) for a ready entry whose file
+	// is gone from disk: the index knows the model, the operator or
+	// something else deleted the artifact. It does not count against the
+	// budget; the next load re-downloads it.
+	StateMissing = "missing"
+)
+
+// PartialMaxAge is how long an abandoned .partial download survives
+// before GCPartials removes it.
+const PartialMaxAge = 7 * 24 * time.Hour
 
 // Progress is live byte progress for an in-flight download.
 type Progress struct {
@@ -119,12 +145,13 @@ func NewManager(dir string, maxDiskMB int64, log *slog.Logger) (*Manager, error)
 		log = slog.Default()
 	}
 	m := &Manager{
-		Dir:       dir,
-		MaxDiskMB: maxDiskMB,
-		Client:    &http.Client{}, // long downloads: no client timeout, ctx governs
-		Log:       log,
-		state:     cacheState{Entries: map[string]*cacheEntry{}},
-		progress:  map[string]Progress{},
+		Dir:         dir,
+		maxDiskMB:   maxDiskMB,
+		Client:      &http.Client{}, // long downloads: no client timeout, ctx governs
+		Log:         log,
+		state:       cacheState{Entries: map[string]*cacheEntry{}},
+		progress:    map[string]Progress{},
+		missingSeen: map[string]bool{},
 	}
 	if raw, err := os.ReadFile(m.statePath()); err == nil {
 		if err := json.Unmarshal(raw, &m.state); err != nil {
@@ -147,6 +174,35 @@ func NewManager(dir string, maxDiskMB int64, log *slog.Logger) (*Manager, error)
 }
 
 func (m *Manager) statePath() string { return filepath.Join(m.Dir, "models.json") }
+
+// MaxDiskMB is the live disk budget (0 = unlimited).
+func (m *Manager) MaxDiskMB() int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.maxDiskMB
+}
+
+// SetMaxDiskMB changes the disk budget live (PUT /api/v1/limits). It does
+// not evict immediately; the next fetch does.
+func (m *Manager) SetMaxDiskMB(mb int64) {
+	m.mu.Lock()
+	m.maxDiskMB = max(mb, 0)
+	m.mu.Unlock()
+}
+
+// RetentionDays is the live retention window (0 = never evict on age).
+func (m *Manager) RetentionDays() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.retentionDays
+}
+
+// SetRetentionDays changes the retention window live; Retain applies it.
+func (m *Manager) SetRetentionDays(days int) {
+	m.mu.Lock()
+	m.retentionDays = max(days, 0)
+	m.mu.Unlock()
+}
 
 // Path returns where a model artifact lives locally.
 func (m *Manager) Path(id string) string { return filepath.Join(m.Dir, id+".gguf") }
@@ -222,6 +278,9 @@ func (m *Manager) EnsureOrigin(ctx context.Context, spec *typesv1.ModelSpec, ori
 	}
 	m.saveLocked()
 	m.mu.Unlock()
+	actor := actorFor(origin)
+	m.Activity.Record(activity.KindDownloadStarted, actor, spec.GetId(),
+		fmt.Sprintf("%s started downloading %s (%s)", actor, spec.GetId(), humanBytes(int64(spec.GetSizeBytes()))), "")
 
 	if err := m.download(ctx, spec, dest); err != nil {
 		m.mu.Lock()
@@ -229,6 +288,11 @@ func (m *Manager) EnsureOrigin(ctx context.Context, spec *typesv1.ModelSpec, ori
 		delete(m.progress, spec.GetId())
 		m.saveLocked()
 		m.mu.Unlock()
+		detail := err.Error()
+		if ctx.Err() != nil {
+			detail = "cancelled"
+		}
+		m.Activity.Record(activity.KindDownloadFailed, actor, spec.GetId(), "download of "+spec.GetId()+" failed", detail)
 		return "", err
 	}
 	m.mu.Lock()
@@ -248,9 +312,31 @@ func (m *Manager) EnsureOrigin(ctx context.Context, spec *typesv1.ModelSpec, ori
 		State:     "ready",
 		Origin:    origin,
 	}
+	delete(m.missingSeen, spec.GetId())
 	m.saveLocked()
 	m.mu.Unlock()
+	m.Activity.Record(activity.KindDownloaded, actor, spec.GetId(),
+		fmt.Sprintf("downloaded %s (%s)", spec.GetId(), humanBytes(fi.Size())), "")
 	return dest, nil
+}
+
+func actorFor(origin string) string {
+	if origin == OriginMesh {
+		return activity.ActorMesh
+	}
+	return activity.ActorOperator
+}
+
+// humanBytes renders a size for activity one-liners.
+func humanBytes(n int64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%.1f GB", float64(n)/(1<<30))
+	case n >= 1<<20:
+		return fmt.Sprintf("%.0f MB", float64(n)/(1<<20))
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
 }
 
 // download performs a resumable fetch into dest via a .partial temp file,
@@ -401,16 +487,19 @@ func verifySHA(path, want string) error {
 // meshOnly restricts candidates to mesh-origin entries (a coordinator
 // placement never costs the operator one of their own models).
 func (m *Manager) evictForLocked(_ context.Context, need int64, meshOnly bool) error {
-	if m.MaxDiskMB <= 0 {
-		return nil // unlimited
-	}
-	budget := m.MaxDiskMB * 1024 * 1024
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.maxDiskMB <= 0 {
+		return nil // unlimited
+	}
+	budget := m.maxDiskMB * 1024 * 1024
 
 	total := need
 	var candidates []*cacheEntry
 	for _, e := range m.state.Entries {
+		if e.State == StateReady && !m.fileExistsLocked(e.ID) {
+			continue // missing from disk: occupies nothing
+		}
 		total += e.SizeBytes
 		if !e.Pinned && e.State == "ready" && (!meshOnly || e.Origin == OriginMesh) {
 			candidates = append(candidates, e)
@@ -432,12 +521,32 @@ func (m *Manager) evictForLocked(_ context.Context, need int64, meshOnly bool) e
 		}
 		total -= e.SizeBytes
 		delete(m.state.Entries, e.ID)
+		actor := activity.ActorOperator
+		if meshOnly {
+			actor = activity.ActorMesh
+		}
+		m.Activity.Record(activity.KindEvicted, actor, e.ID,
+			fmt.Sprintf("evicted %s (%s) to stay under the disk budget", e.ID, humanBytes(e.SizeBytes)), "lru, max_disk_mb")
 	}
 	m.saveLocked()
 	if total > budget {
-		return fmt.Errorf("%w: %d MB within disk budget %d MB (pinned or operator-owned models occupy the rest)", ErrOverBudget, need/1024/1024, m.MaxDiskMB)
+		return fmt.Errorf("%w: %d MB within disk budget %d MB (pinned or operator-owned models occupy the rest)", ErrOverBudget, need/1024/1024, m.maxDiskMB)
 	}
 	return nil
+}
+
+func (m *Manager) fileExistsLocked(id string) bool {
+	_, err := os.Stat(m.Path(id))
+	return err == nil
+}
+
+// Has reports whether id is on disk, complete and verified (a `cached`
+// candidate: loadable without a download).
+func (m *Manager) Has(id string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e, ok := m.state.Entries[id]
+	return ok && e.State == StateReady && m.fileExistsLocked(id)
 }
 
 // Origin reports who owns a cached model ("" when not cached).
@@ -509,13 +618,18 @@ type Info struct {
 	Origin string `json:"origin"`
 	// ReceivedBytes is live progress, present only while downloading.
 	ReceivedBytes int64 `json:"received_bytes,omitempty"`
+	// Path is the artifact's absolute path; empty unless the file exists.
+	Path string `json:"path,omitempty"`
 }
 
-// List returns cache contents sorted by id.
+// List returns cache contents sorted by id. Every ready entry is stat'd:
+// a file deleted underneath the daemon shows as StateMissing rather than
+// a phantom `ready` that still counts against the budget.
 func (m *Manager) List() []Info {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := make([]Info, 0, len(m.state.Entries))
+	var newlyMissing []string
 	for _, e := range m.state.Entries {
 		row := Info{ID: e.ID, SizeBytes: e.SizeBytes, Pinned: e.Pinned, LastUsed: e.LastUsed, State: e.State, Origin: e.Origin}
 		if row.Origin == "" {
@@ -527,7 +641,24 @@ func (m *Manager) List() []Info {
 				row.SizeBytes = p.TotalBytes
 			}
 		}
+		if e.State == StateReady {
+			if m.fileExistsLocked(e.ID) {
+				row.Path = m.Path(e.ID)
+				delete(m.missingSeen, e.ID)
+			} else {
+				row.State = StateMissing
+				if !m.missingSeen[e.ID] {
+					m.missingSeen[e.ID] = true
+					newlyMissing = append(newlyMissing, e.ID)
+				}
+			}
+		}
 		out = append(out, row)
+	}
+	for _, id := range newlyMissing {
+		m.Log.Warn("model file missing from disk", "model", id, "path", m.Path(id))
+		m.Activity.Record(activity.KindMissing, activity.ActorDaemon, id,
+			id+" is missing from disk (deleted outside the daemon); it will be re-downloaded on the next load", "")
 	}
 	slices.SortFunc(out, func(a, b Info) int {
 		if a.ID < b.ID {
@@ -539,4 +670,202 @@ func (m *Manager) List() []Info {
 		return 0
 	})
 	return out
+}
+
+// DiskStats is the aggregate store view for /api/v1/status.
+type DiskStats struct {
+	// ModelsBytes counts complete artifacts that are actually on disk.
+	ModelsBytes int64
+	// PartialBytes counts resumable .partial downloads (live and abandoned).
+	PartialBytes int64
+	// BudgetBytes is max_disk_mb (0 = unlimited).
+	BudgetBytes int64
+	// FreeBytes is free space on the volume holding Dir.
+	FreeBytes int64
+	Dir       string
+}
+
+// Stats sizes the store: real files, not the index.
+func (m *Manager) Stats() DiskStats {
+	m.mu.Lock()
+	st := DiskStats{Dir: m.Dir, BudgetBytes: m.maxDiskMB * 1024 * 1024}
+	for _, e := range m.state.Entries {
+		if e.State != StateReady {
+			continue
+		}
+		if fi, err := os.Stat(m.Path(e.ID)); err == nil {
+			st.ModelsBytes += fi.Size()
+		}
+	}
+	m.mu.Unlock()
+	for _, p := range m.partials() {
+		st.PartialBytes += p.Size()
+	}
+	if free, err := hardware.DiskFreeBytes(m.Dir); err == nil {
+		st.FreeBytes = int64(free)
+	}
+	return st
+}
+
+// partials lists the .partial files in Dir.
+func (m *Manager) partials() []os.FileInfo {
+	entries, err := os.ReadDir(m.Dir)
+	if err != nil {
+		return nil
+	}
+	var out []os.FileInfo
+	for _, de := range entries {
+		if de.IsDir() || !strings.HasSuffix(de.Name(), ".partial") {
+			continue
+		}
+		if fi, err := de.Info(); err == nil {
+			out = append(out, fi)
+		}
+	}
+	return out
+}
+
+// GCPartials removes .partial files whose last write is older than maxAge
+// and that no download is currently writing. An abandoned resume
+// otherwise leaks its bytes forever. Returns the ids cleaned up.
+func (m *Manager) GCPartials(maxAge time.Duration) []string {
+	cutoff := time.Now().Add(-maxAge)
+	var removed []string
+	for _, fi := range m.partials() {
+		id := strings.TrimSuffix(strings.TrimSuffix(fi.Name(), ".partial"), ".gguf")
+		m.mu.Lock()
+		_, live := m.progress[id]
+		m.mu.Unlock()
+		if live || fi.ModTime().After(cutoff) {
+			continue
+		}
+		path := filepath.Join(m.Dir, fi.Name())
+		if err := os.Remove(path); err != nil {
+			m.Log.Warn("could not remove stale partial download", "path", path, "err", err)
+			continue
+		}
+		m.Log.Info("removed stale partial download", "model", id, "size_mb", fi.Size()/1024/1024, "age", time.Since(fi.ModTime()).Round(time.Hour))
+		removed = append(removed, id)
+	}
+	return removed
+}
+
+// Retain evicts unpinned, unloaded models that have not served a request
+// for longer than the retention window (RetentionDays; 0 = never). Mesh
+// and operator models alike: the operator opted in by setting it. Returns
+// the evicted ids.
+func (m *Manager) Retain() []string {
+	m.mu.Lock()
+	days := m.retentionDays
+	if days <= 0 {
+		m.mu.Unlock()
+		return nil
+	}
+	cutoff := time.Now().Add(-time.Duration(days) * 24 * time.Hour)
+	var victims []*cacheEntry
+	for _, e := range m.state.Entries {
+		if e.Pinned || e.State != StateReady || !e.LastUsed.Before(cutoff) {
+			continue
+		}
+		if m.IsLoaded != nil && m.IsLoaded(e.ID) {
+			continue
+		}
+		victims = append(victims, e)
+	}
+	var evicted []string
+	for _, e := range victims {
+		if err := os.Remove(m.Path(e.ID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			m.Log.Warn("retention eviction failed", "model", e.ID, "err", err)
+			continue
+		}
+		delete(m.state.Entries, e.ID)
+		evicted = append(evicted, e.ID)
+		m.Log.Info("evicting model (retention)", "model", e.ID, "last_used", e.LastUsed.Format(time.RFC3339), "retention_days", days)
+	}
+	if len(evicted) > 0 {
+		m.saveLocked()
+	}
+	m.mu.Unlock()
+	for _, id := range evicted {
+		m.Activity.Record(activity.KindEvicted, activity.ActorDaemon, id,
+			fmt.Sprintf("evicted %s: unused for more than %d days", id, days), "retention_days")
+	}
+	return evicted
+}
+
+// Reconcile adopts artifacts that are in Dir but not in the index — a
+// models.json lost or rolled back, a file copied in by hand — as
+// operator-origin entries when their name is a known catalog id and their
+// size matches the catalog. Anything else is logged and left alone.
+// Returns the adopted ids.
+func (m *Manager) Reconcile(cat *Catalog) []string {
+	if cat == nil {
+		return nil
+	}
+	entries, err := os.ReadDir(m.Dir)
+	if err != nil {
+		return nil
+	}
+	var adopted []string
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, de := range entries {
+		name := de.Name()
+		if de.IsDir() || !strings.HasSuffix(name, ".gguf") {
+			continue
+		}
+		id := strings.TrimSuffix(name, ".gguf")
+		if _, known := m.state.Entries[id]; known {
+			continue
+		}
+		if ValidateID(id) != nil {
+			continue
+		}
+		fi, err := de.Info()
+		if err != nil {
+			continue
+		}
+		cm, ok := cat.Find(id)
+		if !ok {
+			m.Log.Debug("unindexed file in model dir is not a catalog model; leaving it", "file", name)
+			continue
+		}
+		if cm.SizeBytes > 0 && int64(cm.SizeBytes) != fi.Size() {
+			m.Log.Warn("unindexed model file has an unexpected size; not adopting it", "model", id, "size", fi.Size(), "catalog_size", cm.SizeBytes)
+			continue
+		}
+		m.state.Entries[id] = &cacheEntry{
+			ID: id, SHA256: cm.SHA256, SizeBytes: fi.Size(), LastUsed: fi.ModTime(),
+			State: StateReady, Origin: OriginOperator,
+		}
+		adopted = append(adopted, id)
+		m.Log.Info("adopted model file found in the model dir", "model", id, "size_mb", fi.Size()/1024/1024)
+	}
+	if len(adopted) > 0 {
+		m.saveLocked()
+	}
+	return adopted
+}
+
+// housekeepInterval is how often RunHousekeeping runs (a var for tests).
+var housekeepInterval = time.Hour
+
+// RunHousekeeping GCs stale partials and applies retention on start and
+// then hourly, until ctx ends.
+func (m *Manager) RunHousekeeping(ctx context.Context) {
+	tick := func() {
+		m.GCPartials(PartialMaxAge)
+		m.Retain()
+	}
+	tick()
+	t := time.NewTicker(housekeepInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			tick()
+		}
+	}
 }

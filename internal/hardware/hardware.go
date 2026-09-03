@@ -52,6 +52,15 @@ func cpuAccel() string {
 	return "cpu"
 }
 
+// DiskFreeBytes reports free space for unprivileged writes on the volume
+// holding path (the model store's "free" figure in /api/v1/status).
+func DiskFreeBytes(path string) (uint64, error) { return diskFreeBytes(path) }
+
+func diskFreeMB(path string) (uint64, error) {
+	b, err := diskFreeBytes(path)
+	return b / (1024 * 1024), err
+}
+
 // BestAccel returns the accelerator backend the runtime artifact fetcher
 // should prefer for this profile.
 func BestAccel(p *typesv1.CapabilityProfile) string {

@@ -129,10 +129,10 @@ func firstNonEmpty(ss ...string) string {
 	return ""
 }
 
-func diskFreeMB(path string) (uint64, error) {
+func diskFreeBytes(path string) (uint64, error) {
 	var st unix.Statfs_t
 	if err := unix.Statfs(path, &st); err != nil {
 		return 0, fmt.Errorf("statfs %s: %w", path, err)
 	}
-	return uint64(st.Bavail) * uint64(st.Bsize) / (1024 * 1024), nil
+	return uint64(st.Bavail) * uint64(st.Bsize), nil
 }

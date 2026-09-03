@@ -24,7 +24,7 @@ func detectPlatform(ctx context.Context, p *typesv1.CapabilityProfile) error {
 	return nil
 }
 
-func diskFreeMB(path string) (uint64, error) {
+func diskFreeBytes(path string) (uint64, error) {
 	var free, total, avail uint64
 	p, err := windows.UTF16PtrFromString(path)
 	if err != nil {
@@ -33,5 +33,5 @@ func diskFreeMB(path string) (uint64, error) {
 	if err := windows.GetDiskFreeSpaceEx(p, &avail, &total, &free); err != nil {
 		return 0, err
 	}
-	return avail / (1024 * 1024), nil
+	return avail, nil
 }
