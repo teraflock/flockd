@@ -30,6 +30,28 @@ import (
 // catalog, a real manager, and the mock runtime as loader.
 func newOpsServer(t *testing.T) (*httptest.Server, string) {
 	t.Helper()
+	srv, dir, _ := newOpsServerDeps(t)
+	return srv, dir
+}
+
+// newOpsEngine is a mock-backed engine with one loaded model.
+func newOpsEngine(t *testing.T) *engine.Engine {
+	t.Helper()
+	eng := engine.New(nil, nil, nil)
+	inst, err := rt.NewMockRuntime(0).Load(context.Background(), rt.ModelSpec{ID: "mock-8b-instruct"}, rt.ResourceBudget{MaxConcurrent: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng.Register(rt.ModelSpec{ID: "mock-8b-instruct"}, inst)
+	return eng
+}
+
+// lastOpsDeps remembers the most recent ops server's deps so a governor
+// backed server can be built on the same manager/ops (limits tests).
+var lastOpsDeps Deps
+
+func newOpsServerDeps(t *testing.T) (*httptest.Server, string, Deps) {
+	t.Helper()
 	blob := []byte("tiny gguf artifact")
 	sum := sha256.Sum256(blob)
 
@@ -65,7 +87,7 @@ func newOpsServer(t *testing.T) (*httptest.Server, string) {
 		Budget: rt.ResourceBudget{MaxConcurrent: 4},
 		Log:    quietLog(), ManifestPath: catPath,
 	}
-	s := New(Deps{
+	deps := Deps{
 		Engine:   eng,
 		Models:   mgr,
 		ModelOps: ops,
@@ -74,10 +96,12 @@ func newOpsServer(t *testing.T) (*httptest.Server, string) {
 		NodeID:   "node-test",
 		Version:  "test",
 		Token:    testToken,
-	})
+	}
+	lastOpsDeps = deps
+	s := New(deps)
 	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)
-	return srv, dir
+	return srv, dir, deps
 }
 
 func apiPost(t *testing.T, srv *httptest.Server, path string, body string) *http.Response {
@@ -261,7 +285,7 @@ func TestLimitsPersistToOverlay(t *testing.T) {
 
 func newTestServerWithDataDir(t *testing.T, dir string) *httptest.Server {
 	t.Helper()
-	s := New(Deps{
+	deps := Deps{
 		Engine:   engine.New(nil, nil, nil),
 		Governor: servingGovernor(t),
 		DataDir:  dir,
@@ -269,7 +293,11 @@ func newTestServerWithDataDir(t *testing.T, dir string) *httptest.Server {
 		NodeID:   "node-test",
 		Version:  "test",
 		Token:    testToken,
-	})
+	}
+	if lastOpsDeps.DataDir == dir {
+		deps.Models, deps.ModelOps = lastOpsDeps.Models, lastOpsDeps.ModelOps
+	}
+	s := New(deps)
 	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)
 	return srv

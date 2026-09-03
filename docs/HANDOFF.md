@@ -109,9 +109,9 @@ path.
    management. Budget real time for this (SPEC §13.7).
 6. **Governor extras**: foreground-GPU-usage signal, screen-lock signal
    (macOS `CGSession`, logind `LockedHint`).
-7. **VRAM budget enforcement**: `budget.max_vram_percent` is passed to the
-   runtime but llama-server flag mapping (`--n-gpu-layers` heuristics) is
-   not implemented.
+7. **VRAM measurement on discrete GPUs**: memory admission uses the host
+   footprint (correct on unified memory); on CUDA/ROCm boxes the estimate
+   is kept because the child's VRAM use is not visible without NVML.
 8. **SSE auth for EventSource**: browsers can't set headers on
    EventSource; support `?token=` query param (constant-time compare) or
    cookie for `/api/v1/events` so the React dash can use SSE instead of
@@ -123,6 +123,65 @@ path.
     router and wire types (oapi-codegen, `make gen`, CI-guarded via
     `make gen-check`) plus the dashboard's and desktop app's TS types.
     Never edit `internal/localapi/gen/` by hand.
+
+## Memory admission, idle unload and the `cached` state (plan 17 A/E)
+
+The daemon now budgets memory and tells the coordinator the truth about
+what is loaded versus merely on disk.
+
+- **Budget**: `budget.max_ram_mb` (0 = auto: half of physical RAM on
+  unified memory / CPU-only, `vram × max_vram_percent` on discrete GPUs).
+  `internal/memory` owns the derivation, the pre-load estimate
+  (`EstimateMB`: file × 1.15 + KV term + 256 MB, or catalog `min_ram_mb`
+  if larger) and per-process measurement (`proc_pid_rusage`
+  `ri_phys_footprint` on macOS via a cgo-free libSystem trampoline — the
+  same mechanism x/sys/unix uses; `smaps_rollup` Pss on Linux; unsupported
+  on Windows, estimate stays). The llama.cpp adapter fills
+  `Stats.MemUsedMB` from it in `Health()`; modelops samples every 30 s and
+  replaces estimates with measurements (except on discrete GPUs, where the
+  host footprint misses VRAM — TODO(nvml)).
+- **Admission** (`modelops.LoadInstanceOrigin`): download first (inside
+  `max_disk_mb`), then, under `admitMu`, if `used + estimate > budget`
+  unload idle instances — mesh-placed before operator-placed, LRU by last
+  request within each group, never the default model, never one with
+  requests in flight — and if still over, fail with
+  `modelops.ErrOverMemory`. The artifact stays on disk.
+- **Idle unload**: `models.idle_unload_s` (default 900, 0 = never, default
+  model exempt); `modelops.RunHousekeeping` unloads instances idle past it.
+  `ModelRow.idle_since` shows when an idle instance last served.
+- **`cached` (the coordinator contract)**: `ModelState.state` is a free
+  string, so no proto change. The node reports `cached` for any complete
+  artifact on disk that is not loaded — mesh *and* operator origin, since
+  both are legitimately serveable — in Hello/heartbeat model lists, and as
+  a one-shot `ModelStateUpdate` when a placement could not be admitted for
+  memory (`assign` maps `ErrOverMemory` → `cached`, never `declined`) and
+  when a model is idle-unloaded (`modelops.OnUnloaded → assign.Unloaded`).
+  `ready` in a heartbeat now strictly means loaded and serving. When the
+  coordinator re-sends a `ModelAssignment` for a `cached` model the node
+  loads it from disk (no `downloading` report) and reports `ready`; the
+  usual `assigned → downloading → ready` sequence is unchanged for new
+  models. The coordinator should count `cached` as a warm candidate that
+  costs a load, not a live replica, and read `ram_used_mb` /
+  `vram_used_mb` (now filled from measured footprints; equal on unified
+  memory) for real headroom. A placement is never declined for memory
+  alone; `max_disk_mb` declines (`does not fit in max_disk_mb`) still are.
+- **Disk store**: `Manager.List()` stats files (`missing` state, dropped
+  from the budget), `Stats()` sizes the store for `status.disk`,
+  `GCPartials` (7 days) and `Retain` (`models.retention_days`) run on
+  start and hourly, `Reconcile` adopts unindexed `<id>.gguf` files that
+  match a catalog entry. `max_disk_mb`, `retention_days`, `max_ram_mb` and
+  `idle_unload_seconds` are live via `PUT /api/v1/limits` and persist in
+  `limits.toml`.
+- **Activity feed** (`internal/activity`): a 200-row ring of what happened
+  (download_started/downloaded/download_failed/loaded/unloaded/evicted/
+  declined/missing/assignment/update_available with actor mesh|operator|
+  daemon), `GET /api/v1/activity` newest first, SSE `activity`.
+- **Update check** (`internal/update`): `update.feed_url` polled 30 s after
+  start and hourly; semver compare against the build version (dev builds
+  never nag); `status.update`, `POST /api/v1/update/check` (502 when the
+  feed is unreachable — the background loop stays silent), SSE
+  `update_available` once per discovered version, `tera status` line, TUI
+  notice. No self-update.
 
 ## Mesh enrollment (Phase 1, working)
 

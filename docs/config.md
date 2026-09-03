@@ -53,7 +53,15 @@ schedule         = []           # serve_policy=scheduled windows, e.g. ["22:00-0
 
 [budget]
 max_vram_percent = 80   # ceiling for the runtime (passed to llama-server)
-max_ram_mb       = 0    # 0 = auto
+max_ram_mb       = 0    # memory budget for LOADED models. 0 = auto: half of
+                        # physical RAM on unified-memory machines (Apple
+                        # Silicon, CPU-only boxes), vram × max_vram_percent on
+                        # discrete GPUs. A load that would exceed it first
+                        # unloads idle models (mesh-placed before yours, least
+                        # recently used first, never the default model, never
+                        # one serving a request); if that is not enough the
+                        # load is refused — mesh placements then stay on disk
+                        # as `cached`. Live via PUT /api/v1/limits max_ram_mb.
 max_concurrent   = 2    # parallel slots
 
 [models]
@@ -68,6 +76,26 @@ mesh_managed  = true            # let the coordinator place models inside max_di
                                 # installs). Also a live toggle in the app/dashboard,
                                 # persisted in <data_dir>/limits.toml. Off = serve only
                                 # what you installed.
+idle_unload_s = 900             # unload a loaded model after this many seconds without
+                                # a request (0 = never). The default model is exempt.
+                                # Reload is a mmap re-open (seconds), not a download;
+                                # the coordinator sees the model as `cached` meanwhile.
+                                # Live via PUT /api/v1/limits idle_unload_seconds.
+retention_days = 0              # evict unpinned, unloaded models not used for N days
+                                # (0 = never) — mesh and operator models alike. Applied
+                                # on start and hourly. Live via PUT /api/v1/limits.
+                                # max_disk_mb is live-settable the same way; all of
+                                # these persist in <data_dir>/limits.toml.
+
+[update]
+# Version feed polled 30s after start and then hourly:
+# {"flockd":{"latest","minimum","url"},"desktop":{"latest","url"}}.
+# A feed that is unreachable or 404 just means "unknown" — nothing is shown.
+# The daemon never self-updates: `tera status`, the TUI, the dashboard and
+# the desktop app show the newer version and its release URL; brew users run
+# `brew upgrade --cask tera`. `minimum` is the oldest daemon the coordinator
+# still serves; below it the node is drained until updated.
+feed_url = "https://api.teraflock.ai/v1/versions"
 
 [tunnel]
 coordinator_addr     = "tunnel.teraflock.dev:443"
@@ -91,7 +119,21 @@ login_url = "https://teraflock.dev/claim"   # browser page opened by `tera login
   dashboard, desktop app) apply live and persist to `<data_dir>/limits.toml`,
   a daemon-owned overlay applied on top of `config.toml` at startup — your
   `config.toml` is never rewritten. Delete `limits.toml` to fall back to
-  `config.toml`'s `[governor]` values.
+  `config.toml`'s `[governor]`, `[models]` (`mesh_managed`, `max_disk_mb`,
+  `retention_days`, `idle_unload_s`) and `[budget]` (`max_ram_mb`) values.
+- **Model store hygiene**: `/api/v1/status` reports `disk{models_bytes,
+  partial_bytes,budget_bytes,free_bytes,dir}` and `memory{used_mb,budget_mb,
+  total_mb}`. A `.gguf` deleted outside the daemon shows as `missing` on
+  `/api/v1/models` (it stops counting against the budget; the next load
+  re-downloads it). `.partial` downloads older than 7 days are removed on
+  start and hourly. A `<catalog-id>.gguf` found in the model dir without an
+  index entry (size matching the catalog) is adopted as an operator model.
+- **Memory measurement** is the runtime child's physical footprint
+  (`proc_pid_rusage` on macOS, `/proc/<pid>/smaps_rollup` Pss on Linux),
+  not RSS — mmap'd weights shared with the page cache are not double
+  counted. Before the first sample a load is charged its estimate:
+  `file_bytes × 1.15 + ctx × parallel × file_bytes/65536 + 256 MB`, or the
+  catalog's `min_ram_mb` if larger.
 - **Secrets on disk** (`node.key`, `local_api_token`, `node_creds.pem`) are
   written 0600 under `data_dir`. Migration to OS keychain / DPAPI / secret
   service is a documented TODO (SPEC §A1.2).

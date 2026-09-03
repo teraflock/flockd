@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/teraflock/flockd/internal/activity"
 	"github.com/teraflock/flockd/internal/assign"
 	"github.com/teraflock/flockd/internal/config"
 	"github.com/teraflock/flockd/internal/engine"
@@ -29,6 +30,7 @@ import (
 	"github.com/teraflock/flockd/internal/hardware"
 	"github.com/teraflock/flockd/internal/localapi"
 	"github.com/teraflock/flockd/internal/logging"
+	"github.com/teraflock/flockd/internal/memory"
 	"github.com/teraflock/flockd/internal/modelops"
 	"github.com/teraflock/flockd/internal/models"
 	rt "github.com/teraflock/flockd/internal/runtime"
@@ -36,6 +38,7 @@ import (
 	"github.com/teraflock/flockd/internal/telemetry"
 	"github.com/teraflock/flockd/internal/tunnel"
 	"github.com/teraflock/flockd/internal/tunnel/fakecoord"
+	"github.com/teraflock/flockd/internal/update"
 	"github.com/teraflock/flockd/web"
 	tunnelv1 "github.com/teraflock/proto/gen/go/flock/tunnel/v1"
 	typesv1 "github.com/teraflock/proto/gen/go/flock/types/v1"
@@ -154,6 +157,12 @@ func run() error {
 		}
 	}()
 
+	// ---- activity feed (plan 17) ----
+	// What the daemon did to the model store and runtimes, for the
+	// operator: downloads the mesh started, evictions, declines, updates.
+	act := activity.New(activity.DefaultCapacity)
+	act.Events = hub
+
 	// ---- models & runtime ----
 	stats := telemetry.NewStats()
 	var mgr *models.Manager
@@ -162,6 +171,8 @@ func run() error {
 		if err != nil {
 			return err
 		}
+		mgr.SetRetentionDays(cfg.Models.RetentionDays)
+		mgr.Activity = act
 	}
 	touch := func(string) {}
 	if mgr != nil {
@@ -173,6 +184,14 @@ func run() error {
 		}
 	}
 	eng := engine.New(gov, stats, touch)
+	if mgr != nil {
+		mgr.IsLoaded = func(id string) bool {
+			_, ok := eng.Usage(id)
+			return ok
+		}
+		// Stale .partial GC and retention: on start, then hourly.
+		go mgr.RunHousekeeping(ctx)
+	}
 
 	budget := rt.ResourceBudget{
 		MaxVRAMPercent: cfg.Budget.MaxVRAMPercent,
@@ -197,16 +216,29 @@ func run() error {
 			ContextLength: cfg.Runtime.ContextLength,
 		}
 		ops = &modelops.Service{
-			Mgr:          mgr,
-			Eng:          eng,
-			Loader:       adapter,
-			Budget:       budget,
-			Log:          log,
-			ManifestPath: cfg.Models.ManifestPath,
-			ManifestURL:  cfg.Models.ManifestURL,
-			OnLoaded:     func(inst rt.Instance) { reportRuntimeBuild(hw, inst, log) },
-			Events:       hub,
+			Mgr:           mgr,
+			Eng:           eng,
+			Loader:        adapter,
+			Budget:        budget,
+			Log:           log,
+			ManifestPath:  cfg.Models.ManifestPath,
+			ManifestURL:   cfg.Models.ManifestURL,
+			OnLoaded:      func(inst rt.Instance) { reportRuntimeBuild(hw, inst, log) },
+			Events:        hub,
+			Activity:      act,
+			Hardware:      hw,
+			ContextLength: cfg.Runtime.ContextLength,
 		}
+		// Memory admission (plan 17 A): loads must fit budget.max_ram_mb
+		// (0 = auto: half of unified memory); idle instances are unloaded
+		// to make room, then after models.idle_unload_s of silence.
+		ops.SetMemoryBudgetMB(cfg.Budget.MaxRAMMB)
+		ops.SetIdleUnload(time.Duration(cfg.Models.IdleUnloadS) * time.Second)
+		log.Info("model memory budget",
+			"budget_mb", ops.MemoryBudgetMB(), "configured_mb", cfg.Budget.MaxRAMMB,
+			"total_mb", hw.GetRamTotalMb(), "unified", memory.Unified(hw),
+			"idle_unload", (time.Duration(cfg.Models.IdleUnloadS) * time.Second).String())
+		go ops.RunHousekeeping(ctx)
 	}
 
 	if err := loadDefaultModel(ctx, cfg, hw, ops, mgr, eng, budget, log); err != nil {
@@ -221,7 +253,7 @@ func run() error {
 	var meshManaged atomic.Bool
 	meshManaged.Store(cfg.Models.MeshManaged)
 	asg := &assign.Service{
-		Ops: ops, Mgr: mgr, Eng: eng, Events: hub, Log: log,
+		Ops: ops, Mgr: mgr, Eng: eng, Events: hub, Activity: act, Log: log,
 		OnBattery: func() bool { return gov.Power().OnBattery },
 		Policy: func() assign.Policy {
 			return assign.Policy{
@@ -232,6 +264,18 @@ func run() error {
 		},
 	}
 	go asg.Run(ctx)
+	if ops != nil {
+		// Anything that leaves memory but stays on disk is `cached` to the
+		// coordinator: warmable with a load, not a download.
+		ops.OnUnloaded = asg.Unloaded
+	}
+
+	// ---- update check (plan 17 D.2) ----
+	upd := &update.Checker{
+		FeedURL: cfg.Update.FeedURL, Current: version, Log: log, Events: hub, Activity: act,
+	}
+	go upd.Run(ctx)
+
 	defer func() {
 		shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -255,7 +299,7 @@ func run() error {
 			return err
 		}
 		tctx, cancel := context.WithCancel(ctx)
-		if err := startTunnel(tctx, cfg, dialer, cfg.Tunnel.CoordinatorAddr, creds.CoordinatorPubKey, creds.NodeID, identity, hw, gov, stats, eng, mgr, asg, budget, log); err != nil {
+		if err := startTunnel(tctx, cfg, dialer, cfg.Tunnel.CoordinatorAddr, creds.CoordinatorPubKey, creds.NodeID, identity, hw, gov, stats, eng, mgr, ops, asg, budget, log); err != nil {
 			cancel()
 			return err
 		}
@@ -278,7 +322,7 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		if err := startTunnel(ctx, cfg, coord.Dialer(), coord.Addr(), coord.PubKey(), creds.NodeID, identity, hw, gov, stats, eng, mgr, asg, budget, log); err != nil {
+		if err := startTunnel(ctx, cfg, coord.Dialer(), coord.Addr(), coord.PubKey(), creds.NodeID, identity, hw, gov, stats, eng, mgr, ops, asg, budget, log); err != nil {
 			return err
 		}
 		nodeID = creds.NodeID
@@ -384,6 +428,13 @@ func run() error {
 			meshManaged.Store(on)
 			log.Info("mesh-managed models switched", "on", on)
 		},
+		Defaults: config.LiveLimits{
+			MeshManaged: cfg.Models.MeshManaged, MaxDiskMB: cfg.Models.MaxDiskMB,
+			RetentionDays: cfg.Models.RetentionDays, IdleUnloadS: cfg.Models.IdleUnloadS,
+			MaxRAMMB: cfg.Budget.MaxRAMMB,
+		},
+		Activity:      act,
+		Update:        upd,
 		RequireAuthV1: cfg.LocalAPI.RequireAuthV1,
 		Token:         token,
 	})
@@ -460,7 +511,7 @@ func reportRuntimeBuild(hw *typesv1.CapabilityProfile, inst rt.Instance, log *sl
 // startTunnel runs the session client in the background. nodeID must be the
 // coordinator-assigned ID from enrollment — the session is rejected
 // otherwise.
-func startTunnel(ctx context.Context, cfg config.Config, dialer tunnel.Dialer, addr string, coordKey []byte, nodeID string, identity *enroll.Identity, hw *typesv1.CapabilityProfile, gov *governor.Governor, stats *telemetry.Stats, eng *engine.Engine, mgr *models.Manager, asg *assign.Service, budget rt.ResourceBudget, log *slog.Logger) error {
+func startTunnel(ctx context.Context, cfg config.Config, dialer tunnel.Dialer, addr string, coordKey []byte, nodeID string, identity *enroll.Identity, hw *typesv1.CapabilityProfile, gov *governor.Governor, stats *telemetry.Stats, eng *engine.Engine, mgr *models.Manager, ops *modelops.Service, asg *assign.Service, budget rt.ResourceBudget, log *slog.Logger) error {
 	protoBudget := &typesv1.ResourceBudget{
 		MaxVramPercent:        uint32(cfg.Budget.MaxVRAMPercent),
 		MaxRamMb:              uint64(max(cfg.Budget.MaxRAMMB, 0)),
@@ -470,15 +521,39 @@ func startTunnel(ctx context.Context, cfg config.Config, dialer tunnel.Dialer, a
 		MaxTempCelsius:        uint32(cfg.Governor.MaxTempCelsius),
 		ServePolicy:           cfg.Governor.ServePolicy,
 	}
-	// Ready models plus in-flight placements (assigned/downloading), so the
+	// Loaded models are `ready`; complete artifacts on disk that are not
+	// loaded (idle-unloaded, or never admitted for memory) are `cached` —
+	// warm candidates the coordinator can light up with a load instead of
+	// a download; plus in-flight placements (assigned/downloading), so the
 	// coordinator counts a replica that is on its way and does not push
 	// the same assignment again next round.
 	modelStates := func() []*typesv1.ModelState {
 		var out []*typesv1.ModelState
+		loaded := map[string]bool{}
 		for _, m := range eng.Models() {
-			out = append(out, &typesv1.ModelState{ModelId: m.Spec.ID, State: "ready"})
+			loaded[m.Spec.ID] = true
+			out = append(out, &typesv1.ModelState{ModelId: m.Spec.ID, State: assign.StateReady})
+		}
+		if mgr != nil {
+			for _, i := range mgr.List() {
+				if !loaded[i.ID] && i.State == models.StateReady {
+					out = append(out, &typesv1.ModelState{ModelId: i.ID, State: assign.StateCached})
+				}
+			}
 		}
 		return append(out, asg.States()...)
+	}
+	// Measured model memory (physical footprint of the runtime children),
+	// so placement can read real headroom. Unified memory: VRAM = RAM.
+	memUsed := func() (ram, vram uint64) {
+		if ops == nil {
+			return 0, 0
+		}
+		used := uint64(max(ops.Memory().UsedMB, 0))
+		if memory.Unified(hw) || !memory.Discrete(hw) {
+			return used, used
+		}
+		return used, 0 // TODO(nvml): per-process VRAM on discrete GPUs
 	}
 
 	client, err := tunnel.NewClient(tunnel.Options{
@@ -504,11 +579,14 @@ func startTunnel(ctx context.Context, cfg config.Config, dialer tunnel.Dialer, a
 		},
 		Heartbeat: func() *tunnelv1.Heartbeat {
 			power := gov.Power()
+			ram, vram := memUsed()
 			return stats.BuildHeartbeat(telemetry.HeartbeatInput{
 				State:      gov.State().NodeState(),
 				QueueDepth: gov.Inflight(),
 				GPUTempC:   power.TempCelsius,
 				OnBattery:  power.OnBattery,
+				RAMUsedMB:  ram,
+				VRAMUsedMB: vram,
 				Models:     modelStates(),
 			})
 		},

@@ -100,7 +100,7 @@ func TestLimitsOverlayRoundTrip(t *testing.T) {
 		ServeOnBattery: true,
 		MaxTempCelsius: 85,
 		Schedule:       []string{"22:00-08:00"},
-	}, false); err != nil {
+	}, LiveLimits{MeshManaged: false, MaxDiskMB: 12345, RetentionDays: 14, IdleUnloadS: 600, MaxRAMMB: 8192}); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err = Load(cfgPath)
@@ -115,5 +115,8 @@ func TestLimitsOverlayRoundTrip(t *testing.T) {
 	// The mesh_managed switch rides the same overlay (default is on).
 	if cfg.Models.MeshManaged {
 		t.Fatal("overlay mesh_managed=false not applied")
+	}
+	if cfg.Models.MaxDiskMB != 12345 || cfg.Models.RetentionDays != 14 || cfg.Models.IdleUnloadS != 600 || cfg.Budget.MaxRAMMB != 8192 {
+		t.Fatalf("overlay model/budget limits not applied: %+v %+v", cfg.Models, cfg.Budget)
 	}
 }

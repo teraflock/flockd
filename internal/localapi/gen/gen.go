@@ -14,13 +14,35 @@ import (
 	"github.com/oapi-codegen/runtime"
 )
 
+// ActivityEvent defines model for ActivityEvent.
+type ActivityEvent struct {
+	// Actor mesh | operator | daemon
+	Actor string `json:"actor"`
+
+	// Detail Reason / error text when there is one.
+	Detail *string `json:"detail,omitempty"`
+
+	// Kind download_started | downloaded | download_failed | loaded | unloaded | evicted | declined | missing | update_available | assignment
+	Kind string `json:"kind"`
+
+	// Message Human-readable one-liner for activity feeds.
+	Message string    `json:"message"`
+	Model   *string   `json:"model,omitempty"`
+	Time    time.Time `json:"time"`
+}
+
+// ActivityList defines model for ActivityList.
+type ActivityList struct {
+	Events []ActivityEvent `json:"events"`
+}
+
 // Assignment Coordinator placement status for this model, when the mesh asked for it. Failures and refusals stay visible for ten minutes.
 type Assignment struct {
 	// Error Why it was declined or failed.
 	Error *string   `json:"error,omitempty"`
 	Since time.Time `json:"since"`
 
-	// State assigned | downloading | ready | declined | failed | evicted
+	// State assigned | downloading | ready | cached | declined | failed | evicted. `cached` is a mesh-placed model that is on disk but unloaded (idle unload or memory pressure); the coordinator re-sends the assignment to load it when demand returns.
 	State string `json:"state"`
 }
 
@@ -54,6 +76,17 @@ type CatalogEntry struct {
 // CatalogList defines model for CatalogList.
 type CatalogList struct {
 	Models []CatalogEntry `json:"models"`
+}
+
+// Disk Model store usage. `models_bytes` counts complete artifacts, `partial_bytes` counts resumable `.partial` downloads, `budget_bytes` is `models.max_disk_mb` (0 = unlimited), `free_bytes` is free space on the volume holding the model directory.
+type Disk struct {
+	BudgetBytes int64 `json:"budget_bytes"`
+
+	// Dir Absolute path of the model directory.
+	Dir          string `json:"dir"`
+	FreeBytes    int64  `json:"free_bytes"`
+	ModelsBytes  int64  `json:"models_bytes"`
+	PartialBytes int64  `json:"partial_bytes"`
 }
 
 // DownloadStatus defines model for DownloadStatus.
@@ -122,11 +155,23 @@ type Health struct {
 
 // Limits defines model for Limits.
 type Limits struct {
-	IdleAfterSeconds int     `json:"idle_after_seconds"`
-	MaxTempCelsius   float64 `json:"max_temp_celsius"`
+	IdleAfterSeconds int `json:"idle_after_seconds"`
+
+	// IdleUnloadSeconds Unload a loaded model after this long without a request (0 = never; default model exempt). Omitted on PUT = unchanged.
+	IdleUnloadSeconds *int `json:"idle_unload_seconds,omitempty"`
+
+	// MaxDiskMb Model store budget (`models.max_disk_mb`); 0 = unlimited. LRU eviction of unpinned models keeps the store under it. Omitted on PUT = unchanged.
+	MaxDiskMb *int64 `json:"max_disk_mb,omitempty"`
+
+	// MaxRamMb Memory budget for loaded models (`budget.max_ram_mb`); 0 = auto (about half of physical memory on unified-memory machines, the GPU budget on discrete GPUs). Omitted on PUT = unchanged.
+	MaxRamMb       *int64  `json:"max_ram_mb,omitempty"`
+	MaxTempCelsius float64 `json:"max_temp_celsius"`
 
 	// MeshManaged Let the mesh place models on this node (download, load, and evict what it placed) inside `models.max_disk_mb`, minus your pinned and excluded models. Off means the node serves only what you installed. Omitted on PUT = unchanged.
 	MeshManaged *bool `json:"mesh_managed,omitempty"`
+
+	// RetentionDays Evict unpinned models not used for this many days (0 = never). Omitted on PUT = unchanged.
+	RetentionDays *int `json:"retention_days,omitempty"`
 
 	// Schedule Windows like "22:00-08:00" (overnight wraps).
 	Schedule       []string `json:"schedule"`
@@ -150,6 +195,13 @@ type LogList struct {
 	Logs []LogEntry `json:"logs"`
 }
 
+// Memory Model memory on this node. `used_mb` is the measured footprint of every loaded runtime (physical footprint / proportional set size, not RSS, so mmap'd weight pages shared with the page cache are not double counted). `budget_mb` is what the daemon lets loaded models use in total before it unloads idle instances or declines a load.
+type Memory struct {
+	BudgetMb int64 `json:"budget_mb"`
+	TotalMb  int64 `json:"total_mb"`
+	UsedMb   int64 `json:"used_mb"`
+}
+
 // ModelList defines model for ModelList.
 type ModelList struct {
 	Models []ModelRow `json:"models"`
@@ -161,18 +213,27 @@ type ModelRow struct {
 	Assignment *Assignment `json:"assignment,omitempty"`
 	Default    bool        `json:"default"`
 	Id         string      `json:"id"`
-	LastUsed   time.Time   `json:"last_used"`
-	Loaded     bool        `json:"loaded"`
+
+	// IdleSince Present while loaded and not serving; the daemon unloads the instance after `idle_unload_seconds` (default model exempt).
+	IdleSince *time.Time `json:"idle_since,omitempty"`
+	LastUsed  time.Time  `json:"last_used"`
+	Loaded    bool       `json:"loaded"`
+
+	// LoadedMb Measured memory footprint; present only while loaded.
+	LoadedMb *int64 `json:"loaded_mb,omitempty"`
 
 	// Origin Who installed it: `operator` (you, via the app/CLI/config) or `mesh` (coordinator placement). The mesh can only evict its own; yours are never touched.
 	Origin string `json:"origin"`
-	Pinned bool   `json:"pinned"`
+
+	// Path Absolute artifact path; present when the file exists.
+	Path   *string `json:"path,omitempty"`
+	Pinned bool    `json:"pinned"`
 
 	// ReceivedBytes Live progress; present only while downloading.
 	ReceivedBytes *int64 `json:"received_bytes,omitempty"`
 	SizeBytes     int64  `json:"size_bytes"`
 
-	// State assigned | downloading | ready. `assigned` is a coordinator placement queued behind other work (nothing on disk yet).
+	// State assigned | downloading | ready | missing. `assigned` is a coordinator placement queued behind other work (nothing on disk yet). `missing` means the index knows the model but its file is gone from disk (deleted outside the daemon); it no longer counts against the budget and loads re-download it.
 	State string `json:"state"`
 }
 
@@ -201,10 +262,16 @@ type Status struct {
 	// CertExpiresAt Client-certificate expiry; present when enrolled.
 	CertExpiresAt *time.Time `json:"cert_expires_at,omitempty"`
 	DefaultModel  string     `json:"default_model"`
-	Enrolled      bool       `json:"enrolled"`
-	Hardware      *Hardware  `json:"hardware,omitempty"`
-	Inflight      int        `json:"inflight"`
-	ModelsLoaded  int        `json:"models_loaded"`
+
+	// Disk Model store usage. `models_bytes` counts complete artifacts, `partial_bytes` counts resumable `.partial` downloads, `budget_bytes` is `models.max_disk_mb` (0 = unlimited), `free_bytes` is free space on the volume holding the model directory.
+	Disk     Disk      `json:"disk"`
+	Enrolled bool      `json:"enrolled"`
+	Hardware *Hardware `json:"hardware,omitempty"`
+	Inflight int       `json:"inflight"`
+
+	// Memory Model memory on this node. `used_mb` is the measured footprint of every loaded runtime (physical footprint / proportional set size, not RSS, so mmap'd weight pages shared with the page cache are not double counted). `budget_mb` is what the daemon lets loaded models use in total before it unloads idle instances or declines a load.
+	Memory       Memory `json:"memory"`
+	ModelsLoaded int    `json:"models_loaded"`
 
 	// NodeId Key fingerprint until enrolled; coordinator-assigned id after.
 	NodeId     string `json:"node_id"`
@@ -212,11 +279,27 @@ type Status struct {
 	Standalone bool   `json:"standalone"`
 
 	// State serving | yielded | paused-battery | paused-thermal | outside-schedule
-	State         string  `json:"state"`
-	Stats         Stats   `json:"stats"`
-	TempCelsius   float64 `json:"temp_celsius"`
+	State       string  `json:"state"`
+	Stats       Stats   `json:"stats"`
+	TempCelsius float64 `json:"temp_celsius"`
+
+	// Update Result of the last version check against the mesh's version feed. `minimum` is the oldest daemon the coordinator still serves; below it the node is drained until updated.
+	Update        *Update `json:"update,omitempty"`
 	UptimeSeconds int64   `json:"uptime_seconds"`
 	Version       string  `json:"version"`
+}
+
+// Update Result of the last version check against the mesh's version feed. `minimum` is the oldest daemon the coordinator still serves; below it the node is drained until updated.
+type Update struct {
+	Available    bool      `json:"available"`
+	BelowMinimum *bool     `json:"below_minimum,omitempty"`
+	CheckedAt    time.Time `json:"checked_at"`
+	Current      string    `json:"current"`
+	Latest       string    `json:"latest"`
+	Minimum      *string   `json:"minimum,omitempty"`
+
+	// Url Release page / download for `latest`.
+	Url *string `json:"url,omitempty"`
 }
 
 // ModelID defines model for ModelID.
@@ -263,6 +346,9 @@ type PinModelJSONRequestBody = PinRequest
 
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
+	// GetActivity Recent node activity (downloads, loads, evictions, declines)
+	// (GET /api/v1/activity)
+	GetActivity(w http.ResponseWriter, r *http.Request)
 	// GetCatalog Model catalog merged with local state
 	// (GET /api/v1/catalog)
 	GetCatalog(w http.ResponseWriter, r *http.Request, params GetCatalogParams)
@@ -311,6 +397,9 @@ type ServerInterface interface {
 	// GetStatus Node status snapshot
 	// (GET /api/v1/status)
 	GetStatus(w http.ResponseWriter, r *http.Request)
+	// CheckUpdate Run a version check now
+	// (POST /api/v1/update/check)
+	CheckUpdate(w http.ResponseWriter, r *http.Request)
 }
 
 // ServerInterfaceWrapper converts contexts to parameters.
@@ -321,6 +410,20 @@ type ServerInterfaceWrapper struct {
 }
 
 type MiddlewareFunc func(http.Handler) http.Handler
+
+// GetActivity operation middleware
+func (siw *ServerInterfaceWrapper) GetActivity(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetActivity(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
 
 // GetCatalog operation middleware
 func (siw *ServerInterfaceWrapper) GetCatalog(w http.ResponseWriter, r *http.Request) {
@@ -681,6 +784,20 @@ func (siw *ServerInterfaceWrapper) GetStatus(w http.ResponseWriter, r *http.Requ
 	handler.ServeHTTP(w, r)
 }
 
+// CheckUpdate operation middleware
+func (siw *ServerInterfaceWrapper) CheckUpdate(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CheckUpdate(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 type UnescapedCookieParamError struct {
 	ParamName string
 	Err       error
@@ -817,6 +934,8 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/api/v1/limits", wrapper.UpdateLimits)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/logs", wrapper.GetLogs)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/enroll", wrapper.EnrollNode)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/activity", wrapper.GetActivity)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/update/check", wrapper.CheckUpdate)
 
 	return m
 }

@@ -302,6 +302,40 @@ paths:
         "501": { $ref: "#/components/responses/Unsupported" }
         "502": { $ref: "#/components/responses/Upstream" }
 
+  /api/v1/activity:
+    get:
+      tags: [management]
+      operationId: getActivity
+      summary: Recent node activity (downloads, loads, evictions, declines)
+      description: >
+        The last 200 things the daemon did to its model store and runtimes,
+        newest first, including everything the mesh did on the operator's
+        behalf. In memory only; cleared on restart.
+      responses:
+        "200":
+          description: Activity rows.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ActivityList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/update/check:
+    post:
+      tags: [management]
+      operationId: checkUpdate
+      summary: Run a version check now
+      description: >
+        Fetches the version feed immediately (the daemon otherwise checks
+        on startup and hourly) and returns the result.
+      responses:
+        "200":
+          description: Check result.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Update" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/Upstream" }
+
   /api/v1/events:
     get:
       tags: [events]
@@ -316,8 +350,12 @@ paths:
         - `models_changed`: `{model, change}` where change is
           downloaded|loaded|unloaded|default.
         - `model_assignment`: `{model, state, error}` as a coordinator
-          placement moves through assigned|downloading|ready|declined|
-          failed|evicted.
+          placement moves through assigned|downloading|ready|cached|
+          declined|failed|evicted.
+        - `activity`: one ActivityEvent as it happens (same rows as
+          `GET /api/v1/activity`).
+        - `update_available`: the Update object when a version check finds
+          a newer release (once per discovered version).
         - `log` (only with `?logs=1`): one LogEntry per line as logged.
 
         EventSource cannot send headers, so this route additionally accepts
@@ -486,7 +524,7 @@ components:
       required:
         [node_id, version, standalone, enrolled, state, uptime_seconds,
          default_model, models_loaded, inflight, on_battery, temp_celsius,
-         stats]
+         stats, memory, disk]
       properties:
         node_id:
           type: string
@@ -509,6 +547,60 @@ components:
         temp_celsius: { type: number, format: double }
         hardware: { $ref: "#/components/schemas/Hardware" }
         stats: { $ref: "#/components/schemas/Stats" }
+        memory: { $ref: "#/components/schemas/Memory" }
+        disk: { $ref: "#/components/schemas/Disk" }
+        update:
+          $ref: "#/components/schemas/Update"
+          description: Present once the first version check has completed.
+
+    Memory:
+      type: object
+      description: >
+        Model memory on this node. `used_mb` is the measured footprint of
+        every loaded runtime (physical footprint / proportional set size,
+        not RSS, so mmap'd weight pages shared with the page cache are not
+        double counted). `budget_mb` is what the daemon lets loaded models
+        use in total before it unloads idle instances or declines a load.
+      required: [used_mb, budget_mb, total_mb]
+      properties:
+        used_mb: { type: integer, format: int64 }
+        budget_mb: { type: integer, format: int64 }
+        total_mb: { type: integer, format: int64 }
+
+    Disk:
+      type: object
+      description: >
+        Model store usage. `models_bytes` counts complete artifacts,
+        `partial_bytes` counts resumable `.partial` downloads, `budget_bytes`
+        is `models.max_disk_mb` (0 = unlimited), `free_bytes` is free space
+        on the volume holding the model directory.
+      required: [models_bytes, partial_bytes, budget_bytes, free_bytes, dir]
+      properties:
+        models_bytes: { type: integer, format: int64 }
+        partial_bytes: { type: integer, format: int64 }
+        budget_bytes: { type: integer, format: int64 }
+        free_bytes: { type: integer, format: int64 }
+        dir:
+          type: string
+          description: Absolute path of the model directory.
+
+    Update:
+      type: object
+      description: >
+        Result of the last version check against the mesh's version feed.
+        `minimum` is the oldest daemon the coordinator still serves; below
+        it the node is drained until updated.
+      required: [available, current, latest, checked_at]
+      properties:
+        available: { type: boolean }
+        current: { type: string }
+        latest: { type: string }
+        minimum: { type: string }
+        below_minimum: { type: boolean }
+        url:
+          type: string
+          description: Release page / download for `latest`.
+        checked_at: { type: string, format: date-time }
 
     Hardware:
       type: object
@@ -557,10 +649,26 @@ components:
         state:
           type: string
           description: >
-            assigned | downloading | ready. `assigned` is a coordinator
-            placement queued behind other work (nothing on disk yet).
+            assigned | downloading | ready | missing. `assigned` is a
+            coordinator placement queued behind other work (nothing on disk
+            yet). `missing` means the index knows the model but its file is
+            gone from disk (deleted outside the daemon); it no longer counts
+            against the budget and loads re-download it.
         loaded: { type: boolean }
         default: { type: boolean }
+        path:
+          type: string
+          description: Absolute artifact path; present when the file exists.
+        loaded_mb:
+          type: integer
+          format: int64
+          description: Measured memory footprint; present only while loaded.
+        idle_since:
+          type: string
+          format: date-time
+          description: >
+            Present while loaded and not serving; the daemon unloads the
+            instance after `idle_unload_seconds` (default model exempt).
         origin:
           type: string
           description: >
@@ -582,7 +690,11 @@ components:
       properties:
         state:
           type: string
-          description: assigned | downloading | ready | declined | failed | evicted
+          description: >
+            assigned | downloading | ready | cached | declined | failed |
+            evicted. `cached` is a mesh-placed model that is on disk but
+            unloaded (idle unload or memory pressure); the coordinator
+            re-sends the assignment to load it when demand returns.
         since: { type: string, format: date-time }
         error:
           type: string
@@ -678,6 +790,60 @@ components:
             evict what it placed) inside `models.max_disk_mb`, minus your
             pinned and excluded models. Off means the node serves only what
             you installed. Omitted on PUT = unchanged.
+        max_disk_mb:
+          type: integer
+          format: int64
+          description: >
+            Model store budget (`models.max_disk_mb`); 0 = unlimited. LRU
+            eviction of unpinned models keeps the store under it. Omitted
+            on PUT = unchanged.
+        retention_days:
+          type: integer
+          description: >
+            Evict unpinned models not used for this many days (0 = never).
+            Omitted on PUT = unchanged.
+        max_ram_mb:
+          type: integer
+          format: int64
+          description: >
+            Memory budget for loaded models (`budget.max_ram_mb`); 0 = auto
+            (about half of physical memory on unified-memory machines, the
+            GPU budget on discrete GPUs). Omitted on PUT = unchanged.
+        idle_unload_seconds:
+          type: integer
+          description: >
+            Unload a loaded model after this long without a request
+            (0 = never; default model exempt). Omitted on PUT = unchanged.
+
+    ActivityEvent:
+      type: object
+      required: [time, kind, actor, message]
+      properties:
+        time: { type: string, format: date-time }
+        kind:
+          type: string
+          description: >
+            download_started | downloaded | download_failed | loaded |
+            unloaded | evicted | declined | missing | update_available |
+            assignment
+        actor:
+          type: string
+          description: mesh | operator | daemon
+        model: { type: string }
+        message:
+          type: string
+          description: Human-readable one-liner for activity feeds.
+        detail:
+          type: string
+          description: Reason / error text when there is one.
+
+    ActivityList:
+      type: object
+      required: [events]
+      properties:
+        events:
+          type: array
+          items: { $ref: "#/components/schemas/ActivityEvent" }
 
     LogEntry:
       type: object

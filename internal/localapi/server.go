@@ -20,7 +20,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/teraflock/flockd/internal/activity"
 	"github.com/teraflock/flockd/internal/assign"
+	"github.com/teraflock/flockd/internal/config"
 	"github.com/teraflock/flockd/internal/engine"
 	"github.com/teraflock/flockd/internal/events"
 	"github.com/teraflock/flockd/internal/governor"
@@ -28,6 +30,7 @@ import (
 	"github.com/teraflock/flockd/internal/logging"
 	"github.com/teraflock/flockd/internal/modelops"
 	"github.com/teraflock/flockd/internal/models"
+	"github.com/teraflock/flockd/internal/update"
 	typesv1 "github.com/teraflock/proto/gen/go/flock/types/v1"
 )
 
@@ -62,6 +65,14 @@ type Deps struct {
 	// as on).
 	MeshManaged    func() bool
 	SetMeshManaged func(bool)
+	// Defaults seeds the model/budget limits persisted by PUT /limits when
+	// the live sources (Models, ModelOps) are absent (mock runtime).
+	Defaults config.LiveLimits
+	// Activity is the recent-activity ring (GET /api/v1/activity). May be nil.
+	Activity *activity.Ring
+	// Update is the version checker (status.update, POST /update/check).
+	// May be nil.
+	Update *update.Checker
 	// RequireAuthV1 extends bearer auth to the OpenAI /v1 endpoints.
 	RequireAuthV1 bool
 	// Token authenticates /api/v1 (and /v1 when RequireAuthV1).

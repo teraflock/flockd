@@ -36,8 +36,12 @@ cgo (SPEC §A1.3).
 | `internal/governor` | The make-or-break piece. Polls `IdleSource`/`PowerSource`, applies `serve: always\|idle-only\|scheduled`, battery/thermal guards, and **instant-yield**: on activity, in-flight requests get `yield_grace` (2s) to drain, then are cancelled; the node reports YIELDED. Heavily tested with a fake clock and fake signal sources. |
 | `internal/runtime` | The `Runtime`/`Instance` interfaces (SPEC §A1.3 verbatim) + deterministic mock. |
 | `internal/runtime/llamacpp` | Artifact fetcher (pinned manifest, SHA256-verify), supervisor (health-gate, crash-restart with backoff), and the HTTP/SSE translation to llama-server's OpenAI API on an ephemeral loopback port. |
-| `internal/models` | Catalog client (teraflock/models YAML/JSON), resumable GGUF downloads (Range), SHA256 verification (refuses mismatches), pin/exclude, LRU eviction under `max_disk_mb`; each cache entry carries an origin (`operator`/`mesh`) so mesh-triggered eviction never touches the operator's own models. |
-| `internal/assign` | Coordinator placement executor (plan 05): applies `ModelAssignment` pushes under the operator's consent (`mesh_managed`, budget, pin/exclude), waits for AC power, reports `assigned`/`downloading`/`ready`/`declined`/`failed`/`evicted` over the tunnel and as `model_assignment` SSE events. |
+| `internal/models` | Catalog client (teraflock/models YAML/JSON), resumable GGUF downloads (Range), SHA256 verification (refuses mismatches), pin/exclude, LRU eviction under `max_disk_mb`; each cache entry carries an origin (`operator`/`mesh`) so mesh-triggered eviction never touches the operator's own models. Store hygiene (plan 17): `List()` stats files and reports `missing`, `Stats()` sizes the store, stale `.partial` GC, `retention_days` eviction, reconciliation of unindexed catalog files. |
+| `internal/memory` | Model-memory accounting: auto budget (half of unified memory / `vram × max_vram_percent`), pre-load footprint estimate, per-process physical footprint measurement (`proc_pid_rusage` on macOS without cgo, `smaps_rollup` Pss on Linux). |
+| `internal/modelops` | On-demand model operations (catalog, downloads, load/unload/default) and the load path's memory admission: unload idle instances (mesh first, LRU, never the default or an in-flight model) to fit the budget, else `ErrOverMemory`; idle unload loop; measured footprints for status and heartbeats. |
+| `internal/assign` | Coordinator placement executor (plan 05): applies `ModelAssignment` pushes under the operator's consent (`mesh_managed`, budget, pin/exclude), waits for AC power, reports `assigned`/`downloading`/`ready`/`cached`/`declined`/`failed`/`evicted` over the tunnel and as `model_assignment` SSE events. `cached` = on disk, not loaded (memory budget full or idle-unloaded); a placement is never declined for memory alone. |
+| `internal/activity` | 200-row ring of operator-facing events (downloads the mesh started, loads/unloads, evictions, declines, missing files, updates) behind `GET /api/v1/activity` and the `activity` SSE event. |
+| `internal/update` | Hourly version-feed check (`update.feed_url`), semver compare against the build, `status.update` + `update_available` SSE. Never self-updates. |
 | `internal/engine` | Single serving funnel: model lookup → governor admission → runtime → telemetry metering. Shared by localapi and tunnel so both paths behave identically. |
 | `internal/tunnel` | Node side of `flock.tunnel.v1.TunnelService`: Hello/HelloAck, heartbeat loop, Dispatch (signature-verified against the pinned coordinator Ed25519 key), TokenChunk streaming, Cancel, Challenge (fingerprint probes), Drain, jittered-backoff reconnect. Transport is behind a `Dialer` interface — gRPC/H2 now, QUIC (quic-go) is the planned production transport. |
 | `internal/tunnel/fakecoord` | In-process fake coordinator over bufconn implementing the same proto service: Enroll (real CSR signing with a throwaway CA), Session, and a driver API to push dispatches/challenges. Powers `--standalone` and the tunnel test-suite. |
@@ -62,7 +66,9 @@ cgo (SPEC §A1.3).
 
 1. SDK POSTs `/v1/chat/completions` with `stream: true`.
 2. localapi builds a `runtime.CompletionRequest` (seed always set).
-3. engine: governor `Admit` (503 if yielded/paused) → instance.
+3. engine: governor `Admit` (503 if yielded/paused) → instance (and the
+   per-model last-used / in-flight bookkeeping that idle unload and memory
+   admission read).
 4. mock or llama-server generates; chunks flow back as SSE
    `chat.completion.chunk` frames, final chunk carries usage, then
    `data: [DONE]`.

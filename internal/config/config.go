@@ -29,6 +29,7 @@ type Config struct {
 	Models   Models   `koanf:"models"`
 	Tunnel   Tunnel   `koanf:"tunnel"`
 	Enroll   Enroll   `koanf:"enroll"`
+	Update   Update   `koanf:"update"`
 }
 
 type Log struct {
@@ -81,9 +82,13 @@ type Governor struct {
 }
 
 type Budget struct {
-	MaxVRAMPercent int   `koanf:"max_vram_percent"`
-	MaxRAMMB       int64 `koanf:"max_ram_mb"`
-	MaxConcurrent  int   `koanf:"max_concurrent"`
+	MaxVRAMPercent int `koanf:"max_vram_percent"`
+	// MaxRAMMB is the memory budget for loaded models; 0 = auto (half of
+	// physical memory on unified-memory machines, vram × max_vram_percent
+	// on discrete GPUs). Loads beyond it unload idle models first, then
+	// are refused (mesh placements stay on disk as `cached`).
+	MaxRAMMB      int64 `koanf:"max_ram_mb"`
+	MaxConcurrent int   `koanf:"max_concurrent"`
 }
 
 type Models struct {
@@ -103,6 +108,19 @@ type Models struct {
 	// and exclude. Off = the node serves only what the operator installed.
 	// Default on: an enrolled node that never takes placements never earns.
 	MeshManaged bool `koanf:"mesh_managed"`
+	// IdleUnloadS unloads a loaded model after this many seconds without a
+	// request (0 = never; the default model is exempt). Reload is a mmap
+	// re-open, seconds not a download.
+	IdleUnloadS int `koanf:"idle_unload_s"`
+	// RetentionDays evicts unpinned, unloaded models unused for this many
+	// days (0 = never). Mesh and operator models alike.
+	RetentionDays int `koanf:"retention_days"`
+}
+
+type Update struct {
+	// FeedURL is the version feed the daemon polls hourly
+	// ({flockd:{latest,minimum,url},desktop:{latest,url}}).
+	FeedURL string `koanf:"feed_url"`
 }
 
 type Tunnel struct {
@@ -165,6 +183,7 @@ func Default() Config {
 			Default:     "llama-3.2-3b-instruct-q4_k_m",
 			MaxDiskMB:   60 * 1024,
 			MeshManaged: true,
+			IdleUnloadS: 900,
 		},
 		Tunnel: Tunnel{
 			CoordinatorAddr:   "tunnel.teraflock.ai:443",
@@ -174,6 +193,9 @@ func Default() Config {
 		},
 		Enroll: Enroll{
 			LoginURL: "https://teraflock.ai/claim",
+		},
+		Update: Update{
+			FeedURL: "https://api.teraflock.ai/v1/versions",
 		},
 	}
 }
@@ -240,14 +262,23 @@ func LimitsPath(dataDir string) string {
 	return filepath.Join(dataDir, "limits.toml")
 }
 
+// LiveLimits are the non-governor knobs the limits API edits live; they
+// ride the same overlay as the governor policy.
+type LiveLimits struct {
+	MeshManaged   bool
+	MaxDiskMB     int64
+	RetentionDays int
+	IdleUnloadS   int
+	MaxRAMMB      int64
+}
+
 // SaveLimits persists live-edited limits to the overlay file that Load
 // applies on the next start. Only the operator-facing limit knobs are
 // written; poll_interval and the rest stay wherever the operator set them.
-// meshManaged is the [models] switch the same dashboard toggle edits.
-func SaveLimits(dataDir string, g Governor, meshManaged bool) error {
+func SaveLimits(dataDir string, g Governor, l LiveLimits) error {
 	var b strings.Builder
 	b.WriteString("# Written by flockd when limits change via the API or app.\n")
-	b.WriteString("# These override [governor] in config.toml; delete this file to undo.\n\n")
+	b.WriteString("# These override [governor], [models] and [budget] in config.toml; delete this file to undo.\n\n")
 	b.WriteString("[governor]\n")
 	fmt.Fprintf(&b, "serve_policy = %q\n", g.ServePolicy)
 	fmt.Fprintf(&b, "idle_after = %q\n", g.IdleAfter.String())
@@ -263,7 +294,12 @@ func SaveLimits(dataDir string, g Governor, meshManaged bool) error {
 	}
 	b.WriteString("]\n")
 	b.WriteString("\n[models]\n")
-	fmt.Fprintf(&b, "mesh_managed = %t\n", meshManaged)
+	fmt.Fprintf(&b, "mesh_managed = %t\n", l.MeshManaged)
+	fmt.Fprintf(&b, "max_disk_mb = %d\n", l.MaxDiskMB)
+	fmt.Fprintf(&b, "retention_days = %d\n", l.RetentionDays)
+	fmt.Fprintf(&b, "idle_unload_s = %d\n", l.IdleUnloadS)
+	b.WriteString("\n[budget]\n")
+	fmt.Fprintf(&b, "max_ram_mb = %d\n", l.MaxRAMMB)
 
 	tmp := LimitsPath(dataDir) + ".tmp"
 	if err := os.WriteFile(tmp, []byte(b.String()), 0o600); err != nil {
@@ -292,6 +328,12 @@ func (c Config) Validate() error {
 	}
 	if c.Budget.MaxConcurrent < 1 {
 		return fmt.Errorf("config: budget.max_concurrent must be >= 1")
+	}
+	if c.Budget.MaxRAMMB < 0 {
+		return fmt.Errorf("config: budget.max_ram_mb must be >= 0 (0 = auto)")
+	}
+	if c.Models.IdleUnloadS < 0 || c.Models.RetentionDays < 0 {
+		return fmt.Errorf("config: models.idle_unload_s and models.retention_days must be >= 0 (0 = never)")
 	}
 	return nil
 }

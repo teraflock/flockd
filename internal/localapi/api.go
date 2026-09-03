@@ -2,11 +2,13 @@ package localapi
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
 	"time"
 
+	"github.com/teraflock/flockd/internal/activity"
 	"github.com/teraflock/flockd/internal/assign"
 	"github.com/teraflock/flockd/internal/config"
 	"github.com/teraflock/flockd/internal/events"
@@ -15,6 +17,7 @@ import (
 	"github.com/teraflock/flockd/internal/logging"
 	"github.com/teraflock/flockd/internal/models"
 	"github.com/teraflock/flockd/internal/telemetry"
+	"github.com/teraflock/flockd/internal/update"
 )
 
 // The management API's routes and wire types are generated from
@@ -62,7 +65,8 @@ func (s *Server) status() gen.Status {
 		resp.OnBattery = p.OnBattery
 		resp.TempCelsius = p.TempCelsius
 	}
-	if hw := s.deps.Hardware; hw != nil {
+	hw := s.deps.Hardware
+	if hw != nil {
 		hs := &gen.Hardware{
 			Os:       hw.GetOs(),
 			Arch:     hw.GetArch(),
@@ -78,8 +82,81 @@ func (s *Server) status() gen.Status {
 			})
 		}
 		resp.Hardware = hs
+		resp.Memory.TotalMb = int64(hw.GetRamTotalMb())
+	}
+	if ops := s.deps.ModelOps; ops != nil {
+		m := ops.Memory()
+		resp.Memory = gen.Memory{UsedMb: m.UsedMB, BudgetMb: m.BudgetMB, TotalMb: m.TotalMB}
+		if resp.Memory.TotalMb == 0 && hw != nil {
+			resp.Memory.TotalMb = int64(s.deps.Hardware.GetRamTotalMb())
+		}
+	}
+	if mgr := s.deps.Models; mgr != nil {
+		d := mgr.Stats()
+		resp.Disk = gen.Disk{ModelsBytes: d.ModelsBytes, PartialBytes: d.PartialBytes,
+			BudgetBytes: d.BudgetBytes, FreeBytes: d.FreeBytes, Dir: d.Dir}
+	}
+	if u := s.deps.Update; u != nil {
+		if last, ok := u.Last(); ok {
+			resp.Update = updateToGen(last)
+		}
 	}
 	return resp
+}
+
+func updateToGen(r update.Result) *gen.Update {
+	out := &gen.Update{Available: r.Available, Current: r.Current, Latest: r.Latest, CheckedAt: r.CheckedAt}
+	if r.Minimum != "" {
+		m := r.Minimum
+		out.Minimum = &m
+	}
+	if r.BelowMinimum {
+		b := true
+		out.BelowMinimum = &b
+	}
+	if r.URL != "" {
+		u := r.URL
+		out.Url = &u
+	}
+	return out
+}
+
+// GetActivity implements gen.ServerInterface.
+func (s *Server) GetActivity(w http.ResponseWriter, r *http.Request) {
+	rows := []gen.ActivityEvent{}
+	for _, e := range s.deps.Activity.List() {
+		row := gen.ActivityEvent{Time: e.Time, Kind: e.Kind, Actor: e.Actor, Message: e.Message}
+		if e.Model != "" {
+			m := e.Model
+			row.Model = &m
+		}
+		if e.Detail != "" {
+			d := e.Detail
+			row.Detail = &d
+		}
+		rows = append(rows, row)
+	}
+	writeJSON(w, http.StatusOK, gen.ActivityList{Events: rows})
+}
+
+// CheckUpdate implements gen.ServerInterface: an on-demand version check.
+// A feed that is unreachable (or not built yet) is a 502 here because the
+// operator asked explicitly; the background checks stay silent.
+func (s *Server) CheckUpdate(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Update == nil {
+		writeOpenAIError(w, http.StatusNotImplemented, "invalid_request_error", "update checks are not enabled")
+		return
+	}
+	res, err := s.deps.Update.Check(r.Context())
+	if err != nil {
+		if errors.Is(err, update.ErrFeedUnavailable) {
+			writeOpenAIError(w, http.StatusBadGateway, "server_error", err.Error())
+			return
+		}
+		writeOpenAIError(w, http.StatusBadGateway, "server_error", "version check failed: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, updateToGen(res))
 }
 
 // GetStatus implements gen.ServerInterface.
@@ -111,6 +188,22 @@ func (s *Server) ListModels(w http.ResponseWriter, r *http.Request) {
 			assignments[p.ID] = p
 		}
 	}
+	var loadedMB map[string]int64
+	if s.deps.ModelOps != nil {
+		loadedMB = s.deps.ModelOps.Memory().Models
+	}
+	decorate := func(row *gen.ModelRow) {
+		if !row.Loaded {
+			return
+		}
+		if mb, ok := loadedMB[row.Id]; ok && mb > 0 {
+			row.LoadedMb = &mb
+		}
+		if u, ok := s.deps.Engine.Usage(row.Id); ok && u.Inflight == 0 {
+			t := u.LastUsed
+			row.IdleSince = &t
+		}
+	}
 	rows := []gen.ModelRow{}
 	if s.deps.Models != nil {
 		for _, i := range s.deps.Models.List() {
@@ -119,6 +212,11 @@ func (s *Server) ListModels(w http.ResponseWriter, r *http.Request) {
 				LastUsed: i.LastUsed, State: i.State, Origin: i.Origin,
 				Loaded: loaded[i.ID], Default: i.ID == def,
 			}
+			if i.Path != "" {
+				p := i.Path
+				row.Path = &p
+			}
+			decorate(&row)
 			if i.State == "downloading" {
 				rb := i.ReceivedBytes
 				row.ReceivedBytes = &rb
@@ -132,7 +230,9 @@ func (s *Server) ListModels(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	for id := range loaded { // loaded but not cached (mock runtime)
-		rows = append(rows, gen.ModelRow{Id: id, State: "ready", Loaded: true, Default: id == def, Origin: models.OriginOperator})
+		row := gen.ModelRow{Id: id, State: "ready", Loaded: true, Default: id == def, Origin: models.OriginOperator}
+		decorate(&row)
+		rows = append(rows, row)
 		delete(assignments, id)
 	}
 	for _, p := range assignments {
@@ -193,13 +293,16 @@ func (s *Server) DeleteModel(w http.ResponseWriter, r *http.Request, id gen.Mode
 		writeOpenAIError(w, http.StatusNotImplemented, "invalid_request_error", "model cache not enabled (mock runtime)")
 		return
 	}
-	if entry := s.deps.Engine.Unregister(id); entry != nil {
+	if s.deps.ModelOps != nil {
+		_ = s.deps.ModelOps.Unload(r.Context(), id) // not-loaded is fine
+	} else if entry := s.deps.Engine.Unregister(id); entry != nil {
 		_ = entry.Instance.Shutdown(r.Context())
 	}
 	if err := s.deps.Models.Remove(id); err != nil {
 		writeOpenAIError(w, http.StatusNotFound, "invalid_request_error", err.Error())
 		return
 	}
+	s.deps.Activity.Record(activity.KindEvicted, activity.ActorOperator, id, "operator removed "+id, "")
 	writeJSON(w, http.StatusOK, gen.Ok{Ok: true})
 }
 
@@ -238,6 +341,7 @@ func (s *Server) GetLimits(w http.ResponseWriter, r *http.Request) {
 	}
 	p := g.Policy()
 	mm := s.meshManaged()
+	ll := s.liveLimits()
 	writeJSON(w, http.StatusOK, gen.Limits{
 		ServePolicy:       p.Serve,
 		IdleAfterSeconds:  int(p.IdleAfter.Seconds()),
@@ -246,7 +350,27 @@ func (s *Server) GetLimits(w http.ResponseWriter, r *http.Request) {
 		MaxTempCelsius:    p.MaxTempCelsius,
 		Schedule:          windowsToStrings(p.Schedule),
 		MeshManaged:       &mm,
+		MaxDiskMb:         &ll.MaxDiskMB,
+		RetentionDays:     &ll.RetentionDays,
+		MaxRamMb:          &ll.MaxRAMMB,
+		IdleUnloadSeconds: &ll.IdleUnloadS,
 	})
+}
+
+// liveLimits reads the model/budget knobs from their live owners, falling
+// back to the configured defaults where an owner is absent.
+func (s *Server) liveLimits() config.LiveLimits {
+	ll := s.deps.Defaults
+	ll.MeshManaged = s.meshManaged()
+	if m := s.deps.Models; m != nil {
+		ll.MaxDiskMB = m.MaxDiskMB()
+		ll.RetentionDays = m.RetentionDays()
+	}
+	if ops := s.deps.ModelOps; ops != nil {
+		ll.MaxRAMMB = ops.ConfiguredMemoryBudgetMB()
+		ll.IdleUnloadS = int(ops.IdleUnload().Seconds())
+	}
+	return ll
 }
 
 // UpdateLimits implements gen.ServerInterface.
@@ -287,6 +411,51 @@ func (s *Server) UpdateLimits(w http.ResponseWriter, r *http.Request) {
 	if lim.MeshManaged != nil && s.deps.SetMeshManaged != nil {
 		s.deps.SetMeshManaged(*lim.MeshManaged)
 	}
+	for _, v := range []*int64{lim.MaxDiskMb, lim.MaxRamMb} {
+		if v != nil && *v < 0 {
+			writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "max_disk_mb and max_ram_mb must be >= 0")
+			return
+		}
+	}
+	for _, v := range []*int{lim.RetentionDays, lim.IdleUnloadSeconds} {
+		if v != nil && *v < 0 {
+			writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "retention_days and idle_unload_seconds must be >= 0")
+			return
+		}
+	}
+	if m := s.deps.Models; m != nil {
+		if lim.MaxDiskMb != nil {
+			m.SetMaxDiskMB(*lim.MaxDiskMb)
+		}
+		if lim.RetentionDays != nil {
+			m.SetRetentionDays(*lim.RetentionDays)
+		}
+	}
+	if ops := s.deps.ModelOps; ops != nil {
+		if lim.MaxRamMb != nil {
+			ops.SetMemoryBudgetMB(*lim.MaxRamMb)
+		}
+		if lim.IdleUnloadSeconds != nil {
+			ops.SetIdleUnload(time.Duration(*lim.IdleUnloadSeconds) * time.Second)
+		}
+	}
+	// No live owner (mock runtime): remember the values for persistence.
+	if s.deps.Models == nil {
+		if lim.MaxDiskMb != nil {
+			s.deps.Defaults.MaxDiskMB = *lim.MaxDiskMb
+		}
+		if lim.RetentionDays != nil {
+			s.deps.Defaults.RetentionDays = *lim.RetentionDays
+		}
+	}
+	if s.deps.ModelOps == nil {
+		if lim.MaxRamMb != nil {
+			s.deps.Defaults.MaxRAMMB = *lim.MaxRamMb
+		}
+		if lim.IdleUnloadSeconds != nil {
+			s.deps.Defaults.IdleUnloadS = *lim.IdleUnloadSeconds
+		}
+	}
 	// Persist to the daemon-owned overlay (never the operator's
 	// config.toml) so limits survive restarts. A write failure loses only
 	// persistence, not the live change — log it and answer normally.
@@ -298,7 +467,7 @@ func (s *Server) UpdateLimits(w http.ResponseWriter, r *http.Request) {
 			ServeOnBattery: p.ServeOnBattery,
 			MaxTempCelsius: p.MaxTempCelsius,
 			Schedule:       lim.Schedule,
-		}, s.meshManaged())
+		}, s.liveLimits())
 		if err != nil {
 			s.deps.Log.Warn("limits applied but not persisted", "err", err)
 		}

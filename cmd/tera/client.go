@@ -143,7 +143,47 @@ type statusResp struct {
 		Inflight        int     `json:"inflight"`
 		EarnedMicrocred int64   `json:"earned_microcredits"`
 	} `json:"stats"`
+	Memory struct {
+		UsedMB   int64 `json:"used_mb"`
+		BudgetMB int64 `json:"budget_mb"`
+		TotalMB  int64 `json:"total_mb"`
+	} `json:"memory"`
+	Disk struct {
+		ModelsBytes  int64  `json:"models_bytes"`
+		PartialBytes int64  `json:"partial_bytes"`
+		BudgetBytes  int64  `json:"budget_bytes"`
+		FreeBytes    int64  `json:"free_bytes"`
+		Dir          string `json:"dir"`
+	} `json:"disk"`
+	Update *updateResp `json:"update"`
 }
+
+type updateResp struct {
+	Available    bool   `json:"available"`
+	Current      string `json:"current"`
+	Latest       string `json:"latest"`
+	Minimum      string `json:"minimum"`
+	BelowMinimum bool   `json:"below_minimum"`
+	URL          string `json:"url"`
+}
+
+// updateLine renders the one-line update notice for status/TUI ("" = none).
+func updateLine(u *updateResp) string {
+	if u == nil || !u.Available {
+		return ""
+	}
+	line := "flockd " + u.Latest + " available"
+	if u.BelowMinimum {
+		line += " (REQUIRED: below the mesh minimum " + u.Minimum + "; the node is drained until updated)"
+	}
+	if u.URL != "" {
+		line += " — " + u.URL
+	}
+	return line
+}
+
+// gb renders bytes as GB with one decimal.
+func gb(b int64) string { return fmt.Sprintf("%.1fGB", float64(b)/(1<<30)) }
 
 type earningsResp struct {
 	EarnedMicrocredits int64   `json:"earned_microcredits"`
@@ -156,13 +196,16 @@ type earningsResp struct {
 
 type modelsResp struct {
 	Models []struct {
-		ID        string    `json:"id"`
-		SizeBytes int64     `json:"size_bytes"`
-		Pinned    bool      `json:"pinned"`
-		LastUsed  time.Time `json:"last_used"`
-		State     string    `json:"state"`
-		Loaded    bool      `json:"loaded"`
-		Default   bool      `json:"default"`
+		ID        string     `json:"id"`
+		SizeBytes int64      `json:"size_bytes"`
+		Pinned    bool       `json:"pinned"`
+		LastUsed  time.Time  `json:"last_used"`
+		State     string     `json:"state"`
+		Loaded    bool       `json:"loaded"`
+		Default   bool       `json:"default"`
+		Origin    string     `json:"origin"`
+		LoadedMB  *int64     `json:"loaded_mb"`
+		IdleSince *time.Time `json:"idle_since"`
 	} `json:"models"`
 }
 
@@ -173,4 +216,9 @@ type limitsResp struct {
 	ServeOnBattery bool     `json:"serve_on_battery"`
 	MaxTempCelsius float64  `json:"max_temp_celsius"`
 	Schedule       []string `json:"schedule"`
+	MeshManaged    *bool    `json:"mesh_managed,omitempty"`
+	MaxDiskMB      *int64   `json:"max_disk_mb,omitempty"`
+	RetentionDays  *int     `json:"retention_days,omitempty"`
+	MaxRAMMB       *int64   `json:"max_ram_mb,omitempty"`
+	IdleUnloadSec  *int     `json:"idle_unload_seconds,omitempty"`
 }

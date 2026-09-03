@@ -215,6 +215,12 @@ func (m *dashModel) View() string {
 			st.Hardware.OS, st.Hardware.Arch, st.Hardware.CPUCores, st.Hardware.RAMMB/1024,
 			strings.Join(gpus, "\n"), power, temp)
 	}
+	if st.Memory.BudgetMB > 0 {
+		hw += fmt.Sprintf("\nmodels %.1f / %.1fGB memory budget", float64(st.Memory.UsedMB)/1024, float64(st.Memory.BudgetMB)/1024)
+	}
+	if st.Disk.Dir != "" {
+		hw += fmt.Sprintf("\ndisk %s models · %s free", gb(st.Disk.ModelsBytes), gb(st.Disk.FreeBytes))
+	}
 	hardware := dashPanel.Width(46).Render(dashHeader.Render("HARDWARE") + "\n" + hw)
 
 	// Reputation placeholder until the trust engine exists (Phase 3).
@@ -237,7 +243,17 @@ func (m *dashModel) View() string {
 		if mm.Default {
 			def = dashLabel.Render(" (default)")
 		}
-		rows = append(rows, fmt.Sprintf("%s %s%s%s  %s", mark, mm.ID, def, pin, dashLabel.Render(mm.State)))
+		mem := ""
+		if mm.LoadedMB != nil {
+			mem = fmt.Sprintf(" %.1fGB", float64(*mm.LoadedMB)/1024)
+		}
+		state := mm.State
+		if state == "missing" {
+			state = dashAmber.Render(state)
+		} else {
+			state = dashLabel.Render(state)
+		}
+		rows = append(rows, fmt.Sprintf("%s %s%s%s  %s%s", mark, mm.ID, def, pin, state, dashLabel.Render(mem)))
 	}
 	if len(rows) == 0 {
 		rows = []string{dashLabel.Render("no models")}
@@ -251,7 +267,12 @@ func (m *dashModel) View() string {
 
 	top := lipgloss.JoinHorizontal(lipgloss.Top, throughput, earnings)
 	mid := lipgloss.JoinHorizontal(lipgloss.Top, hardware, rep)
-	return strings.Join([]string{header, top, mid, modelsPanel, footer}, "\n")
+	parts := []string{header, top, mid, modelsPanel}
+	if line := updateLine(st.Update); line != "" {
+		parts = append(parts, dashAmber.Render("⬆ "+line))
+	}
+	parts = append(parts, footer)
+	return strings.Join(parts, "\n")
 }
 
 func short(s string) string {

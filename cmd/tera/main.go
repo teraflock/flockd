@@ -292,6 +292,25 @@ func cmdStatus() *cobra.Command {
 				power = styleWarn.Render("on battery")
 			}
 			fmt.Printf("  power      %s\n", power)
+			if st.Memory.BudgetMB > 0 || st.Memory.UsedMB > 0 {
+				fmt.Printf("  memory     %.1fGB of %.1fGB budget used by models (%.0fGB total)\n",
+					float64(st.Memory.UsedMB)/1024, float64(st.Memory.BudgetMB)/1024, float64(st.Memory.TotalMB)/1024)
+			}
+			if st.Disk.Dir != "" {
+				budget := "unlimited"
+				if st.Disk.BudgetBytes > 0 {
+					budget = gb(st.Disk.BudgetBytes) + " budget"
+				}
+				partial := ""
+				if st.Disk.PartialBytes > 0 {
+					partial = fmt.Sprintf(" · %s partial", gb(st.Disk.PartialBytes))
+				}
+				fmt.Printf("  disk       %s models · %s · %s free%s\n             %s\n",
+					gb(st.Disk.ModelsBytes), budget, gb(st.Disk.FreeBytes), partial, styleDim.Render(st.Disk.Dir))
+			}
+			if line := updateLine(st.Update); line != "" {
+				fmt.Printf("  update     %s\n", styleWarn.Render(line))
+			}
 			return nil
 		},
 	}
@@ -368,7 +387,7 @@ func cmdModels() *cobra.Command {
 					fmt.Println(styleDim.Render("no models cached"))
 					return nil
 				}
-				fmt.Printf("%-40s %-12s %-10s %-6s %s\n", "MODEL", "STATE", "SIZE", "PIN", "LOADED")
+				fmt.Printf("%-40s %-12s %-10s %-6s %-9s %s\n", "MODEL", "STATE", "SIZE", "PIN", "ORIGIN", "LOADED")
 				for _, m := range mr.Models {
 					size := "—"
 					if m.SizeBytes > 0 {
@@ -380,12 +399,22 @@ func cmdModels() *cobra.Command {
 					}
 					if m.Loaded {
 						loaded = styleOK.Render("●")
+						if m.LoadedMB != nil {
+							loaded += fmt.Sprintf(" %.1fGB", float64(*m.LoadedMB)/1024)
+						}
+						if m.IdleSince != nil {
+							loaded += styleDim.Render(" idle " + time.Since(*m.IdleSince).Round(time.Second).String())
+						}
 					}
 					name := m.ID
 					if m.Default {
 						name += styleDim.Render(" (default)")
 					}
-					fmt.Printf("%-40s %-12s %-10s %-6s %s\n", name, m.State, size, pin, loaded)
+					state := m.State
+					if state == "missing" {
+						state = styleWarn.Render(state)
+					}
+					fmt.Printf("%-40s %-12s %-10s %-6s %-9s %s\n", name, state, size, pin, m.Origin, loaded)
 				}
 				return nil
 			},
@@ -428,11 +457,15 @@ func cmdModels() *cobra.Command {
 
 func cmdLimits() *cobra.Command {
 	var (
-		policy   string
-		battery  bool
-		maxTemp  float64
-		schedule []string
-		setAny   bool
+		policy     string
+		battery    bool
+		maxTemp    float64
+		schedule   []string
+		maxDisk    int64
+		maxRAM     int64
+		retention  int
+		idleUnload int
+		setAny     bool
 	)
 	c := &cobra.Command{
 		Use:   "limits",
@@ -447,8 +480,22 @@ func cmdLimits() *cobra.Command {
 				return err
 			}
 			setAny = cmd.Flags().Changed("serve") || cmd.Flags().Changed("serve-on-battery") ||
-				cmd.Flags().Changed("max-temp") || cmd.Flags().Changed("schedule")
+				cmd.Flags().Changed("max-temp") || cmd.Flags().Changed("schedule") ||
+				cmd.Flags().Changed("max-disk-mb") || cmd.Flags().Changed("max-ram-mb") ||
+				cmd.Flags().Changed("retention-days") || cmd.Flags().Changed("idle-unload")
 			if setAny {
+				if cmd.Flags().Changed("max-disk-mb") {
+					lim.MaxDiskMB = &maxDisk
+				}
+				if cmd.Flags().Changed("max-ram-mb") {
+					lim.MaxRAMMB = &maxRAM
+				}
+				if cmd.Flags().Changed("retention-days") {
+					lim.RetentionDays = &retention
+				}
+				if cmd.Flags().Changed("idle-unload") {
+					lim.IdleUnloadSec = &idleUnload
+				}
 				if cmd.Flags().Changed("serve") {
 					lim.ServePolicy = policy
 				}
@@ -472,10 +519,29 @@ func cmdLimits() *cobra.Command {
 			fmt.Printf("  serve on battery   %v\n", lim.ServeOnBattery)
 			fmt.Printf("  max temp           %.0f°C\n", lim.MaxTempCelsius)
 			fmt.Printf("  schedule           %s\n", strings.Join(lim.Schedule, ", "))
+			if lim.MeshManaged != nil {
+				fmt.Printf("  mesh managed       %v\n", *lim.MeshManaged)
+			}
+			if lim.MaxDiskMB != nil {
+				fmt.Printf("  max disk           %d MB (0 = unlimited)\n", *lim.MaxDiskMB)
+			}
+			if lim.RetentionDays != nil {
+				fmt.Printf("  retention          %d days (0 = never)\n", *lim.RetentionDays)
+			}
+			if lim.MaxRAMMB != nil {
+				fmt.Printf("  max ram            %d MB (0 = auto)\n", *lim.MaxRAMMB)
+			}
+			if lim.IdleUnloadSec != nil {
+				fmt.Printf("  idle unload        %ds (0 = never)\n", *lim.IdleUnloadSec)
+			}
 			return nil
 		},
 	}
 	c.Flags().StringVar(&policy, "serve", "", "serve policy: always|idle-only|scheduled")
+	c.Flags().Int64Var(&maxDisk, "max-disk-mb", 0, "model store budget in MB (0 = unlimited)")
+	c.Flags().Int64Var(&maxRAM, "max-ram-mb", 0, "memory budget for loaded models in MB (0 = auto)")
+	c.Flags().IntVar(&retention, "retention-days", 0, "evict unpinned models unused for N days (0 = never)")
+	c.Flags().IntVar(&idleUnload, "idle-unload", 0, "unload idle models after N seconds (0 = never)")
 	c.Flags().BoolVar(&battery, "serve-on-battery", false, "allow serving on battery")
 	c.Flags().Float64Var(&maxTemp, "max-temp", 90, "thermal pause threshold °C (0 disables)")
 	c.Flags().StringSliceVar(&schedule, "schedule", nil, "serving windows, e.g. 22:00-08:00")
