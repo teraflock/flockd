@@ -115,3 +115,81 @@ func TestTouchAndUnregister(t *testing.T) {
 		t.Fatal("unregistered model still serving")
 	}
 }
+
+// gateAdmitter blocks every Admit until released, and signals when a
+// request is waiting inside it.
+type gateAdmitter struct {
+	waiting chan struct{}
+	release chan struct{}
+}
+
+func (g *gateAdmitter) Admit(ctx context.Context, _ string) (context.Context, func(), error) {
+	g.waiting <- struct{}{}
+	select {
+	case <-g.release:
+		return ctx, func() {}, nil
+	case <-ctx.Done():
+		return nil, nil, ctx.Err()
+	}
+}
+
+func TestUnregisterIdleRefusesRoutedRequests(t *testing.T) {
+	gate := &gateAdmitter{waiting: make(chan struct{}, 1), release: make(chan struct{})}
+	e, _ := newEngine(t, gate)
+	req := rt.CompletionRequest{ID: "r", Model: "model-b", Kind: rt.KindChat,
+		Messages: []rt.Message{{Role: "user", Content: "x"}}, Params: rt.GenerationParams{Seed: 1, MaxTokens: 4}}
+
+	// A request routed to the model but still waiting in admission — the
+	// window the old code left open — already counts as in flight.
+	done := make(chan error, 1)
+	go func() {
+		ts, err := e.Complete(context.Background(), req)
+		if err == nil {
+			_, _, _, err = rt.Drain(ts)
+		}
+		done <- err
+	}()
+	<-gate.waiting
+	if _, err := e.UnregisterIdle("model-b"); !errors.Is(err, ErrBusy) {
+		t.Fatalf("UnregisterIdle during admission: err = %v, want ErrBusy", err)
+	}
+	if u, ok := e.Usage("model-b"); !ok || u.Inflight != 1 {
+		t.Fatalf("usage during admission = %+v %v", u, ok)
+	}
+	close(gate.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if u, _ := e.Usage("model-b"); u.Inflight != 0 {
+		t.Fatalf("inflight after drain = %d", u.Inflight)
+	}
+	entry, err := e.UnregisterIdle("model-b")
+	if err != nil || entry == nil || entry.Spec.ID != "model-b" {
+		t.Fatalf("UnregisterIdle when idle: %v %v", entry, err)
+	}
+	if _, err := e.UnregisterIdle("model-b"); !errors.Is(err, ErrModelNotFound) {
+		t.Fatalf("second UnregisterIdle: %v", err)
+	}
+	if _, err := e.Complete(context.Background(), req); !errors.Is(err, ErrModelNotFound) {
+		t.Fatalf("request after unregister: %v", err)
+	}
+}
+
+func TestAdmitFailureReleasesInflight(t *testing.T) {
+	gate := &gateAdmitter{waiting: make(chan struct{}, 1), release: make(chan struct{})}
+	e, _ := newEngine(t, gate)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := e.Complete(ctx, rt.CompletionRequest{ID: "r", Model: "model-a", Kind: rt.KindChat})
+		done <- err
+	}()
+	<-gate.waiting
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v", err)
+	}
+	if u, _ := e.Usage("model-a"); u.Inflight != 0 {
+		t.Fatalf("rejected request leaked inflight: %d", u.Inflight)
+	}
+}

@@ -25,6 +25,10 @@ const payoutMicroPerToken = 55
 // ErrModelNotFound is returned for unknown model ids.
 var ErrModelNotFound = errors.New("engine: model not loaded")
 
+// ErrBusy is returned by UnregisterIdle when the model has requests in
+// flight (or waiting in admission) and so must not be unloaded.
+var ErrBusy = errors.New("engine: model busy")
+
 // Admitter gates requests (usually *governor.Governor).
 type Admitter interface {
 	Admit(ctx context.Context, id string) (context.Context, func(), error)
@@ -37,6 +41,10 @@ type ModelEntry struct {
 	// LoadedAt is when the instance was registered.
 	LoadedAt time.Time
 
+	// inflight counts requests between lookup (under e.mu) and stream
+	// end — including ones still waiting in governor admission — so that
+	// UnregisterIdle, which reads it under e.mu, cannot race a request
+	// that has already been routed to this instance.
 	inflight atomic.Int64
 	lastUsed atomic.Int64 // unix nanos of the most recent request start
 }
@@ -87,10 +95,38 @@ func (e *Engine) Register(spec rt.ModelSpec, inst rt.Instance) {
 }
 
 // Unregister removes a model (eviction); callers shut the instance down.
+// Requests in flight on it fail when the instance goes away — use
+// UnregisterIdle when that is not acceptable.
 func (e *Engine) Unregister(id string) *ModelEntry {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	entry := e.models[id]
+	e.removeLocked(id)
+	return entry
+}
+
+// UnregisterIdle removes a model only if nothing is in flight on it. The
+// in-flight check and the removal happen under the same lock the request
+// path takes to route to the model, so a request cannot slip in between:
+// after this returns, either the model is gone and no request holds it,
+// or ErrBusy says a request does. Daemon-initiated unloads (memory
+// admission, idle unload) use this; the operator's explicit unload keeps
+// Unregister's forced semantics.
+func (e *Engine) UnregisterIdle(id string) (*ModelEntry, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	entry, ok := e.models[id]
+	if !ok {
+		return nil, fmt.Errorf("%w: %q", ErrModelNotFound, id)
+	}
+	if n := entry.inflight.Load(); n > 0 {
+		return nil, fmt.Errorf("%w: %q has %d request(s) in flight", ErrBusy, id, n)
+	}
+	e.removeLocked(id)
+	return entry, nil
+}
+
+func (e *Engine) removeLocked(id string) {
 	delete(e.models, id)
 	if e.defaultID == id {
 		e.defaultID = ""
@@ -99,7 +135,6 @@ func (e *Engine) Unregister(id string) *ModelEntry {
 			break
 		}
 	}
-	return entry
 }
 
 // SetDefault names the model used when a request omits one. The model must
@@ -161,9 +196,27 @@ func (e *Engine) lookup(model string) (*ModelEntry, error) {
 	return m, nil
 }
 
+// acquire is lookup plus the in-flight increment, both under the read
+// lock, so an UnregisterIdle that observes inflight == 0 is guaranteed no
+// request has been routed to the entry (see ModelEntry.inflight).
+func (e *Engine) acquire(model string) (*ModelEntry, error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	id := model
+	if id == "" {
+		id = e.defaultID
+	}
+	m, ok := e.models[id]
+	if !ok {
+		return nil, fmt.Errorf("%w: %q", ErrModelNotFound, id)
+	}
+	m.inflight.Add(1)
+	return m, nil
+}
+
 // Complete runs one request through admission, the runtime, and telemetry.
 func (e *Engine) Complete(ctx context.Context, req rt.CompletionRequest) (rt.TokenStream, error) {
-	entry, err := e.lookup(req.Model)
+	entry, err := e.acquire(req.Model)
 	if err != nil {
 		return nil, err
 	}
@@ -174,6 +227,7 @@ func (e *Engine) Complete(ctx context.Context, req rt.CompletionRequest) (rt.Tok
 		var admitted context.Context
 		admitted, release, err = e.admit.Admit(ctx, req.ID)
 		if err != nil {
+			entry.inflight.Add(-1)
 			return nil, err
 		}
 		runCtx = admitted
@@ -183,7 +237,6 @@ func (e *Engine) Complete(ctx context.Context, req rt.CompletionRequest) (rt.Tok
 		e.touch(entry.Spec.ID)
 	}
 	entry.lastUsed.Store(time.Now().UnixNano())
-	entry.inflight.Add(1)
 	e.stats.RequestStarted()
 
 	stream, err := entry.Instance.Complete(runCtx, req)

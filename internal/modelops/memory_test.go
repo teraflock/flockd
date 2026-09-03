@@ -227,3 +227,130 @@ func TestMeasureReplacesEstimate(t *testing.T) {
 		t.Fatalf("after measure: %+v", m)
 	}
 }
+
+func TestIdleUnloadSkipsBusyModel(t *testing.T) {
+	svc, eng := memHarness(t, map[string]int64{"def": 100, "busy": 100}, 5)
+	ctx := context.Background()
+	for _, id := range []string{"def", "busy"} {
+		if err := svc.Load(ctx, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	svc.SetIdleUnload(time.Nanosecond)
+	stream, err := eng.Complete(ctx, rt.CompletionRequest{ID: "r", Model: "busy", Kind: rt.KindChat,
+		Messages: []rt.Message{{Role: "user", Content: "x"}}, Params: rt.GenerationParams{Seed: 1, MaxTokens: 1000}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	if got := svc.UnloadIdle(ctx); len(got) != 0 {
+		t.Fatalf("idle unload took a model with a request in flight: %v", got)
+	}
+	if got := loadedIDs(eng); fmt.Sprint(got) != "[busy def]" {
+		t.Fatalf("loaded = %v", got)
+	}
+	_ = stream.Close()
+	time.Sleep(2 * time.Millisecond)
+	if got := svc.UnloadIdle(ctx); fmt.Sprint(got) != "[busy]" {
+		t.Fatalf("after the request: UnloadIdle = %v", got)
+	}
+}
+
+func TestAdmissionOrderUsesStoreOrigin(t *testing.T) {
+	svc, eng := memHarness(t, map[string]int64{"def": 1000, "op": 2000, "mesh": 2000, "n": 2000}, 0)
+	svc.SetMemoryBudgetMB(5000)
+	ctx := context.Background()
+	if err := svc.Load(ctx, "def"); err != nil {
+		t.Fatal(err)
+	}
+	// The operator installs op; the coordinator later re-sends it (a load
+	// with mesh origin of a model the store already marks operator).
+	if err := svc.Load(ctx, "op"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Unload(ctx, "op"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.LoadInstanceOrigin(ctx, "op", models.OriginMesh); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(5 * time.Millisecond) // op is the LRU-older of the two
+	if _, err := svc.LoadInstanceOrigin(ctx, "mesh", models.OriginMesh); err != nil {
+		t.Fatal(err)
+	}
+	if svc.Mgr.Origin("op") != models.OriginOperator || svc.Mgr.Origin("mesh") != models.OriginMesh {
+		t.Fatalf("store origins: op=%s mesh=%s", svc.Mgr.Origin("op"), svc.Mgr.Origin("mesh"))
+	}
+	// n needs 2000: the genuinely mesh-placed model must go, not the
+	// operator's own just because a re-send loaded it.
+	if err := svc.Load(ctx, "n"); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadedIDs(eng); fmt.Sprint(got) != "[def n op]" {
+		t.Fatalf("loaded = %v, want the operator's model kept", got)
+	}
+}
+
+func TestRemoveUnloadsWithoutCachedReport(t *testing.T) {
+	svc, eng := memHarness(t, map[string]int64{"def": 100, "gone": 100}, 0)
+	var unloaded []string
+	svc.OnUnloaded = func(id string) { unloaded = append(unloaded, id) }
+	ctx := context.Background()
+	for _, id := range []string{"def", "gone"} {
+		if err := svc.Load(ctx, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := svc.Remove(ctx, "gone"); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadedIDs(eng); fmt.Sprint(got) != "[def]" {
+		t.Fatalf("loaded = %v", got)
+	}
+	if svc.Mgr.Has("gone") {
+		t.Fatal("removed model still on disk")
+	}
+	if len(unloaded) != 0 {
+		t.Fatalf("Remove reported %v as unloaded (would be `cached` to the coordinator)", unloaded)
+	}
+	// Not loaded is fine; not cached is the store's error.
+	if err := svc.Remove(ctx, "gone"); err == nil {
+		t.Fatal("second Remove succeeded")
+	}
+}
+
+// gateLoader blocks Load until released, so a test can observe the window
+// between the store handing out a path and the engine registering.
+type gateLoader struct {
+	Loader
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (g *gateLoader) Load(ctx context.Context, m rt.ModelSpec, res rt.ResourceBudget) (rt.Instance, error) {
+	g.entered <- struct{}{}
+	<-g.release
+	return g.Loader.Load(ctx, m, res)
+}
+
+func TestLoadingIsVisibleWhileTheRuntimeStarts(t *testing.T) {
+	svc, _ := memHarness(t, map[string]int64{"slow": 100}, 0)
+	gate := &gateLoader{Loader: svc.Loader, entered: make(chan struct{}, 1), release: make(chan struct{})}
+	svc.Loader = gate
+	if svc.Loading("slow") {
+		t.Fatal("loading before any load")
+	}
+	done := make(chan error, 1)
+	go func() { done <- svc.Load(context.Background(), "slow") }()
+	<-gate.entered
+	if !svc.Loading("slow") {
+		t.Fatal("Loading false while the runtime starts (retention could evict the file)")
+	}
+	close(gate.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if svc.Loading("slow") {
+		t.Fatal("Loading true after the load finished")
+	}
+}

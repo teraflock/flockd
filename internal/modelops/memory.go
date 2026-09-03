@@ -149,8 +149,12 @@ func (s *Service) admit(ctx context.Context, id string, estimateMB int64) error 
 		}
 		s.log().Info("unloading idle model to make room", "model", c.id, "for", id,
 			"need_mb", estimateMB, "used_mb", used, "budget_mb", budget)
-		if err := s.unload(ctx, c.id, activity.ActorDaemon, fmt.Sprintf("memory pressure: making room for %s", id)); err != nil {
-			s.log().Warn("admission unload failed", "model", c.id, "err", err)
+		err := s.unload(ctx, c.id, unloadOpts{actor: activity.ActorDaemon, idleOnly: true,
+			reason: fmt.Sprintf("memory pressure: making room for %s", id)})
+		if err != nil {
+			// ErrBusy: a request arrived between the candidate scan and
+			// here; the model stays and the next candidate is tried.
+			s.log().Warn("admission unload skipped", "model", c.id, "err", err)
 			continue
 		}
 		used = s.usedMB()
@@ -208,7 +212,12 @@ func (s *Service) UnloadIdle(ctx context.Context) []string {
 		if !idle || time.Since(since) < threshold {
 			continue
 		}
-		if err := s.unload(ctx, id, activity.ActorDaemon, "idle for "+time.Since(since).Round(time.Second).String()); err != nil {
+		err := s.unload(ctx, id, unloadOpts{actor: activity.ActorDaemon, idleOnly: true,
+			reason: "idle for " + time.Since(since).Round(time.Second).String()})
+		if err != nil {
+			if errors.Is(err, engine.ErrBusy) {
+				continue // a request arrived since the idle check
+			}
 			s.log().Warn("idle unload failed", "model", id, "err", err)
 			continue
 		}
@@ -232,5 +241,3 @@ func (s *Service) RunHousekeeping(ctx context.Context) {
 		}
 	}
 }
-
-var _ = engine.ErrModelNotFound

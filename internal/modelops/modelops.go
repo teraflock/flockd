@@ -257,6 +257,13 @@ func (s *Service) LoadInstanceOrigin(ctx context.Context, id, origin string) (rt
 	if err != nil {
 		return nil, err
 	}
+	// The store's origin is the truth for admission ordering: a
+	// coordinator re-send for a model the operator installed must not turn
+	// it into a mesh-placed one that admission unloads first. (Empty for
+	// file:// artifacts, which the store does not index.)
+	if o := s.Mgr.Origin(id); o != "" {
+		origin = o
+	}
 	spec := rt.ModelSpec{
 		ID:            pspec.GetId(),
 		Family:        pspec.GetFamily(),
@@ -314,6 +321,14 @@ func (s *Service) LoadInstanceOrigin(ctx context.Context, id, origin string) (rt
 	return inst, nil
 }
 
+// Loading reports whether a load of id is in progress (download, admission
+// or runtime start). The store's retention pass treats it like loaded.
+func (s *Service) Loading(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.loading[id]
+}
+
 func (s *Service) loadedInstance(id string) (rt.Instance, bool) {
 	for _, m := range s.Eng.Models() {
 		if m.Spec.ID == id {
@@ -323,14 +338,43 @@ func (s *Service) loadedInstance(id string) (rt.Instance, bool) {
 	return nil, false
 }
 
-// Unload removes a model from serving (the artifact stays cached).
+// Unload removes a model from serving (the artifact stays cached). It is
+// the operator's explicit request, so requests in flight on the model
+// fail rather than keep it loaded.
 func (s *Service) Unload(ctx context.Context, id string) error {
-	return s.unload(ctx, id, activity.ActorOperator, "")
+	return s.unload(ctx, id, unloadOpts{actor: activity.ActorOperator})
 }
 
-func (s *Service) unload(ctx context.Context, id, actor, reason string) error {
-	entry := s.Eng.Unregister(id)
-	if entry == nil {
+// Remove unloads id if it is loaded and deletes it from the store. Unlike
+// Unload followed by Manager.Remove, it never reports the model as
+// `cached` to the coordinator in between: the file is going away.
+func (s *Service) Remove(ctx context.Context, id string) error {
+	err := s.unload(ctx, id, unloadOpts{actor: activity.ActorOperator, reason: "removed", removing: true})
+	if err != nil && !errors.Is(err, engine.ErrModelNotFound) {
+		return err
+	}
+	return s.Mgr.Remove(id)
+}
+
+// unloadOpts says who is unloading and how.
+type unloadOpts struct {
+	actor, reason string
+	// idleOnly refuses (engine.ErrBusy) when the model has requests in
+	// flight — the daemon's own unloads never interrupt a request.
+	idleOnly bool
+	// removing suppresses the unloaded activity row and the OnUnloaded
+	// (`cached`) hook: the artifact is being deleted, not kept warm.
+	removing bool
+}
+
+func (s *Service) unload(ctx context.Context, id string, o unloadOpts) error {
+	var entry *engine.ModelEntry
+	if o.idleOnly {
+		var err error
+		if entry, err = s.Eng.UnregisterIdle(id); err != nil {
+			return err
+		}
+	} else if entry = s.Eng.Unregister(id); entry == nil {
 		return fmt.Errorf("%w: %q not loaded", engine.ErrModelNotFound, id)
 	}
 	s.mu.Lock()
@@ -341,9 +385,12 @@ func (s *Service) unload(ctx context.Context, id, actor, reason string) error {
 	if err := entry.Instance.Shutdown(shutCtx); err != nil {
 		s.log().Warn("unload shutdown", "model", id, "err", err)
 	}
-	s.log().Info("model unloaded", "model", id, "actor", actor, "reason", reason)
+	s.log().Info("model unloaded", "model", id, "actor", o.actor, "reason", o.reason)
 	s.Events.Publish("models_changed", map[string]string{"model": id, "change": "unloaded"})
-	s.Activity.Record(activity.KindUnloaded, actor, id, "unloaded "+id, reason)
+	if o.removing {
+		return nil
+	}
+	s.Activity.Record(activity.KindUnloaded, o.actor, id, "unloaded "+id, o.reason)
 	if s.OnUnloaded != nil {
 		s.OnUnloaded(id)
 	}
