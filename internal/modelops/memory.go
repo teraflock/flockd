@@ -160,6 +160,16 @@ func (s *Service) admit(ctx context.Context, id string, estimateMB int64) error 
 		used = s.usedMB()
 	}
 	if used+estimateMB > budget {
+		if id == def || def == "" {
+			// The default model (or the first load, which becomes it):
+			// the operator picked this model and the daemon cannot serve
+			// without it; refusing here would make the process exit at
+			// startup and launchd/systemd restart it forever. Load anyway
+			// and let the measured footprint tell the real story.
+			s.log().Warn("default model exceeds the memory budget; loading it anyway",
+				"model", id, "need_mb", estimateMB, "used_mb", used, "budget_mb", budget)
+			return nil
+		}
 		return fmt.Errorf("%w: %s needs ~%d MB, %d of %d MB in use and nothing idle to unload", ErrOverMemory, id, estimateMB, used, budget)
 	}
 	return nil

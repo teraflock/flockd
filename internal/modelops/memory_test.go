@@ -354,3 +354,25 @@ func TestLoadingIsVisibleWhileTheRuntimeStarts(t *testing.T) {
 		t.Fatal("Loading true after the load finished")
 	}
 }
+
+// The operator's default model loads even when its estimate does not fit
+// the budget: refusing would exit the daemon at startup and leave launchd
+// or systemd restarting it forever. Anything else still gets ErrOverMemory.
+func TestDefaultModelLoadsPastBudget(t *testing.T) {
+	svc, eng := memHarness(t, map[string]int64{"big": 4000, "other": 4000}, 5)
+	svc.SetMemoryBudgetMB(3000)
+	ctx := context.Background()
+	// First load becomes the default (nothing else is loaded yet).
+	if err := svc.Load(ctx, "big"); err != nil {
+		t.Fatalf("default model refused: %v", err)
+	}
+	if eng.DefaultModel() != "big" {
+		t.Fatalf("default = %q", eng.DefaultModel())
+	}
+	if got := loadedIDs(eng); fmt.Sprint(got) != "[big]" {
+		t.Fatalf("loaded = %v", got)
+	}
+	if err := svc.Load(ctx, "other"); !errors.Is(err, ErrOverMemory) {
+		t.Fatalf("non-default over budget: %v, want ErrOverMemory", err)
+	}
+}
