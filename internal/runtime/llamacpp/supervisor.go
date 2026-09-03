@@ -151,6 +151,16 @@ func (s *supervisor) checkHealth(ctx context.Context) error {
 	return nil
 }
 
+// pid returns the live child's pid, 0 when none.
+func (s *supervisor) pid() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cmd == nil || s.cmd.Process == nil {
+		return 0
+	}
+	return s.cmd.Process.Pid
+}
+
 // stop terminates the child gracefully (SIGTERM, then SIGKILL after 5s).
 func (s *supervisor) stop(ctx context.Context) {
 	s.mu.Lock()

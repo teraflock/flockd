@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/teraflock/flockd/internal/governor"
 	rt "github.com/teraflock/flockd/internal/runtime"
@@ -32,6 +34,19 @@ type Admitter interface {
 type ModelEntry struct {
 	Spec     rt.ModelSpec
 	Instance rt.Instance
+	// LoadedAt is when the instance was registered.
+	LoadedAt time.Time
+
+	inflight atomic.Int64
+	lastUsed atomic.Int64 // unix nanos of the most recent request start
+}
+
+// Usage is the per-model activity view idle unload and memory admission
+// read: when it last started serving a request (LoadedAt if never) and
+// how many requests it is serving right now.
+type Usage struct {
+	LastUsed time.Time
+	Inflight int
 }
 
 // Engine implements tunnel.Engine and backs localapi.
@@ -63,7 +78,9 @@ func New(admit Admitter, stats *telemetry.Stats, touch func(string)) *Engine {
 func (e *Engine) Register(spec rt.ModelSpec, inst rt.Instance) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.models[spec.ID] = &ModelEntry{Spec: spec, Instance: inst}
+	entry := &ModelEntry{Spec: spec, Instance: inst, LoadedAt: time.Now()}
+	entry.lastUsed.Store(entry.LoadedAt.UnixNano())
+	e.models[spec.ID] = entry
 	if e.defaultID == "" {
 		e.defaultID = spec.ID
 	}
@@ -119,6 +136,17 @@ func (e *Engine) Models() []*ModelEntry {
 // Stats exposes the telemetry accumulator.
 func (e *Engine) Stats() *telemetry.Stats { return e.stats }
 
+// Usage reports a loaded model's last request time and in-flight count.
+func (e *Engine) Usage(id string) (Usage, bool) {
+	e.mu.RLock()
+	m, ok := e.models[id]
+	e.mu.RUnlock()
+	if !ok {
+		return Usage{}, false
+	}
+	return Usage{LastUsed: time.Unix(0, m.lastUsed.Load()), Inflight: int(m.inflight.Load())}, true
+}
+
 func (e *Engine) lookup(model string) (*ModelEntry, error) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -154,15 +182,18 @@ func (e *Engine) Complete(ctx context.Context, req rt.CompletionRequest) (rt.Tok
 	if e.touch != nil {
 		e.touch(entry.Spec.ID)
 	}
+	entry.lastUsed.Store(time.Now().UnixNano())
+	entry.inflight.Add(1)
 	e.stats.RequestStarted()
 
 	stream, err := entry.Instance.Complete(runCtx, req)
 	if err != nil {
+		entry.inflight.Add(-1)
 		e.stats.RequestFinished()
 		release()
 		return nil, err
 	}
-	return &meteredStream{inner: stream, eng: e, release: release}, nil
+	return &meteredStream{inner: stream, eng: e, entry: entry, release: release}, nil
 }
 
 // Health proxies the default (or named) instance health.
@@ -179,6 +210,7 @@ func (e *Engine) Health(ctx context.Context, model string) (rt.Stats, error) {
 type meteredStream struct {
 	inner   rt.TokenStream
 	eng     *Engine
+	entry   *ModelEntry
 	release func()
 	once    sync.Once
 	usage   rt.Usage
@@ -186,6 +218,7 @@ type meteredStream struct {
 
 func (s *meteredStream) finish() {
 	s.once.Do(func() {
+		s.entry.inflight.Add(-1)
 		s.eng.stats.RequestFinished()
 		s.eng.stats.RecordRequest(s.usage.CompletionTokens, int64(s.usage.CompletionTokens)*payoutMicroPerToken)
 		s.release()

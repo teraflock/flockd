@@ -72,6 +72,13 @@ type harness struct {
 // mock-runtime modelops behind an assign.Service with the worker running.
 func newHarness(t *testing.T, maxDiskMB int64, blobs map[string][]byte) *harness {
 	t.Helper()
+	return newHarnessMem(t, maxDiskMB, blobs, nil)
+}
+
+// newHarnessMem is newHarness with per-model min_ram_mb catalog values so
+// memory admission can be driven by the test.
+func newHarnessMem(t *testing.T, maxDiskMB int64, blobs map[string][]byte, minRAM map[string]int64) *harness {
+	t.Helper()
 	h := &harness{rep: &reports{}, blobs: blobs, policy: Policy{MeshManaged: true}}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := filepath.Base(r.URL.Path)
@@ -87,6 +94,9 @@ func newHarness(t *testing.T, maxDiskMB int64, blobs map[string][]byte) *harness
 	cat := "models:\n"
 	for id, b := range blobs {
 		cat += fmt.Sprintf("  - id: %s\n    sha256: %s\n    artifact_url: %s/%s\n    size_bytes: %d\n", id, shaOf(b), srv.URL, id, len(b))
+		if mb, ok := minRAM[id]; ok {
+			cat += fmt.Sprintf("    min_ram_mb: %d\n", mb)
+		}
 	}
 	catPath := filepath.Join(dir, "catalog.yaml")
 	if err := os.WriteFile(catPath, []byte(cat), 0o600); err != nil {
@@ -290,5 +300,57 @@ func TestMockRuntimeDeclines(t *testing.T) {
 	svc.Apply(context.Background(), assignMsg(&typesv1.ModelSpec{Id: "x"}))
 	if st := rep.states("x"); fmt.Sprint(st) != "[declined]" {
 		t.Fatalf("reports = %v", st)
+	}
+}
+
+func TestOverMemoryReportsCachedThenLoadsOnResend(t *testing.T) {
+	h := newHarnessMem(t, 0, map[string][]byte{"mine": []byte("mine"), "theirs": []byte("theirs")},
+		map[string]int64{"mine": 800, "theirs": 800})
+	h.ops.SetMemoryBudgetMB(1000)
+	if err := h.ops.Load(context.Background(), "mine"); err != nil { // default: never evicted
+		t.Fatal(err)
+	}
+	h.svc.Apply(context.Background(), assignMsg(h.spec("theirs")))
+	waitFor(t, "cached report", func() bool {
+		st := h.rep.states("theirs")
+		return len(st) > 0 && st[len(st)-1] == StateCached
+	})
+	if got := h.rep.states("theirs"); fmt.Sprint(got) != "[assigned downloading cached]" {
+		t.Fatalf("reports = %v", got)
+	}
+	if h.loaded("theirs") {
+		t.Fatal("over-memory placement was loaded")
+	}
+	if !h.svc.Mgr.Has("theirs") {
+		t.Fatal("cached placement is not on disk")
+	}
+	if len(h.svc.Pending()) != 0 || len(h.svc.States()) != 0 {
+		t.Fatalf("cached placement still pending: %+v / %v", h.svc.Pending(), h.svc.States())
+	}
+
+	// Demand returns: the coordinator re-sends; there is room now, and the
+	// node loads from disk with no download phase.
+	h.ops.SetMemoryBudgetMB(2000)
+	h.svc.Apply(context.Background(), assignMsg(h.spec("theirs")))
+	waitFor(t, "loaded on resend", func() bool { return h.loaded("theirs") })
+	waitFor(t, "ready report", func() bool {
+		st := h.rep.states("theirs")
+		return st[len(st)-1] == StateReady
+	})
+	if got := h.rep.states("theirs"); fmt.Sprint(got) != "[assigned downloading cached assigned ready]" {
+		t.Fatalf("resend reports = %v (no second downloading: it was on disk)", got)
+	}
+
+	// Leaving memory while staying on disk is reported cached.
+	if err := h.ops.Unload(context.Background(), "theirs"); err != nil {
+		t.Fatal(err)
+	}
+	h.svc.Unloaded("theirs")
+	if got := h.rep.states("theirs"); got[len(got)-1] != StateCached {
+		t.Fatalf("after unload: %v", got)
+	}
+	h.svc.Unloaded("never-here")
+	if st := h.rep.states("never-here"); len(st) != 0 {
+		t.Fatalf("unknown model reported: %v", st)
 	}
 }

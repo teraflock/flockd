@@ -12,10 +12,15 @@
 //     (cache entries carry an origin; only "mesh" ones are the mesh's).
 //
 // Every decision is reported back over the tunnel as a ModelState:
-// "assigned" (accepted, queued), "downloading", "ready", "declined"
-// (policy), "failed" (error), "evicted". The coordinator uses declined /
-// failed to back off, and the heartbeat carries assigned/downloading so
-// placement knows a replica is on its way.
+// "assigned" (accepted, queued), "downloading", "ready", "cached" (on
+// disk, not loaded: the memory budget is full, or the model went idle),
+// "declined" (policy), "failed" (error), "evicted". The coordinator uses
+// declined / failed to back off, counts cached as a warm candidate that
+// costs a load rather than a live replica (it re-sends the assignment
+// when demand returns, and the node then loads without downloading), and
+// the heartbeat carries assigned/downloading so placement knows a replica
+// is on its way. A placement is never declined for memory alone: the
+// artifact is fetched inside max_disk_mb and reported cached.
 package assign
 
 import (
@@ -30,6 +35,7 @@ import (
 	tunnelv1 "github.com/teraflock/proto/gen/go/flock/tunnel/v1"
 	typesv1 "github.com/teraflock/proto/gen/go/flock/types/v1"
 
+	"github.com/teraflock/flockd/internal/activity"
 	"github.com/teraflock/flockd/internal/engine"
 	"github.com/teraflock/flockd/internal/events"
 	"github.com/teraflock/flockd/internal/modelops"
@@ -41,6 +47,7 @@ const (
 	StateAssigned    = "assigned"
 	StateDownloading = "downloading"
 	StateReady       = "ready"
+	StateCached      = "cached"
 	StateDeclined    = "declined"
 	StateFailed      = "failed"
 	StateEvicted     = "evicted"
@@ -83,7 +90,9 @@ type Service struct {
 	Policy func() Policy
 	// Events receives model_assignment events. May be nil.
 	Events *events.Hub
-	Log    *slog.Logger
+	// Activity receives assignment / declined rows. May be nil.
+	Activity *activity.Ring
+	Log      *slog.Logger
 
 	mu       sync.Mutex
 	pending  map[string]*Pending
@@ -200,6 +209,12 @@ func (s *Service) admit(ctx context.Context, spec *typesv1.ModelSpec) {
 	s.mu.Unlock()
 	s.report(&typesv1.ModelState{ModelId: id, State: StateAssigned})
 	s.publish(id, StateAssigned, "")
+	if s.Mgr != nil && s.Mgr.Has(id) {
+		s.Activity.Record(activity.KindAssignment, activity.ActorMesh, id, "mesh asked to load "+id+" (already on disk)", "")
+	} else {
+		s.Activity.Record(activity.KindAssignment, activity.ActorMesh, id,
+			fmt.Sprintf("mesh assigned %s (%.1f GB to download)", id, float64(entry.SizeBytes)/(1<<30)), "")
+	}
 }
 
 // evict drops a mesh-placed model; anything else is the operator's and is
@@ -246,6 +261,19 @@ func (s *Service) evict(ctx context.Context, id string) {
 	s.log().Info("model evicted on mesh request", "model", id)
 	s.publish(id, StateEvicted, "")
 	s.report(&typesv1.ModelState{ModelId: id, State: StateEvicted})
+	s.Activity.Record(activity.KindEvicted, activity.ActorMesh, id, "mesh evicted "+id, "")
+}
+
+// Unloaded is the modelops OnUnloaded hook: a model that left memory but
+// is still on disk is reported `cached` so the coordinator knows it can
+// be warmed with a load, not a download. Operator and mesh models alike —
+// both are legitimately serveable.
+func (s *Service) Unloaded(id string) {
+	if s.Mgr == nil || !s.Mgr.Has(id) {
+		return
+	}
+	s.report(&typesv1.ModelState{ModelId: id, State: StateCached})
+	s.publish(id, StateCached, "")
 }
 
 // process runs one queued assignment to ready/failed/declined.
@@ -266,9 +294,13 @@ func (s *Service) process(ctx context.Context, id string) {
 	if !s.setState(id, StateDownloading) {
 		return // evicted while waiting
 	}
-	s.report(&typesv1.ModelState{ModelId: id, State: StateDownloading})
-	s.publish(id, StateDownloading, "")
-	s.log().Info("mesh assignment: fetching and loading", "model", id)
+	onDisk := s.Mgr != nil && s.Mgr.Has(id)
+	if !onDisk {
+		// Already cached: straight to the load, no download phase to report.
+		s.report(&typesv1.ModelState{ModelId: id, State: StateDownloading})
+		s.publish(id, StateDownloading, "")
+	}
+	s.log().Info("mesh assignment: fetching and loading", "model", id, "on_disk", onDisk)
 
 	_, err := s.Ops.LoadInstanceOrigin(ctx, id, models.OriginMesh)
 	if err != nil {
@@ -281,6 +313,15 @@ func (s *Service) process(ctx context.Context, id string) {
 		switch {
 		case errors.Is(err, models.ErrOverBudget):
 			s.conclude(id, StateDeclined, "does not fit in max_disk_mb")
+		case errors.Is(err, modelops.ErrOverMemory):
+			// On disk, not in memory: a warm candidate, not a refusal.
+			s.mu.Lock()
+			delete(s.pending, id)
+			s.mu.Unlock()
+			s.log().Info("mesh assignment cached: over memory budget", "model", id, "err", err)
+			s.report(&typesv1.ModelState{ModelId: id, State: StateCached})
+			s.publish(id, StateCached, "over_memory")
+			s.Activity.Record(activity.KindAssignment, activity.ActorMesh, id, id+" is on disk but not loaded: memory budget is full", "over_memory")
 		default:
 			s.conclude(id, StateFailed, err.Error())
 		}
@@ -317,6 +358,11 @@ func (s *Service) conclude(id, state, reason string) {
 	s.log().Warn("mesh assignment not applied", "model", id, "state", state, "reason", reason)
 	s.report(&typesv1.ModelState{ModelId: id, State: state})
 	s.publish(id, state, reason)
+	kind := activity.KindDeclined
+	if state == StateFailed {
+		kind = activity.KindDownloadFailed
+	}
+	s.Activity.Record(kind, activity.ActorMesh, id, "mesh placement of "+id+" "+state, reason)
 }
 
 // States returns the in-flight assignments for Hello/heartbeat model lists

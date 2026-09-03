@@ -10,11 +10,17 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	typesv1 "github.com/teraflock/proto/gen/go/flock/types/v1"
+
+	"github.com/teraflock/flockd/internal/activity"
 	"github.com/teraflock/flockd/internal/engine"
 	"github.com/teraflock/flockd/internal/events"
+	"github.com/teraflock/flockd/internal/memory"
 	"github.com/teraflock/flockd/internal/models"
 	rt "github.com/teraflock/flockd/internal/runtime"
 )
@@ -56,12 +62,34 @@ type Service struct {
 	// Events receives models_changed on download-complete, load, unload and
 	// default switches. May be nil.
 	Events *events.Hub
+	// Activity receives loaded/unloaded rows. May be nil.
+	Activity *activity.Ring
+
+	// Hardware sizes the auto memory budget and tells unified from
+	// discrete memory. Nil disables admission unless a budget is
+	// configured explicitly (SetMemoryBudgetMB).
+	Hardware *typesv1.CapabilityProfile
+	// ContextLength is the operator's runtime.context_length override,
+	// which the footprint estimate must reflect (0 = catalog/default).
+	ContextLength int
+	// OnUnloaded is called after any unload (operator, idle, memory
+	// pressure) with the model id; the assign service reports `cached` to
+	// the coordinator from it. May be nil.
+	OnUnloaded func(id string)
+
+	memBudget  atomic.Int64 // configured budget.max_ram_mb; 0 = auto
+	idleUnload atomic.Int64 // nanoseconds; 0 = never
+
+	// admitMu serialises admission + runtime load so two loads cannot both
+	// pass the same headroom check. Downloads happen outside it.
+	admitMu sync.Mutex
 
 	mu        sync.Mutex
 	catalog   *models.Catalog
 	fetchedAt time.Time
 	downloads map[string]context.CancelFunc
 	loading   map[string]bool
+	loads     map[string]*loadInfo
 }
 
 // Catalog returns the model catalog, cached for catalogTTL. refresh forces a
@@ -91,6 +119,9 @@ func (s *Service) Catalog(ctx context.Context, refresh bool) (*models.Catalog, e
 	s.catalog = c
 	s.fetchedAt = time.Now()
 	s.mu.Unlock()
+	if s.Mgr != nil {
+		s.Mgr.Reconcile(c)
+	}
 	return c, nil
 }
 
@@ -187,11 +218,14 @@ func (s *Service) LoadInstance(ctx context.Context, id string) (rt.Instance, err
 // LoadInstanceOrigin is LoadInstance with ownership of a fresh download
 // (models.OriginMesh for coordinator placements: the fetch may then only
 // evict other mesh-placed models to make room).
+//
+// Memory admission happens after the artifact is on disk and before the
+// runtime starts: the load's estimated footprint must fit the budget,
+// idle instances are unloaded to make room (see admit), and ErrOverMemory
+// is returned — with the file kept — when they cannot.
 func (s *Service) LoadInstanceOrigin(ctx context.Context, id, origin string) (rt.Instance, error) {
-	for _, m := range s.Eng.Models() {
-		if m.Spec.ID == id {
-			return m.Instance, nil
-		}
+	if inst, ok := s.loadedInstance(id); ok {
+		return inst, nil
 	}
 
 	s.mu.Lock()
@@ -232,32 +266,87 @@ func (s *Service) LoadInstanceOrigin(ctx context.Context, id, origin string) (rt
 		ContextLength: int(pspec.GetContextLength()),
 		Embeddings:    pspec.GetEmbeddings(),
 	}
+
+	// Footprint estimate: file size (stat, not the catalog — a local
+	// artifact may differ) at the context the runtime will actually use.
+	var fileBytes int64
+	if fi, err := os.Stat(path); err == nil {
+		fileBytes = fi.Size()
+	} else {
+		fileBytes = int64(pspec.GetSizeBytes())
+	}
+	ctxLen := s.ContextLength
+	if ctxLen == 0 {
+		ctxLen = spec.ContextLength
+	}
+	estimate := memory.EstimateMB(fileBytes, int64(pspec.GetMinRamMb()), ctxLen, s.Budget.MaxConcurrent)
+
+	s.admitMu.Lock()
+	defer s.admitMu.Unlock()
+	if inst, ok := s.loadedInstance(id); ok {
+		return inst, nil // raced with another loader while downloading
+	}
+	if err := s.admit(ctx, id, estimate); err != nil {
+		s.log().Warn("model not loaded: over memory budget", "model", id, "estimate_mb", estimate, "err", err)
+		return nil, err
+	}
 	inst, err := s.Loader.Load(ctx, spec, s.Budget)
 	if err != nil {
 		return nil, err
 	}
+	s.mu.Lock()
+	if s.loads == nil {
+		s.loads = map[string]*loadInfo{}
+	}
+	s.loads[id] = &loadInfo{Origin: origin, EstimateMB: estimate}
+	s.mu.Unlock()
 	s.Eng.Register(spec, inst)
 	if s.OnLoaded != nil {
 		s.OnLoaded(inst)
 	}
-	s.log().Info("model loaded", "model", id)
+	s.log().Info("model loaded", "model", id, "origin", origin, "estimate_mb", estimate)
 	s.Events.Publish("models_changed", map[string]string{"model": id, "change": "loaded"})
+	actor := activity.ActorOperator
+	if origin == models.OriginMesh {
+		actor = activity.ActorMesh
+	}
+	s.Activity.Record(activity.KindLoaded, actor, id, fmt.Sprintf("loaded %s (~%d MB)", id, estimate), "")
 	return inst, nil
+}
+
+func (s *Service) loadedInstance(id string) (rt.Instance, bool) {
+	for _, m := range s.Eng.Models() {
+		if m.Spec.ID == id {
+			return m.Instance, true
+		}
+	}
+	return nil, false
 }
 
 // Unload removes a model from serving (the artifact stays cached).
 func (s *Service) Unload(ctx context.Context, id string) error {
+	return s.unload(ctx, id, activity.ActorOperator, "")
+}
+
+func (s *Service) unload(ctx context.Context, id, actor, reason string) error {
 	entry := s.Eng.Unregister(id)
 	if entry == nil {
 		return fmt.Errorf("%w: %q not loaded", engine.ErrModelNotFound, id)
 	}
+	s.mu.Lock()
+	delete(s.loads, id)
+	s.mu.Unlock()
 	shutCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	if err := entry.Instance.Shutdown(shutCtx); err != nil {
 		s.log().Warn("unload shutdown", "model", id, "err", err)
 	}
-	s.log().Info("model unloaded", "model", id)
+	s.log().Info("model unloaded", "model", id, "actor", actor, "reason", reason)
 	s.Events.Publish("models_changed", map[string]string{"model": id, "change": "unloaded"})
+	s.Activity.Record(activity.KindUnloaded, actor, id, "unloaded "+id, reason)
+	if s.OnUnloaded != nil {
+		s.OnUnloaded(id)
+	}
 	return nil
 }
 

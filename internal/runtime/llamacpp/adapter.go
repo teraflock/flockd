@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/teraflock/flockd/internal/memory"
 	rt "github.com/teraflock/flockd/internal/runtime"
 )
 
@@ -367,6 +368,14 @@ func (i *instance) Health(ctx context.Context) (rt.Stats, error) {
 	var hp llamaHealthProps
 	if json.NewDecoder(resp.Body).Decode(&hp) == nil {
 		st.QueueDepth = hp.SlotsProcessing
+	}
+	// Physical footprint of the child (not RSS: mmap'd weights shared with
+	// the page cache would be double counted). Feeds memory admission,
+	// /api/v1/status and the heartbeat's ram_used_mb.
+	if pid := i.sup.pid(); pid > 0 {
+		if mb, err := memory.ProcessFootprintMB(pid); err == nil {
+			st.MemUsedMB = mb
+		}
 	}
 	return st, nil
 }
