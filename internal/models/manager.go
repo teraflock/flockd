@@ -87,6 +87,10 @@ type Manager struct {
 	state         cacheState
 	progress      map[string]Progress
 	missingSeen   map[string]bool
+	// reconcileRejected remembers unindexed files that failed
+	// verification (keyed by id, size and mtime) so a 20 GB mismatch is
+	// hashed once, not on every catalog refresh.
+	reconcileRejected map[string]bool
 }
 
 // States a cache entry moves through.
@@ -152,6 +156,8 @@ func NewManager(dir string, maxDiskMB int64, log *slog.Logger) (*Manager, error)
 		state:       cacheState{Entries: map[string]*cacheEntry{}},
 		progress:    map[string]Progress{},
 		missingSeen: map[string]bool{},
+
+		reconcileRejected: map[string]bool{},
 	}
 	if raw, err := os.ReadFile(m.statePath()); err == nil {
 		if err := json.Unmarshal(raw, &m.state); err != nil {
@@ -266,7 +272,12 @@ func (m *Manager) EnsureOrigin(ctx context.Context, spec *typesv1.ModelSpec, ori
 
 	// The entry exists (state "downloading") for the whole transfer so the
 	// local API can report it; a crash leaves it behind, and the .partial
-	// file makes the next attempt resume instead of restart.
+	// file makes the next attempt resume instead of restart. The progress
+	// row is registered here too, before download() opens the .partial:
+	// it is what GCPartials reads to tell a live resume from an abandoned
+	// one, and download() only reports its first byte count after the
+	// HTTP round-trip — long enough for the hourly (or startup) GC to
+	// delete an old .partial out from under the resume.
 	m.mu.Lock()
 	m.state.Entries[spec.GetId()] = &cacheEntry{
 		ID:        spec.GetId(),
@@ -276,6 +287,7 @@ func (m *Manager) EnsureOrigin(ctx context.Context, spec *typesv1.ModelSpec, ori
 		State:     "downloading",
 		Origin:    origin,
 	}
+	m.progress[spec.GetId()] = Progress{TotalBytes: int64(spec.GetSizeBytes())}
 	m.saveLocked()
 	m.mu.Unlock()
 	actor := actorFor(origin)
@@ -795,9 +807,13 @@ func (m *Manager) Retain() []string {
 
 // Reconcile adopts artifacts that are in Dir but not in the index — a
 // models.json lost or rolled back, a file copied in by hand — as
-// operator-origin entries when their name is a known catalog id and their
-// size matches the catalog. Anything else is logged and left alone.
-// Returns the adopted ids.
+// operator-origin entries when their name is a known catalog id, their
+// size matches the catalog, and (when the catalog states a real hash)
+// their sha256 verifies. Hash pinning is what lets the mesh trust what a
+// node serves (SPEC §6), so a file that merely has the right name and
+// size is not enough; the hash is computed outside the lock, once per
+// distinct file. Anything else is logged and left alone. Returns the
+// adopted ids.
 func (m *Manager) Reconcile(cat *Catalog) []string {
 	if cat == nil {
 		return nil
@@ -806,9 +822,15 @@ func (m *Manager) Reconcile(cat *Catalog) []string {
 	if err != nil {
 		return nil
 	}
-	var adopted []string
+	type candidate struct {
+		id   string
+		sha  string
+		size int64
+		mod  time.Time
+		key  string
+	}
+	var cands []candidate
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	for _, de := range entries {
 		name := de.Name()
 		if de.IsDir() || !strings.HasSuffix(name, ".gguf") {
@@ -834,15 +856,42 @@ func (m *Manager) Reconcile(cat *Catalog) []string {
 			m.Log.Warn("unindexed model file has an unexpected size; not adopting it", "model", id, "size", fi.Size(), "catalog_size", cm.SizeBytes)
 			continue
 		}
-		m.state.Entries[id] = &cacheEntry{
-			ID: id, SHA256: cm.SHA256, SizeBytes: fi.Size(), LastUsed: fi.ModTime(),
+		key := fmt.Sprintf("%s:%d:%d", id, fi.Size(), fi.ModTime().UnixNano())
+		if m.reconcileRejected[key] {
+			continue
+		}
+		cands = append(cands, candidate{id: id, sha: cm.SHA256, size: fi.Size(), mod: fi.ModTime(), key: key})
+	}
+	m.mu.Unlock()
+
+	var adopted []string
+	for _, c := range cands {
+		if isRealSHA(c.sha) {
+			start := time.Now()
+			if err := verifySHA(m.Path(c.id), c.sha); err != nil {
+				m.Log.Warn("unindexed model file failed verification; not adopting it", "model", c.id, "err", err)
+				m.mu.Lock()
+				m.reconcileRejected[c.key] = true
+				m.mu.Unlock()
+				continue
+			}
+			m.Log.Info("unindexed model file verified", "model", c.id, "took", time.Since(start).Round(time.Millisecond))
+		} else {
+			m.Log.Warn("adopting unindexed model file without a catalog sha256: serving unverified", "model", c.id)
+		}
+		m.mu.Lock()
+		if _, known := m.state.Entries[c.id]; known {
+			m.mu.Unlock()
+			continue // a download of the same id started meanwhile
+		}
+		m.state.Entries[c.id] = &cacheEntry{
+			ID: c.id, SHA256: c.sha, SizeBytes: c.size, LastUsed: c.mod,
 			State: StateReady, Origin: OriginOperator,
 		}
-		adopted = append(adopted, id)
-		m.Log.Info("adopted model file found in the model dir", "model", id, "size_mb", fi.Size()/1024/1024)
-	}
-	if len(adopted) > 0 {
 		m.saveLocked()
+		m.mu.Unlock()
+		adopted = append(adopted, c.id)
+		m.Log.Info("adopted model file found in the model dir", "model", c.id, "size_mb", c.size/1024/1024)
 	}
 	return adopted
 }

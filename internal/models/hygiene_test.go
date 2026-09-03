@@ -2,8 +2,11 @@ package models
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -200,5 +203,106 @@ func TestReconcileAdoptsKnownCatalogFiles(t *testing.T) {
 	}
 	if len(rows) != 2 {
 		t.Fatalf("rows = %v", rows)
+	}
+}
+
+func TestGCPartialsSparesAResumeBeforeItsFirstByte(t *testing.T) {
+	blob := []byte("0123456789")
+	got := make(chan struct{}, 1)
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got <- struct{}{}
+		<-release // the window: request sent, .partial not yet opened
+		var off int
+		if _, err := parseRange(r.Header.Get("Range"), &off); err == nil && off < len(blob) {
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write(blob[off:])
+			return
+		}
+		_, _ = w.Write(blob)
+	}))
+	t.Cleanup(srv.Close)
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(unblock) // runs before srv.Close: a failing assertion must not hang on the handler
+	m, err := NewManager(t.TempDir(), 0, quietLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	partial := m.Path("slow") + ".partial"
+	if err := os.WriteFile(partial, blob[:4], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-30 * 24 * time.Hour)
+	if err := os.Chtimes(partial, old, old); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := m.Ensure(context.Background(), spec("slow", blob, srv.URL))
+		done <- err
+	}()
+	<-got
+	if removed := m.GCPartials(PartialMaxAge); len(removed) != 0 {
+		t.Fatalf("GC removed the partial of a download in flight: %v", removed)
+	}
+	if _, err := os.Stat(partial); err != nil {
+		t.Fatalf("partial gone: %v", err)
+	}
+	unblock()
+	if err := <-done; err != nil {
+		t.Fatalf("resume failed: %v", err)
+	}
+	if !m.Has("slow") {
+		t.Fatal("resumed download not ready")
+	}
+	// Nothing in flight any more: an old orphan is collected as before.
+	if err := os.WriteFile(partial, blob[:2], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(partial, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if removed := m.GCPartials(PartialMaxAge); len(removed) != 1 {
+		t.Fatalf("orphan not collected: %v", removed)
+	}
+}
+
+func TestReconcileVerifiesHashAndRemembersRejects(t *testing.T) {
+	m, _ := readyManager(t)
+	write := func(name, content string) {
+		if err := os.WriteFile(filepath.Join(m.Dir, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("good.gguf", "twelve bytes")
+	write("tampered.gguf", "twelve byteZ")
+	cat := &Catalog{Models: []CatalogModel{
+		{ID: "good", SHA256: shaOf([]byte("twelve bytes")), SizeBytes: 12},
+		{ID: "tampered", SHA256: shaOf([]byte("twelve bytes")), SizeBytes: 12},
+	}}
+	if got := m.Reconcile(cat); len(got) != 1 || got[0] != "good" {
+		t.Fatalf("Reconcile = %v, want only the verified file", got)
+	}
+	if !m.Has("good") || m.Has("tampered") {
+		t.Fatal("adoption disagrees with verification")
+	}
+	m.mu.Lock()
+	rejected := len(m.reconcileRejected)
+	m.mu.Unlock()
+	if rejected != 1 {
+		t.Fatalf("rejected files remembered = %d, want 1", rejected)
+	}
+	if got := m.Reconcile(cat); len(got) != 0 {
+		t.Fatalf("second Reconcile adopted %v", got)
+	}
+	// A replaced file (new mtime / size) is looked at again.
+	write("tampered.gguf", "twelve bytes")
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(filepath.Join(m.Dir, "tampered.gguf"), future, future); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.Reconcile(cat); len(got) != 1 || got[0] != "tampered" {
+		t.Fatalf("fixed file not adopted: %v", got)
 	}
 }
