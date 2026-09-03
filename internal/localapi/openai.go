@@ -1,6 +1,7 @@
 package localapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -212,7 +213,7 @@ func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
 
 // serveGeneration handles both streaming SSE and non-streaming modes.
 func (s *Server) serveGeneration(w http.ResponseWriter, r *http.Request, oa oaChatRequest, creq rt.CompletionRequest, object string) {
-	stream, err := s.deps.Engine.Complete(r.Context(), creq)
+	stream, err := s.complete(r.Context(), creq)
 	if err != nil {
 		writeEngineError(w, err)
 		return
@@ -356,7 +357,7 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stream, err := s.deps.Engine.Complete(r.Context(), rt.CompletionRequest{
+	stream, err := s.complete(r.Context(), rt.CompletionRequest{
 		ID:             newRequestID(),
 		Model:          req.Model,
 		Kind:           rt.KindEmbedding,
@@ -417,4 +418,22 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func newRequestID() string {
 	return fmt.Sprintf("%08x%08x", rand.Uint32(), rand.Uint32()) //nolint:gosec
+}
+
+// complete dispatches to the engine, loading the model first when it is on
+// disk but not in memory (idle-unloaded, or never loaded since the daemon
+// started). Memory admission applies: a load that does not fit returns
+// modelops.ErrOverMemory, surfaced as the usual engine error. Models that
+// are not on disk still fail with the not-loaded error rather than
+// triggering a download from a chat request.
+func (s *Server) complete(ctx context.Context, creq rt.CompletionRequest) (rt.TokenStream, error) {
+	stream, err := s.deps.Engine.Complete(ctx, creq)
+	if !errors.Is(err, engine.ErrModelNotFound) || creq.Model == "" ||
+		s.deps.ModelOps == nil || s.deps.Models == nil || !s.deps.Models.Has(creq.Model) {
+		return stream, err
+	}
+	if lerr := s.deps.ModelOps.Load(ctx, creq.Model); lerr != nil {
+		return nil, fmt.Errorf("%w: load on demand: %v", engine.ErrModelNotFound, lerr)
+	}
+	return s.deps.Engine.Complete(ctx, creq)
 }
