@@ -184,14 +184,6 @@ func run() error {
 		}
 	}
 	eng := engine.New(gov, stats, touch)
-	if mgr != nil {
-		mgr.IsLoaded = func(id string) bool {
-			_, ok := eng.Usage(id)
-			return ok
-		}
-		// Stale .partial GC and retention: on start, then hourly.
-		go mgr.RunHousekeeping(ctx)
-	}
 
 	budget := rt.ResourceBudget{
 		MaxVRAMPercent: cfg.Budget.MaxVRAMPercent,
@@ -238,11 +230,26 @@ func run() error {
 			"budget_mb", ops.MemoryBudgetMB(), "configured_mb", cfg.Budget.MaxRAMMB,
 			"total_mb", hw.GetRamTotalMb(), "unified", memory.Unified(hw),
 			"idle_unload", (time.Duration(cfg.Models.IdleUnloadS) * time.Second).String())
-		go ops.RunHousekeeping(ctx)
+		// Retention must never take a model that is loaded or on its way
+		// into memory (the window between the store handing out the path
+		// and the engine registering the instance).
+		mgr.IsLoaded = func(id string) bool {
+			if _, ok := eng.Usage(id); ok {
+				return true
+			}
+			return ops.Loading(id)
+		}
 	}
 
 	if err := loadDefaultModel(ctx, cfg, hw, ops, mgr, eng, budget, log); err != nil {
 		return err
+	}
+	// Store hygiene (stale .partial GC, retention) starts only now: its
+	// first pass runs immediately, and before the default model is loaded
+	// it would see nothing in use and could evict the very file
+	// loadDefaultModel is about to open — then re-download it.
+	if mgr != nil {
+		go mgr.RunHousekeeping(ctx)
 	}
 
 	// ---- mesh placement (plan 05) ----
@@ -266,8 +273,11 @@ func run() error {
 	go asg.Run(ctx)
 	if ops != nil {
 		// Anything that leaves memory but stays on disk is `cached` to the
-		// coordinator: warmable with a load, not a download.
+		// coordinator: warmable with a load, not a download. Wired before
+		// the idle-unload loop starts so the loop never reads a hook that
+		// is being written.
 		ops.OnUnloaded = asg.Unloaded
+		go ops.RunHousekeeping(ctx)
 	}
 
 	// ---- update check (plan 17 D.2) ----
@@ -536,7 +546,7 @@ func startTunnel(ctx context.Context, cfg config.Config, dialer tunnel.Dialer, a
 		}
 		if mgr != nil {
 			for _, i := range mgr.List() {
-				if !loaded[i.ID] && i.State == models.StateReady {
+				if !loaded[i.ID] && i.State == models.StateReady && asg.Cacheable(i.ID) {
 					out = append(out, &typesv1.ModelState{ModelId: i.ID, State: assign.StateCached})
 				}
 			}

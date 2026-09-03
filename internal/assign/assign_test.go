@@ -354,3 +354,52 @@ func TestOverMemoryReportsCachedThenLoadsOnResend(t *testing.T) {
 		t.Fatalf("unknown model reported: %v", st)
 	}
 }
+
+func TestCachedRespectsPolicyAndEvictionNeverSaysCached(t *testing.T) {
+	h := newHarness(t, 0, map[string][]byte{"mine": []byte("mine"), "theirs": []byte("theirs")})
+	if err := h.ops.Load(context.Background(), "mine"); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.ops.Unload(context.Background(), "mine"); err != nil {
+		t.Fatal(err)
+	}
+	if !h.svc.Cacheable("mine") {
+		t.Fatal("on-disk operator model under mesh_managed=true is not cacheable")
+	}
+	h.svc.Unloaded("mine")
+	if got := h.rep.states("mine"); fmt.Sprint(got) != "[cached]" {
+		t.Fatalf("reports = %v", got)
+	}
+	// Excluded: the mesh could only be declined, so it is not advertised.
+	h.mu.Lock()
+	h.policy = Policy{MeshManaged: true, Exclude: []string{"mine"}}
+	h.mu.Unlock()
+	if h.svc.Cacheable("mine") {
+		t.Fatal("excluded model reported cacheable")
+	}
+	h.svc.Unloaded("mine")
+	h.mu.Lock()
+	h.policy = Policy{MeshManaged: false}
+	h.mu.Unlock()
+	if h.svc.Cacheable("mine") {
+		t.Fatal("mesh_managed=false model reported cacheable")
+	}
+	h.svc.Unloaded("mine")
+	if got := h.rep.states("mine"); fmt.Sprint(got) != "[cached]" {
+		t.Fatalf("policy-blocked unloads reported: %v", got)
+	}
+
+	// A mesh eviction of a loaded placement goes straight to evicted —
+	// never a `cached` in between that would tell the coordinator the
+	// model is warm right before it is deleted.
+	h.mu.Lock()
+	h.policy = Policy{MeshManaged: true}
+	h.mu.Unlock()
+	h.svc.Apply(context.Background(), assignMsg(h.spec("theirs")))
+	waitFor(t, "theirs loaded", func() bool { return h.loaded("theirs") })
+	h.svc.Apply(context.Background(), &tunnelv1.ModelAssignment{EvictModelIds: []string{"theirs"}})
+	waitFor(t, "theirs evicted", func() bool { return !h.loaded("theirs") })
+	if got := h.rep.states("theirs"); fmt.Sprint(got) != "[assigned downloading ready evicted]" {
+		t.Fatalf("eviction reports = %v", got)
+	}
+}

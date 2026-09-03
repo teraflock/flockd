@@ -11,8 +11,10 @@ import (
 )
 
 // Linux: Pss from /proc/<pid>/smaps_rollup (kernel 4.14+). Proportional set
-// size splits shared pages between the processes mapping them, so weights
-// shared with the page cache are not double counted the way Rss does.
+// size apportions pages shared between processes (two llama-servers on the
+// same GGUF each count half), so the sum over runtimes is what the models
+// actually occupy; a single mapper's clean file-backed pages still count,
+// as they do in macOS's footprint.
 func processFootprintBytes(pid int) (uint64, error) {
 	return pssFromSmapsRollup(fmt.Sprintf("/proc/%d/smaps_rollup", pid))
 }

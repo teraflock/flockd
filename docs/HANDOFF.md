@@ -142,20 +142,31 @@ what is loaded versus merely on disk.
   host footprint misses VRAM — TODO(nvml)).
 - **Admission** (`modelops.LoadInstanceOrigin`): download first (inside
   `max_disk_mb`), then, under `admitMu`, if `used + estimate > budget`
-  unload idle instances — mesh-placed before operator-placed, LRU by last
-  request within each group, never the default model, never one with
-  requests in flight — and if still over, fail with
-  `modelops.ErrOverMemory`. The artifact stays on disk.
+  unload idle instances — mesh-placed before operator-placed (the *store's*
+  origin, so a coordinator re-send of a model the operator installed does
+  not make it mesh-placed), LRU by last request within each group, never
+  the default model, never one with requests in flight — and if still
+  over, fail with `modelops.ErrOverMemory`. The artifact stays on disk.
+  "In flight" is decided by `engine.UnregisterIdle`, which checks and
+  removes under the same lock the request path routes with (a request
+  counts from lookup, including its wait in governor admission), so a
+  daemon-initiated unload can never hit a request; the operator's explicit
+  unload stays forced.
 - **Idle unload**: `models.idle_unload_s` (default 900, 0 = never, default
   model exempt); `modelops.RunHousekeeping` unloads instances idle past it.
   `ModelRow.idle_since` shows when an idle instance last served.
 - **`cached` (the coordinator contract)**: `ModelState.state` is a free
   string, so no proto change. The node reports `cached` for any complete
   artifact on disk that is not loaded — mesh *and* operator origin, since
-  both are legitimately serveable — in Hello/heartbeat model lists, and as
-  a one-shot `ModelStateUpdate` when a placement could not be admitted for
-  memory (`assign` maps `ErrOverMemory` → `cached`, never `declined`) and
-  when a model is idle-unloaded (`modelops.OnUnloaded → assign.Unloaded`).
+  both are legitimately serveable — provided the policy would let a mesh
+  assignment load it (`assign.Cacheable`: `mesh_managed` on and not in
+  `models.exclude`; otherwise the assignment could only be declined) — in
+  Hello/heartbeat model lists, and as a one-shot `ModelStateUpdate` when a
+  placement could not be admitted for memory (`assign` maps
+  `ErrOverMemory` → `cached`, never `declined`) and when a model is
+  idle-unloaded (`modelops.OnUnloaded → assign.Unloaded`). A model being
+  deleted (operator `DELETE`, mesh eviction) goes through
+  `modelops.Remove`, which never reports `cached` on the way out.
   `ready` in a heartbeat now strictly means loaded and serving. When the
   coordinator re-sends a `ModelAssignment` for a `cached` model the node
   loads it from disk (no `downloading` report) and reports `ready`; the
@@ -167,9 +178,13 @@ what is loaded versus merely on disk.
   alone; `max_disk_mb` declines (`does not fit in max_disk_mb`) still are.
 - **Disk store**: `Manager.List()` stats files (`missing` state, dropped
   from the budget), `Stats()` sizes the store for `status.disk`,
-  `GCPartials` (7 days) and `Retain` (`models.retention_days`) run on
-  start and hourly, `Reconcile` adopts unindexed `<id>.gguf` files that
-  match a catalog entry. `max_disk_mb`, `retention_days`, `max_ram_mb` and
+  `GCPartials` (7 days; a download registers its progress row before it
+  opens the `.partial`, so a resume is never collected under it) and
+  `Retain` (`models.retention_days`; never a loaded or *loading* model)
+  run once the default model is loaded and then hourly, `Reconcile` adopts
+  unindexed `<id>.gguf` files whose name, size and — when the catalog has
+  a real hash — sha256 match a catalog entry (verified outside the lock,
+  once per distinct file). `max_disk_mb`, `retention_days`, `max_ram_mb` and
   `idle_unload_seconds` are live via `PUT /api/v1/limits` and persist in
   `limits.toml`.
 - **Activity feed** (`internal/activity`): a 200-row ring of what happened

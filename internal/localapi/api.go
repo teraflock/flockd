@@ -86,10 +86,7 @@ func (s *Server) status() gen.Status {
 	}
 	if ops := s.deps.ModelOps; ops != nil {
 		m := ops.Memory()
-		resp.Memory = gen.Memory{UsedMb: m.UsedMB, BudgetMb: m.BudgetMB, TotalMb: m.TotalMB}
-		if resp.Memory.TotalMb == 0 && hw != nil {
-			resp.Memory.TotalMb = int64(s.deps.Hardware.GetRamTotalMb())
-		}
+		resp.Memory.UsedMb, resp.Memory.BudgetMb = m.UsedMB, m.BudgetMB
 	}
 	if mgr := s.deps.Models; mgr != nil {
 		d := mgr.Stats()
@@ -293,12 +290,17 @@ func (s *Server) DeleteModel(w http.ResponseWriter, r *http.Request, id gen.Mode
 		writeOpenAIError(w, http.StatusNotImplemented, "invalid_request_error", "model cache not enabled (mock runtime)")
 		return
 	}
+	var err error
 	if s.deps.ModelOps != nil {
-		_ = s.deps.ModelOps.Unload(r.Context(), id) // not-loaded is fine
-	} else if entry := s.deps.Engine.Unregister(id); entry != nil {
-		_ = entry.Instance.Shutdown(r.Context())
+		// Unload + delete without a `cached` report in between.
+		err = s.deps.ModelOps.Remove(r.Context(), id)
+	} else {
+		if entry := s.deps.Engine.Unregister(id); entry != nil {
+			_ = entry.Instance.Shutdown(r.Context())
+		}
+		err = s.deps.Models.Remove(id)
 	}
-	if err := s.deps.Models.Remove(id); err != nil {
+	if err != nil {
 		writeOpenAIError(w, http.StatusNotFound, "invalid_request_error", err.Error())
 		return
 	}

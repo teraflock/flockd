@@ -249,12 +249,9 @@ func (s *Service) evict(ctx context.Context, id string) {
 		s.log().Warn("ignoring mesh eviction of a pinned model", "model", id)
 		return
 	}
-	if s.loaded(id) {
-		if err := s.Ops.Unload(ctx, id); err != nil {
-			s.log().Warn("evict: unload failed", "model", id, "err", err)
-		}
-	}
-	if err := s.Mgr.Remove(id); err != nil {
+	// Unload and delete in one step: the model must not be reported
+	// `cached` between leaving memory and leaving disk.
+	if err := s.Ops.Remove(ctx, id); err != nil {
 		s.log().Warn("evict: remove failed", "model", id, "err", err)
 		return
 	}
@@ -267,13 +264,27 @@ func (s *Service) evict(ctx context.Context, id string) {
 // Unloaded is the modelops OnUnloaded hook: a model that left memory but
 // is still on disk is reported `cached` so the coordinator knows it can
 // be warmed with a load, not a download. Operator and mesh models alike —
-// both are legitimately serveable.
+// both are legitimately serveable — as long as the policy would let the
+// mesh load it (Cacheable).
 func (s *Service) Unloaded(id string) {
-	if s.Mgr == nil || !s.Mgr.Has(id) {
+	if !s.Cacheable(id) {
 		return
 	}
 	s.report(&typesv1.ModelState{ModelId: id, State: StateCached})
 	s.publish(id, StateCached, "")
+}
+
+// Cacheable reports whether id should be advertised to the coordinator as
+// `cached`: complete on disk, and loadable by a mesh assignment under the
+// operator's policy (mesh-managed on, not excluded, a real model store).
+// Advertising a model the node would only decline invites assignments
+// that go nowhere.
+func (s *Service) Cacheable(id string) bool {
+	if s.Ops == nil || s.Mgr == nil || !s.Mgr.Has(id) {
+		return false
+	}
+	pol := s.Policy()
+	return pol.MeshManaged && !slices.Contains(pol.Exclude, id)
 }
 
 // process runs one queued assignment to ready/failed/declined.
@@ -334,10 +345,9 @@ func (s *Service) process(ctx context.Context, id string) {
 	if evicted {
 		// The coordinator withdrew it while the download ran: honour that
 		// rather than announce a replica nobody wants.
-		if err := s.Ops.Unload(ctx, id); err != nil {
-			s.log().Warn("post-evict unload failed", "model", id, "err", err)
+		if err := s.Ops.Remove(ctx, id); err != nil {
+			s.log().Warn("post-evict remove failed", "model", id, "err", err)
 		}
-		_ = s.Mgr.Remove(id)
 		return
 	}
 	s.report(&typesv1.ModelState{ModelId: id, State: StateReady})
