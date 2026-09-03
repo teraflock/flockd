@@ -71,3 +71,19 @@ func TestProcessFootprintSelf(t *testing.T) {
 		t.Fatal("bogus pid measured without error")
 	}
 }
+
+func TestResolveContext(t *testing.T) {
+	cases := []struct{ override, model, maxCtx, want int }{
+		{0, 131072, 16384, 16384}, // catalog window capped
+		{0, 8192, 16384, 8192},    // small model keeps its own window
+		{4096, 131072, 16384, 4096},
+		{65536, 131072, 16384, 16384}, // override is capped too
+		{0, 131072, 0, 131072},        // no cap
+		{0, 0, 16384, 16384},          // unknown model window: pin the cap
+	}
+	for _, c := range cases {
+		if got := ResolveContext(c.override, c.model, c.maxCtx); got != c.want {
+			t.Errorf("ResolveContext(%d,%d,%d) = %d, want %d", c.override, c.model, c.maxCtx, got, c.want)
+		}
+	}
+}

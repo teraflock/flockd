@@ -28,6 +28,9 @@ type Adapter struct {
 	Log    *slog.Logger
 	// ContextLength override (0 = model/catalog default).
 	ContextLength int
+	// MaxContext caps the window passed as --ctx-size (0 = no cap); see
+	// config.Runtime.MaxContext.
+	MaxContext int
 }
 
 // gpuAccels are backends where llama-server offloads layers to a device.
@@ -84,10 +87,7 @@ func (a *Adapter) Load(ctx context.Context, m rt.ModelSpec, res rt.ResourceBudge
 		return nil, err
 	}
 
-	ctxLen := a.ContextLength
-	if ctxLen == 0 {
-		ctxLen = m.ContextLength
-	}
+	ctxLen := memory.ResolveContext(a.ContextLength, m.ContextLength, a.MaxContext)
 	args := []string{
 		"-m", m.Path,
 		"--host", "127.0.0.1",

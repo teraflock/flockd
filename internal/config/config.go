@@ -58,8 +58,15 @@ type Runtime struct {
 	// MockTokensPerSec controls the synthetic generation speed of the mock
 	// runtime (tests, --standalone demos).
 	MockTokensPerSec float64 `koanf:"mock_tokens_per_sec"`
-	// ContextLength override passed to llama-server (0 = model default).
+	// ContextLength override passed to llama-server (0 = model default,
+	// capped by MaxContext).
 	ContextLength int `koanf:"context_length"`
+	// MaxContext caps the context window handed to llama-server, in
+	// tokens, shared across the `--parallel` slots (0 = no cap). The KV
+	// cache scales with it: a 3B model at its 131072-token training window
+	// reserves ~14 GB, at 16384 about 1.8 GB. Per-request context is
+	// MaxContext / budget.max_concurrent.
+	MaxContext int `koanf:"max_context"`
 }
 
 type Governor struct {
@@ -162,6 +169,7 @@ func Default() Config {
 			// runtime.llama_server_path overrides for self-built binaries.
 			ArtifactManifestURL: "https://teraflock-downloads.s3.amazonaws.com/runtimes/llamacpp/manifest.json",
 			MockTokensPerSec:    120,
+			MaxContext:          16384,
 		},
 		Governor: Governor{
 			ServePolicy:    "idle-only",

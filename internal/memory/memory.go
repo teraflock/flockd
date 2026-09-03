@@ -58,6 +58,23 @@ const (
 // catalog value is authoritative for the weights but was written for a
 // specific context, so a much larger operator-configured context still
 // raises the estimate. ctx <= 0 uses DefaultContext; parallel < 1 is 1.
+// ResolveContext is the context window a runtime is launched with: the
+// operator's explicit override if set, else the model's own length, then
+// capped by maxCtx (0 = no cap). Both the llama.cpp adapter and the
+// admission estimate go through it so they agree on the KV-cache size.
+func ResolveContext(override, model, maxCtx int) int {
+	ctx := override
+	if ctx <= 0 {
+		ctx = model
+	}
+	if maxCtx > 0 && (ctx <= 0 || ctx > maxCtx) {
+		// Unknown model window: pin the cap rather than let llama-server
+		// pick (recent builds default to the model's full training window).
+		ctx = maxCtx
+	}
+	return ctx
+}
+
 func EstimateMB(fileBytes int64, minRAMMB int64, ctx, parallel int) int64 {
 	if ctx <= 0 {
 		ctx = DefaultContext

@@ -39,8 +39,14 @@ llama_server_path = ""
 artifact_manifest_url = "https://teraflock-downloads.s3.amazonaws.com/runtimes/llamacpp/manifest.json"
 # Synthetic generation speed for kind=mock (tests, demos).
 mock_tokens_per_sec = 120
-# --ctx-size override passed to llama-server (0 = model default).
+# --ctx-size override passed to llama-server (0 = model default, capped by
+# max_context).
 context_length = 0
+# Cap on the context window handed to llama-server, in tokens, shared across
+# the budget.max_concurrent slots (0 = no cap). The KV cache scales with it:
+# a 3B model at its 131072-token training window reserves ~14 GB of memory,
+# at 16384 about 1.8 GB. Per-request context is max_context / max_concurrent.
+max_context = 16384
 
 [governor]
 serve_policy     = "idle-only"  # always | idle-only | scheduled

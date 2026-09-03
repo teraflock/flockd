@@ -206,6 +206,7 @@ func run() error {
 			VRAMMB:        hardware.BestVRAMMB(hw),
 			Log:           log,
 			ContextLength: cfg.Runtime.ContextLength,
+			MaxContext:    cfg.Runtime.MaxContext,
 		}
 		ops = &modelops.Service{
 			Mgr:           mgr,
@@ -220,6 +221,7 @@ func run() error {
 			Activity:      act,
 			Hardware:      hw,
 			ContextLength: cfg.Runtime.ContextLength,
+			MaxContext:    cfg.Runtime.MaxContext,
 		}
 		// Memory admission (plan 17 A): loads must fit budget.max_ram_mb
 		// (0 = auto: half of unified memory); idle instances are unloaded

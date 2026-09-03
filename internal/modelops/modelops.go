@@ -69,6 +69,8 @@ type Service struct {
 	// discrete memory. Nil disables admission unless a budget is
 	// configured explicitly (SetMemoryBudgetMB).
 	Hardware *typesv1.CapabilityProfile
+	// MaxContext mirrors runtime.max_context (0 = no cap).
+	MaxContext int
 	// ContextLength is the operator's runtime.context_length override,
 	// which the footprint estimate must reflect (0 = catalog/default).
 	ContextLength int
@@ -282,10 +284,7 @@ func (s *Service) LoadInstanceOrigin(ctx context.Context, id, origin string) (rt
 	} else {
 		fileBytes = int64(pspec.GetSizeBytes())
 	}
-	ctxLen := s.ContextLength
-	if ctxLen == 0 {
-		ctxLen = spec.ContextLength
-	}
+	ctxLen := memory.ResolveContext(s.ContextLength, spec.ContextLength, s.MaxContext)
 	estimate := memory.EstimateMB(fileBytes, int64(pspec.GetMinRamMb()), ctxLen, s.Budget.MaxConcurrent)
 
 	s.admitMu.Lock()
