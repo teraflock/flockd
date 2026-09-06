@@ -52,12 +52,18 @@ const (
 // EstimateMB predicts the physical footprint of loading a model before it
 // is loaded:
 //
-//	estimate = file_bytes × 1.15 + ctx × parallel × (file_bytes / 65536) + 256 MB
+//	estimate = file_bytes × 1.15 + ctx × (file_bytes / 65536) + 256 MB
+//
+// ctx is the total --ctx-size handed to llama-server. It is *not*
+// multiplied by the slot count: llama-server splits --ctx-size across its
+// --parallel slots (each slot gets ctx / parallel), so the KV cache is
+// sized by the total context exactly once. The 1.15 weights factor and the
+// 256 MB overhead keep the figure slightly conservative.
 //
 // When the catalog states min_ram_mb the larger of the two wins: the
 // catalog value is authoritative for the weights but was written for a
 // specific context, so a much larger operator-configured context still
-// raises the estimate. ctx <= 0 uses DefaultContext; parallel < 1 is 1.
+// raises the estimate. ctx <= 0 uses DefaultContext.
 // ResolveContext is the context window a runtime is launched with: the
 // operator's explicit override if set, else the model's own length, then
 // capped by maxCtx (0 = no cap). Both the llama.cpp adapter and the
@@ -75,15 +81,12 @@ func ResolveContext(override, model, maxCtx int) int {
 	return ctx
 }
 
-func EstimateMB(fileBytes int64, minRAMMB int64, ctx, parallel int) int64 {
+func EstimateMB(fileBytes int64, minRAMMB int64, ctx int) int64 {
 	if ctx <= 0 {
 		ctx = DefaultContext
 	}
-	if parallel < 1 {
-		parallel = 1
-	}
 	weights := float64(fileBytes) * weightsFactor
-	kv := float64(ctx) * float64(parallel) * (float64(fileBytes) / kvBytesPerTokenDivisor)
+	kv := float64(ctx) * (float64(fileBytes) / kvBytesPerTokenDivisor)
 	est := int64((weights+kv)/MiB) + runtimeOverheadMB
 	if minRAMMB > est {
 		return minRAMMB

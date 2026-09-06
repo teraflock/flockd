@@ -29,14 +29,26 @@ type loadInfo struct {
 	Origin     string
 	EstimateMB int64 // pre-load prediction (memory.EstimateMB)
 	MeasuredMB int64 // last runtime footprint sample; 0 = not yet measured
+	LoadedAt   time.Time
 }
 
 // MemorySnapshot is the /api/v1/status memory view and the heartbeat's
-// ram_used_mb source.
+// ram_used_mb / vram_used_mb source.
 type MemorySnapshot struct {
+	// UsedMB is what admission charges against BudgetMB: the sum of
+	// per-model footprints, or on a discrete GPU with a VRAM sample the
+	// card's measured usage (plus estimates for loads newer than it).
 	UsedMB   int64
 	BudgetMB int64
 	TotalMB  int64
+	// HostMB is the runtimes' host-side footprint (measured where the
+	// platform supports it, else the estimate) — the heartbeat's
+	// ram_used_mb. Equal to UsedMB on unified memory.
+	HostMB int64
+	// VRAMMB is the last nvidia-smi sample (discrete GPUs); VRAMMeasured
+	// is false when no sample exists and callers fall back to UsedMB.
+	VRAMMB       int64
+	VRAMMeasured bool
 	// Models is the per-model footprint (measured when available, else the
 	// estimate) for every loaded model.
 	Models map[string]int64
@@ -73,15 +85,20 @@ func (s *Service) Memory() MemorySnapshot {
 	for _, m := range s.Eng.Models() {
 		mb := s.footprintLocked(m.Spec.ID)
 		snap.Models[m.Spec.ID] = mb
-		snap.UsedMB += mb
+		snap.HostMB += s.hostFootprintLocked(m.Spec.ID)
+	}
+	snap.UsedMB = s.usedLocked()
+	if !s.vramSampledAt.IsZero() {
+		snap.VRAMMB, snap.VRAMMeasured = s.vramUsedMB, true
 	}
 	return snap
 }
 
 // footprintLocked is a loaded model's current charge against the budget:
 // the measured footprint once one exists, else the pre-load estimate. On
-// discrete GPUs the host-side measurement misses VRAM, so the estimate
-// stays (TODO(nvml): read per-process VRAM use).
+// discrete GPUs the host-side measurement misses VRAM, so the per-model
+// figure stays the estimate; the card-wide nvidia-smi sample replaces the
+// sum in usedLocked instead.
 func (s *Service) footprintLocked(id string) int64 {
 	li, ok := s.loads[id]
 	if !ok {
@@ -93,14 +110,56 @@ func (s *Service) footprintLocked(id string) int64 {
 	return li.EstimateMB
 }
 
-func (s *Service) usedMB() int64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// hostFootprintLocked is the runtime process's host memory (measured when
+// available, else the estimate), whatever the GPU kind.
+func (s *Service) hostFootprintLocked(id string) int64 {
+	li, ok := s.loads[id]
+	if !ok {
+		return 0
+	}
+	if li.MeasuredMB > 0 {
+		return li.MeasuredMB
+	}
+	return li.EstimateMB
+}
+
+// usedLocked is the total charged against the budget. On a discrete GPU
+// with a VRAM sample it is the card's measured usage plus the estimate of
+// every model loaded since that sample (the card has not been re-read
+// yet); otherwise the sum of per-model footprints. A model unloaded since
+// the sample still counts until the next tick — the conservative side.
+func (s *Service) usedLocked() int64 {
 	var used int64
+	if memory.Discrete(s.Hardware) && !s.vramSampledAt.IsZero() {
+		used = s.vramUsedMB
+		for _, m := range s.Eng.Models() {
+			if li, ok := s.loads[m.Spec.ID]; ok && li.LoadedAt.After(s.vramSampledAt) {
+				used += li.EstimateMB
+			}
+		}
+		return used
+	}
 	for _, m := range s.Eng.Models() {
 		used += s.footprintLocked(m.Spec.ID)
 	}
 	return used
+}
+
+func (s *Service) usedMB() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.usedLocked()
+}
+
+// vramSampler returns the VRAM sampler for this node's hardware, building
+// the default one on first use.
+func (s *Service) vramSampler() *memory.VRAMSampler {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.VRAM == nil {
+		s.VRAM = memory.NewVRAMSampler(s.Hardware, s.Log)
+	}
+	return s.VRAM
 }
 
 // admit makes room for a load of estimateMB: unloads idle instances (mesh
@@ -177,7 +236,9 @@ func (s *Service) admit(ctx context.Context, id string, estimateMB int64) error 
 
 // Measure samples every loaded runtime's footprint and replaces the
 // estimates. Cheap on macOS/Linux (one syscall / one procfs read per
-// process, inside Instance.Health).
+// process, inside Instance.Health). On a discrete GPU it also takes one
+// nvidia-smi sample of used VRAM (≤ 1 call per housekeeping tick, 3 s
+// timeout; a failure keeps the previous figure or the estimates).
 func (s *Service) Measure(ctx context.Context) {
 	for _, m := range s.Eng.Models() {
 		hctx, cancel := context.WithTimeout(ctx, 3*time.Second)
@@ -190,6 +251,15 @@ func (s *Service) Measure(ctx context.Context) {
 		if li, ok := s.loads[m.Spec.ID]; ok {
 			li.MeasuredMB = st.MemUsedMB
 		}
+		s.mu.Unlock()
+	}
+	if !memory.Discrete(s.Hardware) {
+		return
+	}
+	at := time.Now()
+	if mb, ok := s.vramSampler().Sample(ctx); ok {
+		s.mu.Lock()
+		s.vramUsedMB, s.vramSampledAt = mb, at
 		s.mu.Unlock()
 	}
 }

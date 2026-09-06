@@ -557,15 +557,22 @@ func startTunnel(ctx context.Context, cfg config.Config, dialer tunnel.Dialer, a
 	}
 	// Measured model memory (physical footprint of the runtime children),
 	// so placement can read real headroom. Unified memory: VRAM = RAM.
+	// Discrete GPUs: RAM is the host footprint, VRAM the nvidia-smi
+	// sample when one exists (else the estimate admission charges).
 	memUsed := func() (ram, vram uint64) {
 		if ops == nil {
 			return 0, 0
 		}
-		used := uint64(max(ops.Memory().UsedMB, 0))
-		if memory.Unified(hw) || !memory.Discrete(hw) {
+		snap := ops.Memory()
+		used := uint64(max(snap.UsedMB, 0))
+		if !memory.Discrete(hw) {
 			return used, used
 		}
-		return used, 0 // TODO(nvml): per-process VRAM on discrete GPUs
+		vram = used
+		if snap.VRAMMeasured {
+			vram = uint64(max(snap.VRAMMB, 0))
+		}
+		return uint64(max(snap.HostMB, 0)), vram
 	}
 
 	client, err := tunnel.NewClient(tunnel.Options{

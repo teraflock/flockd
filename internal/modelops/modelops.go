@@ -78,6 +78,9 @@ type Service struct {
 	// pressure) with the model id; the assign service reports `cached` to
 	// the coordinator from it. May be nil.
 	OnUnloaded func(id string)
+	// VRAM measures used VRAM on discrete GPUs (nvidia-smi). Nil = built
+	// from Hardware on first use; tests inject one.
+	VRAM *memory.VRAMSampler
 
 	memBudget  atomic.Int64 // configured budget.max_ram_mb; 0 = auto
 	idleUnload atomic.Int64 // nanoseconds; 0 = never
@@ -92,6 +95,9 @@ type Service struct {
 	downloads map[string]context.CancelFunc
 	loading   map[string]bool
 	loads     map[string]*loadInfo
+	// Last VRAM sample (discrete GPUs); zero time = never sampled.
+	vramUsedMB    int64
+	vramSampledAt time.Time
 }
 
 // Catalog returns the model catalog, cached for catalogTTL. refresh forces a
@@ -285,7 +291,7 @@ func (s *Service) LoadInstanceOrigin(ctx context.Context, id, origin string) (rt
 		fileBytes = int64(pspec.GetSizeBytes())
 	}
 	ctxLen := memory.ResolveContext(s.ContextLength, spec.ContextLength, s.MaxContext)
-	estimate := memory.EstimateMB(fileBytes, int64(pspec.GetMinRamMb()), ctxLen, s.Budget.MaxConcurrent)
+	estimate := memory.EstimateMB(fileBytes, int64(pspec.GetMinRamMb()), ctxLen)
 
 	s.admitMu.Lock()
 	defer s.admitMu.Unlock()
@@ -304,7 +310,7 @@ func (s *Service) LoadInstanceOrigin(ctx context.Context, id, origin string) (rt
 	if s.loads == nil {
 		s.loads = map[string]*loadInfo{}
 	}
-	s.loads[id] = &loadInfo{Origin: origin, EstimateMB: estimate}
+	s.loads[id] = &loadInfo{Origin: origin, EstimateMB: estimate, LoadedAt: time.Now()}
 	s.mu.Unlock()
 	s.Eng.Register(spec, inst)
 	if s.OnLoaded != nil {

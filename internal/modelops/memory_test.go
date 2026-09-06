@@ -13,8 +13,10 @@ import (
 	"time"
 
 	"github.com/teraflock/flockd/internal/engine"
+	"github.com/teraflock/flockd/internal/memory"
 	"github.com/teraflock/flockd/internal/models"
 	rt "github.com/teraflock/flockd/internal/runtime"
+	typesv1 "github.com/teraflock/proto/gen/go/flock/types/v1"
 )
 
 // memHarness serves a catalog whose entries carry min_ram_mb so the
@@ -374,5 +376,50 @@ func TestDefaultModelLoadsPastBudget(t *testing.T) {
 	}
 	if err := svc.Load(ctx, "other"); !errors.Is(err, ErrOverMemory) {
 		t.Fatalf("non-default over budget: %v, want ErrOverMemory", err)
+	}
+}
+
+// On a discrete NVIDIA GPU the nvidia-smi sample, not the host footprint
+// or the sum of estimates, is what admission charges; loads newer than
+// the sample add their estimate until the next tick.
+func TestDiscreteAdmissionUsesVRAMSample(t *testing.T) {
+	svc, eng := memHarness(t, map[string]int64{"a": 4000, "b": 4000}, 0)
+	svc.Hardware = &typesv1.CapabilityProfile{RamTotalMb: 32768, Gpus: []*typesv1.GpuInfo{{Vendor: "nvidia", VramMb: 24576}}}
+	svc.SetMemoryBudgetMB(10000)
+	vram := int64(9000)
+	svc.VRAM = memory.NewVRAMSampler(svc.Hardware, quietLog())
+	svc.VRAM.Query = func(context.Context) (int64, error) { return vram, nil }
+
+	if err := svc.Load(context.Background(), "a"); err != nil { // default: never evicted
+		t.Fatal(err)
+	}
+	if m := svc.Memory(); m.UsedMB != 4000 || m.VRAMMeasured {
+		t.Fatalf("before any sample: %+v", m)
+	}
+	svc.Measure(context.Background())
+	m := svc.Memory()
+	if m.UsedMB != 9000 || !m.VRAMMeasured || m.VRAMMB != 9000 {
+		t.Fatalf("after sample: %+v", m)
+	}
+	if m.HostMB != 512 { // the mock runtime's host footprint, not VRAM
+		t.Fatalf("host footprint = %d, want the measured 512", m.HostMB)
+	}
+	// 9000 measured + 4000 estimate > 10000: over budget, nothing idle to
+	// unload (a is the default).
+	if err := svc.Load(context.Background(), "b"); !errors.Is(err, ErrOverMemory) {
+		t.Fatalf("load b with 9000 MB of VRAM in use: %v", err)
+	}
+	// The card frees up: the next tick admits b, charged at its estimate
+	// on top of the sample until the card is read again.
+	vram = 2000
+	svc.Measure(context.Background())
+	if err := svc.Load(context.Background(), "b"); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadedIDs(eng); fmt.Sprint(got) != "[a b]" {
+		t.Fatalf("loaded = %v", got)
+	}
+	if m := svc.Memory(); m.UsedMB != 6000 {
+		t.Fatalf("after loading b: used = %d, want 2000 sample + 4000 estimate", m.UsedMB)
 	}
 }

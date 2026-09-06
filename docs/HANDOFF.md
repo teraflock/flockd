@@ -132,14 +132,22 @@ what is loaded versus merely on disk.
 - **Budget**: `budget.max_ram_mb` (0 = auto: half of physical RAM on
   unified memory / CPU-only, `vram × max_vram_percent` on discrete GPUs).
   `internal/memory` owns the derivation, the pre-load estimate
-  (`EstimateMB`: file × 1.15 + KV term + 256 MB, or catalog `min_ram_mb`
-  if larger) and per-process measurement (`proc_pid_rusage`
+  (`EstimateMB`: file × 1.15 + ctx × file/65536 + 256 MB, or catalog
+  `min_ram_mb` if larger — the KV term uses the *total* `--ctx-size` once,
+  since llama-server splits it across slots; it was wrongly × parallel
+  before) and per-process measurement (`proc_pid_rusage`
   `ri_phys_footprint` on macOS via a cgo-free libSystem trampoline — the
   same mechanism x/sys/unix uses; `smaps_rollup` Pss on Linux; unsupported
   on Windows, estimate stays). The llama.cpp adapter fills
   `Stats.MemUsedMB` from it in `Health()`; modelops samples every 30 s and
-  replaces estimates with measurements (except on discrete GPUs, where the
-  host footprint misses VRAM — TODO(nvml)).
+  replaces estimates with measurements. On discrete GPUs the host
+  footprint misses VRAM, so `memory.VRAMSampler` runs `nvidia-smi
+  --query-gpu=memory.used` once per tick (3 s timeout, summed across
+  cards, failures keep the previous figure); that card-wide sample — plus
+  the estimate of any model loaded since it — is what admission charges
+  and what the heartbeat's `vram_used_mb` carries, while `ram_used_mb` is
+  the host footprint. AMD is `TODO(rocm-smi)` (one log line, estimates
+  stay); no tool on PATH is also one log line.
 - **Admission** (`modelops.LoadInstanceOrigin`): download first (inside
   `max_disk_mb`), then, under `admitMu`, if `used + estimate > budget`
   unload idle instances — mesh-placed before operator-placed (the *store's*

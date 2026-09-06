@@ -10,22 +10,23 @@ import (
 
 func TestEstimateMB(t *testing.T) {
 	const gb = 1024 * MiB
-	// 5 GB Q4 8B at 8k ctx, 2 slots: 5.75 GB weights + 16384 × 80 KB KV +
-	// overhead — a little over 7 GB, which is what such a load measures.
-	got := EstimateMB(5*gb, 0, 8192, 2)
-	if got < 7000 || got > 7600 {
-		t.Fatalf("EstimateMB(5GB, 8k, 2) = %d MB, want ~7.2 GB", got)
+	// 5 GB Q4 8B at a total --ctx-size of 8k: 5.75 GB weights + 8192 ×
+	// 80 KB KV (the context is split across slots, so it is counted once,
+	// whatever --parallel is) + 256 MB overhead — about 6.7 GB.
+	got := EstimateMB(5*gb, 0, 8192)
+	if got < 6600 || got > 7000 {
+		t.Fatalf("EstimateMB(5GB, 8k) = %d MB, want ~6.7 GB", got)
 	}
 	// Catalog min_ram_mb wins when larger.
-	if got := EstimateMB(5*gb, 12288, 8192, 2); got != 12288 {
+	if got := EstimateMB(5*gb, 12288, 8192); got != 12288 {
 		t.Fatalf("min_ram_mb not honoured: %d", got)
 	}
 	// Bigger context costs more, and the catalog floor cannot hide it.
-	if EstimateMB(5*gb, 0, 65536, 2) <= EstimateMB(5*gb, 0, 8192, 2) {
+	if EstimateMB(5*gb, 0, 65536) <= EstimateMB(5*gb, 0, 8192) {
 		t.Fatal("context length has no effect on the estimate")
 	}
 	// Unknown context falls back to DefaultContext, not zero KV.
-	if EstimateMB(5*gb, 0, 0, 1) <= int64(5*gb*115/100/MiB)+runtimeOverheadMB {
+	if EstimateMB(5*gb, 0, 0) <= int64(5*gb*115/100/MiB)+runtimeOverheadMB {
 		t.Fatal("zero context produced no KV term")
 	}
 }
