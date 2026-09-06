@@ -51,6 +51,11 @@ max_context = 16384
 [governor]
 serve_policy     = "idle-only"  # always | idle-only | scheduled
 idle_after       = "2m"         # input quiet time before the node counts as idle
+                                # (macOS: HID idle time; Linux: logind IdleHint of
+                                # your seat session, so a desktop without an idle
+                                # daemon never counts as idle — use always/scheduled;
+                                # Windows: GetLastInputInfo in the daemon's session;
+                                # headless/no logind: assumed idle, logged once)
 yield_grace      = "2s"         # drain-or-cancel window on operator activity
 poll_interval    = "2s"         # how often idle/power signals are sampled
 serve_on_battery = false        # never serve on battery by default
@@ -100,7 +105,10 @@ retention_days = 0              # evict unpinned, unloaded models not used for N
 # The daemon never self-updates: `tera status`, the TUI, the dashboard and
 # the desktop app show the newer version and its release URL; brew users run
 # `brew upgrade --cask tera`. `minimum` is the oldest daemon the coordinator
-# still serves; below it the node is drained until updated.
+# still serves; below it the node is drained until updated. An enrolled node
+# also gets latest/minimum/url from the coordinator itself (ConfigUpdate),
+# which wins over the feed; the feed is the fallback and the URL source
+# when the coordinator sends none.
 feed_url = "https://api.teraflock.ai/v1/versions"
 
 [tunnel]

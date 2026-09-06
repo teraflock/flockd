@@ -23,8 +23,17 @@ path.
   battery + thermal guards, schedule windows w/ midnight wrap, instant
   yield (drain-or-cancel within `yield_grace`), admission API, live policy
   swap, race-clean. 16-test suite incl. fake-clock yield-latency proofs and
-  a real-clock <1s end-to-end latency bound. Darwin idle (`ioreg`
-  HIDIdleTime) and battery (`pmset`) parsers are real w/ fixture tests.
+  a real-clock <1s end-to-end latency bound. Idle sources are real on all
+  three platforms: Darwin `ioreg` HIDIdleTime; Linux systemd-logind
+  `IdleHint`/`IdleSinceHint` via `loginctl show-session` on
+  `$XDG_SESSION_ID` or the first active seat session (no logind / no seat
+  session → `ErrNoIdleSource`, assume idle, one log line; a desktop
+  without an idle daemon never sets IdleHint — use `always`/`scheduled`);
+  Windows user32 `GetLastInputInfo` vs `GetTickCount64` through
+  `x/sys/windows` lazy DLLs (per-session: the daemon must run in the
+  operator's session, which `tera up` / the desktop app do). Parsers are
+  build-tag free with fixture tests. Battery: `pmset` (macOS), sysfs
+  (Linux), stub AC (Windows).
 - **Models manager** (`internal/models`): YAML/JSON catalog, resumable
   downloads (Range/206), SHA256 verify with refusal + poisoned-partial
   cleanup, LRU eviction under budget, pin survival, state persistence.
@@ -59,12 +68,11 @@ path.
 
 ## Stubbed (compiles, documented, returns useful errors)
 
-- **Windows**: hardware detection (CPU env var only), idle source (assume
-  idle w/ one-time warning), power source (reports AC), SCM service
-  manager (`ErrUnsupported` + manual `sc.exe` instructions), process
-  terminate (Kill, no console event).
-- **Linux idle**: logind DBus not wired; assumes idle (correct default for
-  headless boxes, warned once). Battery/thermal via sysfs are real.
+- **Windows**: hardware detection (CPU env var only), power source
+  (reports AC), SCM service manager (`ErrUnsupported` + manual `sc.exe`
+  instructions), process terminate (Kill, no console event), host memory
+  footprint (estimate stays; `nvidia-smi` VRAM sampling works when on
+  PATH). Idle source is real (`GetLastInputInfo`).
 - **Reputation panel** in the TUI: placeholder until the trust engine
   exists (Phase 3).
 - **ModelAssignment handling**: DONE (plan 05, 2026-09-01) —
@@ -83,7 +91,8 @@ path.
 - **ConfigUpdate** from coordinator: DONE — heartbeat cadence re-arms the
   running loop; `max_concurrent_requests` becomes a ceiling
   (min(operator budget, coordinator)) enforced at dispatch admission
-  (`over-capacity` reject).
+  (`over-capacity` reject); `latest_version`/`minimum_version`/
+  `release_url` go to `update.Checker.ApplyMesh` (see "Update check").
 - **Enroll-without-restart**: DONE — `POST /api/v1/enroll` enrolls (or
   re-enrolls after a mesh-CA rotation, which the startup path cannot do)
   and swaps the tunnel client live. `tera login`'s claim-code file +
@@ -104,14 +113,15 @@ path.
    daemon-owned `<data_dir>/limits.toml` overlay (config.toml untouched).
 4. **Keychain**: move `node.key` and `local_api_token` to
    Keychain/DPAPI/secret-service (files are 0600 today, documented).
-5. **Windows**: GetLastInputInfo idle source, GlobalMemoryStatusEx +
-   WMI/NVML hardware, SCM via `x/sys/windows/svc`, job-object child
-   management. Budget real time for this (SPEC §13.7).
+5. **Windows**: GlobalMemoryStatusEx + WMI/NVML hardware,
+   GetSystemPowerStatus battery, SCM via `x/sys/windows/svc`, job-object
+   child management, GetProcessMemoryInfo footprint. Budget real time for
+   this (SPEC §13.7). (Idle source: DONE.)
 6. **Governor extras**: foreground-GPU-usage signal, screen-lock signal
    (macOS `CGSession`, logind `LockedHint`).
-7. **VRAM measurement on discrete GPUs**: memory admission uses the host
-   footprint (correct on unified memory); on CUDA/ROCm boxes the estimate
-   is kept because the child's VRAM use is not visible without NVML.
+7. **VRAM on AMD**: NVIDIA is measured with `nvidia-smi` (see "Memory
+   admission"); `rocm-smi --showmemuse` for AMD is the remaining TODO —
+   the estimate is kept there with a one-time log line.
 8. **SSE auth for EventSource**: browsers can't set headers on
    EventSource; support `?token=` query param (constant-time compare) or
    cookie for `/api/v1/events` so the React dash can use SSE instead of
@@ -220,12 +230,21 @@ what is loaded versus merely on disk.
   (download_started/downloaded/download_failed/loaded/unloaded/evicted/
   declined/missing/assignment/update_available with actor mesh|operator|
   daemon), `GET /api/v1/activity` newest first, SSE `activity`.
-- **Update check** (`internal/update`): `update.feed_url` polled 30 s after
-  start and hourly; semver compare against the build version (dev builds
-  never nag); `status.update`, `POST /api/v1/update/check` (502 when the
-  feed is unreachable — the background loop stays silent), SSE
-  `update_available` once per discovered version, `tera status` line, TUI
-  notice. No self-update.
+- **Update check** (`internal/update`): two sources. The coordinator's
+  release channel — `ConfigUpdate.latest_version`/`minimum_version`/
+  `release_url`, delivered to `Checker.ApplyMesh` by the tunnel client's
+  `Releases` hook — is authoritative: non-empty mesh versions override the
+  feed's from then on (the mesh knows the minimum it drains below),
+  `release_url` replaces the feed's URL only when set, empty versions
+  change nothing, and the result is recorded at once so
+  `status.update.below_minimum` flips the moment the coordinator says so
+  (`Result.Source` = `mesh`|`feed`). The public `update.feed_url` is polled
+  30 s after start and hourly and remains the fallback (no session yet;
+  the URL when the mesh sends none). Semver compare against the build
+  version (dev builds never nag); `status.update`, `POST
+  /api/v1/update/check` (502 when the feed is unreachable — the background
+  loop stays silent), SSE `update_available` once per discovered version,
+  `tera status` line, TUI notice. No self-update.
 
 ## Mesh enrollment (Phase 1, working)
 
