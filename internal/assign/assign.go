@@ -13,14 +13,25 @@
 //
 // Every decision is reported back over the tunnel as a ModelState:
 // "assigned" (accepted, queued), "downloading", "ready", "cached" (on
-// disk, not loaded: the memory budget is full, or the model went idle),
-// "declined" (policy), "failed" (error), "evicted". The coordinator uses
-// declined / failed to back off, counts cached as a warm candidate that
-// costs a load rather than a live replica (it re-sends the assignment
-// when demand returns, and the node then loads without downloading), and
-// the heartbeat carries assigned/downloading so placement knows a replica
-// is on its way. A placement is never declined for memory alone: the
-// artifact is fetched inside max_disk_mb and reported cached.
+// disk, not loaded: the memory budget is full, the model went idle, or
+// the coordinator only *staged* it), "declined" (policy), "failed"
+// (error), "evicted". The coordinator uses declined / failed to back off,
+// counts cached as a warm candidate that costs a load rather than a live
+// replica (it re-sends the assignment when demand returns, and the node
+// then loads without downloading), and the heartbeat carries
+// assigned/downloading so placement knows a replica is on its way. A
+// placement is never declined for memory alone: the artifact is fetched
+// inside max_disk_mb and reported cached.
+//
+// ModelAssignment.stage is the download-only half of assign: same consent
+// rules, same disk budget, same assigned → downloading progression, but
+// the terminal state is cached and the runtime is never started. An
+// assign for a model that is already on disk still loads it.
+//
+// Every ModelState the daemon sends carries origin: "operator" for models
+// the operator installed (app/CLI/config, or adopted from the model dir),
+// "mesh" for coordinator placements — including ones not on disk yet or
+// already evicted, which can only be the mesh's.
 package assign
 
 import (
@@ -76,6 +87,10 @@ type Pending struct {
 	Since time.Time `json:"since"`
 	// Error is the failure or refusal reason (failed/declined only).
 	Error string `json:"error,omitempty"`
+	// Stage marks a download-only placement (ModelAssignment.stage): it
+	// ends cached, never loaded. An assign for the same model while the
+	// download runs upgrades it.
+	Stage bool `json:"stage,omitempty"`
 }
 
 // Service applies assignments. Nil Ops (mock runtime) declines everything
@@ -142,31 +157,38 @@ func (s *Service) Run(ctx context.Context) {
 }
 
 // Apply handles one ModelAssignment: evictions first (they free the disk
-// the assignments need), then admission of each assignment under the
-// policy. Idempotent: a repeated push for a model already ready or in
-// flight is acknowledged, not restarted.
+// the assignments need), then admission of each assignment and each
+// staged download under the policy. Idempotent: a repeated push for a
+// model already ready or in flight is acknowledged, not restarted.
 func (s *Service) Apply(ctx context.Context, ma *tunnelv1.ModelAssignment) {
 	for _, id := range ma.GetEvictModelIds() {
 		s.evict(ctx, id)
 	}
 	for _, spec := range ma.GetAssign() {
-		s.admit(ctx, spec)
+		s.admit(ctx, spec, false)
+	}
+	for _, spec := range ma.GetStage() {
+		s.admit(ctx, spec, true)
 	}
 	s.kick()
 }
 
-func (s *Service) admit(ctx context.Context, spec *typesv1.ModelSpec) {
+func (s *Service) admit(ctx context.Context, spec *typesv1.ModelSpec, stage bool) {
 	id := spec.GetId()
 	if err := models.ValidateID(id); err != nil {
 		s.conclude(id, StateDeclined, "invalid model id")
 		return
 	}
 	if s.loaded(id) {
+		// Loaded satisfies a stage too: it is on disk and then some.
 		s.report(&typesv1.ModelState{ModelId: id, State: StateReady})
 		return
 	}
 	s.mu.Lock()
 	if p, ok := s.pending[id]; ok && (p.State == StateAssigned || p.State == StateDownloading) {
+		if p.Stage && !stage {
+			p.Stage = false // an assign supersedes a stage in flight
+		}
 		s.mu.Unlock()
 		return // already on it
 	}
@@ -200,18 +222,29 @@ func (s *Service) admit(ctx context.Context, spec *typesv1.ModelSpec) {
 		s.conclude(id, StateFailed, "catalog sha256 differs from the coordinator's")
 		return
 	}
+	onDisk := s.Mgr != nil && s.Mgr.Has(id)
+	if stage && onDisk {
+		// Nothing to do: already what the coordinator asked for.
+		s.report(&typesv1.ModelState{ModelId: id, State: StateCached})
+		s.Activity.Record(activity.KindAssignment, activity.ActorMesh, id, "mesh staged "+id+" (already on disk)", "")
+		return
+	}
 	s.mu.Lock()
 	if s.pending == nil {
 		s.pending = map[string]*Pending{}
 	}
-	s.pending[id] = &Pending{ID: id, State: StateAssigned, Since: time.Now()}
+	s.pending[id] = &Pending{ID: id, State: StateAssigned, Since: time.Now(), Stage: stage}
 	s.queue = append(s.queue, id)
 	s.mu.Unlock()
 	s.report(&typesv1.ModelState{ModelId: id, State: StateAssigned})
 	s.publish(id, StateAssigned, "")
-	if s.Mgr != nil && s.Mgr.Has(id) {
+	switch {
+	case stage:
+		s.Activity.Record(activity.KindAssignment, activity.ActorMesh, id,
+			fmt.Sprintf("mesh staged %s (%.1f GB to download, not loaded)", id, float64(entry.SizeBytes)/(1<<30)), "")
+	case onDisk:
 		s.Activity.Record(activity.KindAssignment, activity.ActorMesh, id, "mesh asked to load "+id+" (already on disk)", "")
-	} else {
+	default:
 		s.Activity.Record(activity.KindAssignment, activity.ActorMesh, id,
 			fmt.Sprintf("mesh assigned %s (%.1f GB to download)", id, float64(entry.SizeBytes)/(1<<30)), "")
 	}
@@ -311,6 +344,27 @@ func (s *Service) process(ctx context.Context, id string) {
 		s.report(&typesv1.ModelState{ModelId: id, State: StateDownloading})
 		s.publish(id, StateDownloading, "")
 	}
+	if s.staged(id) {
+		s.log().Info("mesh stage: fetching, not loading", "model", id)
+		if err := s.Ops.Fetch(ctx, id, models.OriginMesh); err != nil {
+			s.fetchFailed(id, err)
+			return
+		}
+		if s.evictedThenRemove(ctx, id) {
+			return
+		}
+		if s.staged(id) {
+			s.mu.Lock()
+			delete(s.pending, id)
+			s.mu.Unlock()
+			s.report(&typesv1.ModelState{ModelId: id, State: StateCached})
+			s.publish(id, StateCached, "staged")
+			s.Activity.Record(activity.KindAssignment, activity.ActorMesh, id, id+" staged: on disk, not loaded", "staged")
+			s.log().Info("mesh stage complete", "model", id)
+			return
+		}
+		// Upgraded to a full assignment while the download ran: load it.
+	}
 	s.log().Info("mesh assignment: fetching and loading", "model", id, "on_disk", onDisk)
 
 	_, err := s.Ops.LoadInstanceOrigin(ctx, id, models.OriginMesh)
@@ -338,21 +392,46 @@ func (s *Service) process(ctx context.Context, id string) {
 		}
 		return
 	}
-	s.mu.Lock()
-	evicted := s.pending[id] != nil && s.pending[id].State == StateEvicted
-	delete(s.pending, id)
-	s.mu.Unlock()
-	if evicted {
-		// The coordinator withdrew it while the download ran: honour that
-		// rather than announce a replica nobody wants.
-		if err := s.Ops.Remove(ctx, id); err != nil {
-			s.log().Warn("post-evict remove failed", "model", id, "err", err)
-		}
+	if s.evictedThenRemove(ctx, id) {
 		return
 	}
+	s.mu.Lock()
+	delete(s.pending, id)
+	s.mu.Unlock()
 	s.report(&typesv1.ModelState{ModelId: id, State: StateReady})
 	s.publish(id, StateReady, "")
 	s.log().Info("mesh assignment ready", "model", id)
+}
+
+// evictedThenRemove handles a placement the coordinator withdrew while
+// its download ran: honour that rather than announce a replica (or a
+// cached copy) nobody wants. Reports true when it did.
+func (s *Service) evictedThenRemove(ctx context.Context, id string) bool {
+	s.mu.Lock()
+	evicted := s.pending[id] != nil && s.pending[id].State == StateEvicted
+	if evicted {
+		delete(s.pending, id)
+	}
+	s.mu.Unlock()
+	if !evicted {
+		return false
+	}
+	if err := s.Ops.Remove(ctx, id); err != nil {
+		s.log().Warn("post-evict remove failed", "model", id, "err", err)
+	}
+	return true
+}
+
+// fetchFailed concludes a staged download that did not complete.
+func (s *Service) fetchFailed(id string, err error) {
+	if !s.stillActive(id) {
+		return // evicted mid-download; already reported
+	}
+	if errors.Is(err, models.ErrOverBudget) {
+		s.conclude(id, StateDeclined, "does not fit in max_disk_mb")
+		return
+	}
+	s.conclude(id, StateFailed, err.Error())
 }
 
 // conclude records a terminal failure/refusal, reports it once, and keeps
@@ -376,18 +455,67 @@ func (s *Service) conclude(id, state, reason string) {
 }
 
 // States returns the in-flight assignments for Hello/heartbeat model lists
-// (assigned + downloading only; failures/refusals are one-shot reports,
-// otherwise the coordinator would read every heartbeat as a fresh one).
+// (assigned + downloading only, staged ones included; failures/refusals
+// are one-shot reports, otherwise the coordinator would read every
+// heartbeat as a fresh one).
 func (s *Service) States() []*typesv1.ModelState {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	var out []*typesv1.ModelState
 	for _, p := range s.pending {
 		if p.State == StateAssigned || p.State == StateDownloading {
 			out = append(out, &typesv1.ModelState{ModelId: p.ID, State: p.State})
 		}
 	}
+	s.mu.Unlock()
+	for _, m := range out {
+		m.Origin = s.Origin(m.ModelId)
+	}
 	return out
+}
+
+// ModelStates is the model list for Hello and heartbeats: loaded models
+// are `ready`; complete artifacts on disk that are not loaded
+// (idle-unloaded, never admitted for memory, or only staged) are `cached`
+// — warm candidates the coordinator can light up with a load instead of
+// a download — provided the policy would let a mesh assignment load them
+// (Cacheable); plus in-flight placements (assigned/downloading), so the
+// coordinator counts a replica that is on its way and does not push the
+// same assignment again next round. Every entry carries origin.
+func (s *Service) ModelStates() []*typesv1.ModelState {
+	var out []*typesv1.ModelState
+	loaded := map[string]bool{}
+	if s.Eng != nil {
+		for _, m := range s.Eng.Models() {
+			loaded[m.Spec.ID] = true
+			out = append(out, &typesv1.ModelState{ModelId: m.Spec.ID, State: StateReady, Origin: s.Origin(m.Spec.ID)})
+		}
+	}
+	if s.Mgr != nil {
+		for _, i := range s.Mgr.List() {
+			if !loaded[i.ID] && i.State == models.StateReady && s.Cacheable(i.ID) {
+				out = append(out, &typesv1.ModelState{ModelId: i.ID, State: StateCached, Origin: s.Origin(i.ID)})
+			}
+		}
+	}
+	return append(out, s.States()...)
+}
+
+// Origin is who owns a model as far as the coordinator is concerned: the
+// cache's record ("operator" or "mesh") when the artifact is indexed;
+// otherwise "operator" for something loaded outside the store (file://
+// artifacts, the mock runtime) and "mesh" for a placement that is not on
+// disk — queued, declined, or already evicted — which only the mesh
+// could have asked for.
+func (s *Service) Origin(id string) string {
+	if s.Mgr != nil {
+		if o := s.Mgr.Origin(id); o != "" {
+			return o
+		}
+	}
+	if s.loaded(id) {
+		return models.OriginOperator
+	}
+	return models.OriginMesh
 }
 
 // Pending returns every tracked assignment (local API), sorted by id.
@@ -461,6 +589,14 @@ func (s *Service) stillActive(id string) bool {
 	return ok && (p.State == StateAssigned || p.State == StateDownloading)
 }
 
+// staged reports whether an in-flight placement is download-only.
+func (s *Service) staged(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.pending[id]
+	return ok && p.Stage && (p.State == StateAssigned || p.State == StateDownloading)
+}
+
 func (s *Service) setState(id, state string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -518,6 +654,9 @@ func (s *Service) report(m *typesv1.ModelState) {
 	s.mu.Unlock()
 	if fn == nil {
 		return
+	}
+	if m.Origin == "" {
+		m.Origin = s.Origin(m.GetModelId())
 	}
 	if err := fn(m); err != nil {
 		s.log().Debug("model state report dropped", "model", m.GetModelId(), "state", m.GetState(), "err", err)

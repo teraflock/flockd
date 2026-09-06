@@ -210,6 +210,33 @@ func (s *Service) Downloading(id string) bool {
 	return ok
 }
 
+// Fetch makes sure a catalog model is on disk — download and verify
+// inside max_disk_mb, with the given cache origin — without loading it.
+// It backs staged coordinator placements (ModelAssignment.stage). A cache
+// hit returns immediately. models.ErrOverBudget when it cannot fit.
+func (s *Service) Fetch(ctx context.Context, id, origin string) error {
+	if err := models.ValidateID(id); err != nil {
+		return err
+	}
+	cat, err := s.Catalog(ctx, false)
+	if err != nil {
+		return err
+	}
+	entry, ok := cat.Find(id)
+	if !ok {
+		return fmt.Errorf("%w: %q", ErrUnknownModel, id)
+	}
+	had := s.Mgr.Has(id)
+	if _, err := s.Mgr.EnsureOrigin(ctx, entry.Spec(), origin); err != nil {
+		return err
+	}
+	if !had {
+		s.log().Info("model fetched", "model", id, "origin", origin)
+		s.Events.Publish("models_changed", map[string]string{"model": id, "change": "downloaded"})
+	}
+	return nil
+}
+
 // Load makes a model servable: cache hit or download, then runtime load and
 // engine registration. Synchronous — llama-server startup takes seconds and
 // callers want the outcome. No-op if already loaded.

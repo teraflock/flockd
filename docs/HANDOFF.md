@@ -184,6 +184,27 @@ what is loaded versus merely on disk.
   `vram_used_mb` (now filled from measured footprints; equal on unified
   memory) for real headroom. A placement is never declined for memory
   alone; `max_disk_mb` declines (`does not fit in max_disk_mb`) still are.
+- **Staged placements** (`ModelAssignment.stage`, plan 17 follow-up): the
+  floor pass stages models that fit disk but not memory. The node applies
+  the *same* consent rules as `assign` (`mesh_managed`, `exclude`, catalog
+  membership, sha pinning, `max_disk_mb` with mesh-only eviction) and the
+  same AC-power wait, reports `assigned → downloading → cached`, and never
+  starts the runtime. A stage for a model already on disk is a single
+  `cached` ack (no `assigned`/`downloading`); a stage for a loaded model
+  answers `ready`. An `assign` for a staged model — before, during or
+  after its download — loads it: an assign arriving while the staged
+  download runs upgrades it in place (the sequence is then `assigned →
+  downloading → ready`), and a stage never downgrades a queued assign.
+  `modelops.Fetch` is the download-only primitive; the local API shows a
+  staged model as `downloading` then `cached` with `origin: mesh`.
+- **`ModelState.origin`**: every ModelState the daemon sends — Hello and
+  heartbeat lists (`assign.ModelStates`, which replaced the closure in
+  `cmd/flockd`), in-flight `States()`, and one-shot `ModelStateUpdate`s —
+  carries `origin`: the cache's record (`operator` for what the operator
+  installed, adopted or a coordinator re-send of such a model; `mesh` for
+  coordinator placements) or, when the artifact is not indexed, `operator`
+  for a loaded file://-or-mock model and `mesh` for a placement that is
+  queued, declined or already evicted (only the mesh could have asked).
 - **Disk store**: `Manager.List()` stats files (`missing` state, dropped
   from the budget), `Stats()` sizes the store for `status.disk`,
   `GCPartials` (7 days; a download registers its progress row before it

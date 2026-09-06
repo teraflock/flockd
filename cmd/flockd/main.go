@@ -533,28 +533,9 @@ func startTunnel(ctx context.Context, cfg config.Config, dialer tunnel.Dialer, a
 		MaxTempCelsius:        uint32(cfg.Governor.MaxTempCelsius),
 		ServePolicy:           cfg.Governor.ServePolicy,
 	}
-	// Loaded models are `ready`; complete artifacts on disk that are not
-	// loaded (idle-unloaded, or never admitted for memory) are `cached` —
-	// warm candidates the coordinator can light up with a load instead of
-	// a download; plus in-flight placements (assigned/downloading), so the
-	// coordinator counts a replica that is on its way and does not push
-	// the same assignment again next round.
-	modelStates := func() []*typesv1.ModelState {
-		var out []*typesv1.ModelState
-		loaded := map[string]bool{}
-		for _, m := range eng.Models() {
-			loaded[m.Spec.ID] = true
-			out = append(out, &typesv1.ModelState{ModelId: m.Spec.ID, State: assign.StateReady})
-		}
-		if mgr != nil {
-			for _, i := range mgr.List() {
-				if !loaded[i.ID] && i.State == models.StateReady && asg.Cacheable(i.ID) {
-					out = append(out, &typesv1.ModelState{ModelId: i.ID, State: assign.StateCached})
-				}
-			}
-		}
-		return append(out, asg.States()...)
-	}
+	// ready / cached / assigned / downloading, each with its origin; see
+	// assign.ModelStates for the contract.
+	modelStates := asg.ModelStates
 	// Measured model memory (physical footprint of the runtime children),
 	// so placement can read real headroom. Unified memory: VRAM = RAM.
 	// Discrete GPUs: RAM is the host footprint, VRAM the nvidia-smi
@@ -610,7 +591,7 @@ func startTunnel(ctx context.Context, cfg config.Config, dialer tunnel.Dialer, a
 			})
 		},
 		OnModelAssignment: func(ctx context.Context, ma *tunnelv1.ModelAssignment) {
-			log.Info("model assignment received", "assign", len(ma.GetAssign()), "evict", len(ma.GetEvictModelIds()))
+			log.Info("model assignment received", "assign", len(ma.GetAssign()), "stage", len(ma.GetStage()), "evict", len(ma.GetEvictModelIds()))
 			asg.Apply(ctx, ma)
 		},
 	})

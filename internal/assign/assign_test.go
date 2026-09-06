@@ -403,3 +403,229 @@ func TestCachedRespectsPolicyAndEvictionNeverSaysCached(t *testing.T) {
 		t.Fatalf("eviction reports = %v", got)
 	}
 }
+
+func (r *reports) origins(id string) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []string
+	for _, m := range r.list {
+		if m.GetModelId() == id {
+			out = append(out, m.GetOrigin())
+		}
+	}
+	return out
+}
+
+func stageMsg(specs ...*typesv1.ModelSpec) *tunnelv1.ModelAssignment {
+	return &tunnelv1.ModelAssignment{Stage: specs}
+}
+
+// A staged placement downloads inside the disk budget and ends `cached`;
+// the runtime is never started. A later assign loads from disk.
+func TestStageDownloadsReportsCachedNeverLoads(t *testing.T) {
+	h := newHarness(t, 0, map[string][]byte{"s": []byte("gguf staged")})
+	h.svc.Apply(context.Background(), stageMsg(h.spec("s")))
+	waitFor(t, "cached report", func() bool {
+		st := h.rep.states("s")
+		return len(st) > 0 && st[len(st)-1] == StateCached
+	})
+	if got := h.rep.states("s"); fmt.Sprint(got) != "[assigned downloading cached]" {
+		t.Fatalf("reports = %v", got)
+	}
+	if h.loaded("s") {
+		t.Fatal("staged model was loaded")
+	}
+	if !h.svc.Mgr.Has("s") || h.svc.Mgr.Origin("s") != models.OriginMesh {
+		t.Fatalf("staged model on disk = %v, origin = %q", h.svc.Mgr.Has("s"), h.svc.Mgr.Origin("s"))
+	}
+	if len(h.svc.Pending()) != 0 || len(h.svc.States()) != 0 {
+		t.Fatalf("staged model still pending: %+v", h.svc.Pending())
+	}
+	// Re-staging something already on disk is a single cached ack.
+	h.svc.Apply(context.Background(), stageMsg(h.spec("s")))
+	waitFor(t, "re-stage ack", func() bool { return len(h.rep.states("s")) == 4 })
+	if st := h.rep.states("s"); st[3] != StateCached {
+		t.Fatalf("re-stage reports = %v", st)
+	}
+	// It shows up as a cached candidate in Hello/heartbeats.
+	var cached bool
+	for _, m := range h.svc.ModelStates() {
+		if m.GetModelId() == "s" && m.GetState() == StateCached && m.GetOrigin() == models.OriginMesh {
+			cached = true
+		}
+	}
+	if !cached {
+		t.Fatalf("ModelStates() = %v, want s cached/mesh", h.svc.ModelStates())
+	}
+	// An assign for the staged model loads it: no download phase.
+	h.svc.Apply(context.Background(), assignMsg(h.spec("s")))
+	waitFor(t, "loaded", func() bool { return h.loaded("s") })
+	waitFor(t, "ready report", func() bool {
+		st := h.rep.states("s")
+		return st[len(st)-1] == StateReady
+	})
+	if got := h.rep.states("s"); fmt.Sprint(got) != "[assigned downloading cached cached assigned ready]" {
+		t.Fatalf("assign-after-stage reports = %v", got)
+	}
+	// Staging a loaded model is answered with ready.
+	h.svc.Apply(context.Background(), stageMsg(h.spec("s")))
+	waitFor(t, "stage of loaded ack", func() bool { return len(h.rep.states("s")) == 7 })
+	if st := h.rep.states("s"); st[6] != StateReady {
+		t.Fatalf("stage of a loaded model reported %v", st)
+	}
+}
+
+func TestStageFollowsAssignConsentRules(t *testing.T) {
+	h := newHarness(t, 0, map[string][]byte{"a": []byte("a"), "b": []byte("b")})
+	h.mu.Lock()
+	h.policy = Policy{MeshManaged: false}
+	h.mu.Unlock()
+	h.svc.Apply(context.Background(), stageMsg(h.spec("a")))
+	waitFor(t, "declined", func() bool { return len(h.rep.states("a")) == 1 })
+	if st := h.rep.states("a"); st[0] != StateDeclined {
+		t.Fatalf("mesh_managed=false: %v", st)
+	}
+	h.mu.Lock()
+	h.policy = Policy{MeshManaged: true, Exclude: []string{"b"}}
+	h.mu.Unlock()
+	h.svc.Apply(context.Background(), stageMsg(h.spec("b")))
+	waitFor(t, "excluded declined", func() bool { return len(h.rep.states("b")) == 1 })
+	if st := h.rep.states("b"); st[0] != StateDeclined {
+		t.Fatalf("exclude: %v", st)
+	}
+	if h.svc.Mgr.Has("a") || h.svc.Mgr.Has("b") {
+		t.Fatal("declined stage downloaded anyway")
+	}
+
+	// The disk budget applies and never evicts the operator's models.
+	big := make([]byte, 3*1024*1024)
+	h2 := newHarness(t, 4, map[string][]byte{"mine": big, "theirs": big})
+	if err := h2.ops.Load(context.Background(), "mine"); err != nil {
+		t.Fatal(err)
+	}
+	h2.svc.Apply(context.Background(), stageMsg(h2.spec("theirs")))
+	waitFor(t, "budget declined", func() bool {
+		st := h2.rep.states("theirs")
+		return len(st) > 0 && st[len(st)-1] == StateDeclined
+	})
+	if p, _ := h2.svc.Get("theirs"); p.Error != "does not fit in max_disk_mb" {
+		t.Fatalf("reason = %q", p.Error)
+	}
+	if !h2.loaded("mine") || !h2.svc.Mgr.Has("mine") {
+		t.Fatal("stage evicted the operator's model")
+	}
+}
+
+// An assign arriving while a stage of the same model is queued upgrades it:
+// the download ends in a load, not a cached report.
+func TestAssignUpgradesStageInFlight(t *testing.T) {
+	old := batteryPoll
+	batteryPoll = 20 * time.Millisecond
+	t.Cleanup(func() { batteryPoll = old })
+	h := newHarness(t, 0, map[string][]byte{"a": []byte("a")})
+	h.mu.Lock()
+	h.battery = true // holds the queue
+	h.mu.Unlock()
+	h.svc.Apply(context.Background(), stageMsg(h.spec("a")))
+	if p, ok := h.svc.Get("a"); !ok || !p.Stage {
+		t.Fatalf("pending = %+v", p)
+	}
+	h.svc.Apply(context.Background(), assignMsg(h.spec("a")))
+	if p, _ := h.svc.Get("a"); p.Stage {
+		t.Fatal("assign did not upgrade the staged placement")
+	}
+	h.mu.Lock()
+	h.battery = false
+	h.mu.Unlock()
+	waitFor(t, "loaded", func() bool { return h.loaded("a") })
+	waitFor(t, "ready", func() bool {
+		st := h.rep.states("a")
+		return st[len(st)-1] == StateReady
+	})
+	if got := h.rep.states("a"); fmt.Sprint(got) != "[assigned downloading ready]" {
+		t.Fatalf("reports = %v", got)
+	}
+	// The reverse never downgrades: a stage while an assign is queued.
+	h.mu.Lock()
+	h.battery = true
+	h.mu.Unlock()
+	h.svc.Apply(context.Background(), assignMsg(h.spec("a")))
+	if err := h.ops.Unload(context.Background(), "a"); err != nil {
+		t.Fatal(err)
+	}
+	h.svc.Apply(context.Background(), assignMsg(h.spec("a")))
+	h.svc.Apply(context.Background(), stageMsg(h.spec("a")))
+	if p, ok := h.svc.Get("a"); !ok || p.Stage {
+		t.Fatalf("stage downgraded a queued assign: %+v (ok=%v)", p, ok)
+	}
+}
+
+// Every ModelState the node sends carries origin: mesh for placements
+// (on disk or not), operator for what the operator installed — even when
+// the coordinator re-sends an assignment for it.
+func TestReportsAndModelStatesCarryOrigin(t *testing.T) {
+	h := newHarnessMem(t, 0, map[string][]byte{"mine": []byte("mine"), "theirs": []byte("theirs"), "nope": []byte("nope")},
+		map[string]int64{"mine": 800, "theirs": 800})
+	if err := h.ops.Load(context.Background(), "mine"); err != nil {
+		t.Fatal(err)
+	}
+	h.svc.Apply(context.Background(), assignMsg(h.spec("theirs"), h.spec("mine")))
+	waitFor(t, "theirs ready", func() bool {
+		st := h.rep.states("theirs")
+		return len(st) > 0 && st[len(st)-1] == StateReady
+	})
+	for _, o := range h.rep.origins("theirs") {
+		if o != models.OriginMesh {
+			t.Fatalf("mesh placement origins = %v", h.rep.origins("theirs"))
+		}
+	}
+	if got := h.rep.origins("mine"); fmt.Sprint(got) != "[operator]" {
+		t.Fatalf("re-sent operator model origins = %v", got)
+	}
+	// Not in the catalog: declined, and it can only be the mesh's.
+	h.mu.Lock()
+	h.policy = Policy{MeshManaged: true, Exclude: []string{"nope"}}
+	h.mu.Unlock()
+	h.svc.Apply(context.Background(), assignMsg(h.spec("nope")))
+	waitFor(t, "declined", func() bool { return len(h.rep.states("nope")) == 1 })
+	if got := h.rep.origins("nope"); fmt.Sprint(got) != "[mesh]" {
+		t.Fatalf("declined origins = %v", got)
+	}
+
+	// Hello/heartbeat list: loaded and cached entries carry origin too.
+	if err := h.ops.Unload(context.Background(), "theirs"); err != nil {
+		t.Fatal(err)
+	}
+	h.svc.Unloaded("theirs")
+	if got := h.rep.origins("theirs"); got[len(got)-1] != models.OriginMesh {
+		t.Fatalf("unloaded report origin = %q", got[len(got)-1])
+	}
+	want := map[string]string{"mine": "ready/operator", "theirs": "cached/mesh"}
+	got := map[string]string{}
+	for _, m := range h.svc.ModelStates() {
+		got[m.GetModelId()] = m.GetState() + "/" + m.GetOrigin()
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("ModelStates() = %v, want %v", got, want)
+	}
+	// Evicted: gone from disk, still reported as the mesh's.
+	h.svc.Apply(context.Background(), &tunnelv1.ModelAssignment{EvictModelIds: []string{"theirs"}})
+	waitFor(t, "evicted", func() bool {
+		st := h.rep.states("theirs")
+		return st[len(st)-1] == StateEvicted
+	})
+	if got := h.rep.origins("theirs"); got[len(got)-1] != models.OriginMesh {
+		t.Fatalf("evicted report origin = %q", got[len(got)-1])
+	}
+	// A queued placement in the heartbeat is the mesh's.
+	old := batteryPoll
+	batteryPoll = 20 * time.Millisecond
+	t.Cleanup(func() { batteryPoll = old })
+	h.mu.Lock()
+	h.battery = true
+	h.mu.Unlock()
+	h.svc.Apply(context.Background(), assignMsg(h.spec("theirs")))
+	if st := h.svc.States(); len(st) != 1 || st[0].GetOrigin() != models.OriginMesh || st[0].GetState() != StateAssigned {
+		t.Fatalf("queued States() = %v", st)
+	}
+}
