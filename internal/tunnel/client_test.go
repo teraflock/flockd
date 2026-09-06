@@ -14,6 +14,7 @@ import (
 	rt "github.com/teraflock/flockd/internal/runtime"
 	"github.com/teraflock/flockd/internal/tunnel"
 	"github.com/teraflock/flockd/internal/tunnel/fakecoord"
+	"github.com/teraflock/flockd/internal/update"
 	tunnelv1 "github.com/teraflock/proto/gen/go/flock/tunnel/v1"
 	typesv1 "github.com/teraflock/proto/gen/go/flock/types/v1"
 )
@@ -550,5 +551,39 @@ func TestDispatchRelaysReasoning(t *testing.T) {
 	}
 	if reasoning == "" || text == "" {
 		t.Fatalf("reasoning=%q text=%q: both must be relayed", reasoning, text)
+	}
+}
+
+// The coordinator's release channel in a ConfigUpdate reaches the update
+// checker immediately: below_minimum is true as soon as the mesh says so.
+func TestConfigUpdateReleaseChannel(t *testing.T) {
+	upd := &update.Checker{Current: "0.4.2", Log: quietLog()}
+	h := newHarness(t, func(o *tunnel.Options) { o.Releases = upd })
+	if _, ok := upd.Last(); ok {
+		t.Fatal("result before any update")
+	}
+	// Cadence-only updates carry no versions and leave the checker alone.
+	if err := h.coord.PushConfig(&tunnelv1.ConfigUpdate{HeartbeatIntervalSeconds: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.coord.PushConfig(&tunnelv1.ConfigUpdate{
+		LatestVersion: "0.5.1", MinimumVersion: "0.5.0", ReleaseUrl: "https://github.com/teraflock/flockd/releases/tag/v0.5.1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.After(5 * time.Second)
+	for {
+		if last, ok := upd.Last(); ok {
+			if !last.BelowMinimum || !last.Available || last.Latest != "0.5.1" || last.Minimum != "0.5.0" ||
+				last.Source != update.SourceMesh || !strings.HasSuffix(last.URL, "v0.5.1") {
+				t.Fatalf("result = %+v", last)
+			}
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("release channel never reached the checker")
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 }

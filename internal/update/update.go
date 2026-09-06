@@ -1,8 +1,11 @@
-// Package update checks the mesh's version feed for a newer flockd
-// release. It never installs anything: it tells the operator (status,
-// SSE, CLI, TUI, desktop banner) and points at the release page. Brew
-// users run `brew upgrade --cask tera`; signed self-update is gated on
-// plan 01.
+// Package update checks for a newer flockd release. Two sources feed it:
+// the coordinator's release channel (ConfigUpdate.latest_version /
+// minimum_version / release_url — authoritative, the mesh knows the
+// minimum it drains below) and the public version feed (the fallback for
+// nodes without a session, and the source of the URL when the mesh sends
+// none). It never installs anything: it tells the operator (status, SSE,
+// CLI, TUI, desktop banner) and points at the release page. Brew users
+// run `brew upgrade --cask tera`; signed self-update is gated on plan 01.
 package update
 
 import (
@@ -52,6 +55,20 @@ type Result struct {
 	BelowMinimum bool
 	URL          string
 	CheckedAt    time.Time
+	// Source names where Latest/Minimum came from: "mesh" when the
+	// coordinator's release channel set them, else "feed".
+	Source string
+}
+
+// Sources of a Result's versions.
+const (
+	SourceFeed = "feed"
+	SourceMesh = "mesh"
+)
+
+// meshChannel is the coordinator's last ConfigUpdate release info.
+type meshChannel struct {
+	latest, minimum, url string
 }
 
 // ErrFeedUnavailable wraps feed fetch failures (404 while the endpoint is
@@ -78,6 +95,8 @@ type Checker struct {
 
 	mu        sync.Mutex
 	last      *Result
+	feed      *Feed // last successful feed fetch
+	mesh      *meshChannel
 	announced string
 	warned    bool
 }
@@ -109,9 +128,59 @@ func (c *Checker) Check(ctx context.Context) (Result, error) {
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&feed); err != nil {
 		return Result{}, fmt.Errorf("%w: decode: %v", ErrFeedUnavailable, err)
 	}
-	res := Evaluate(c.Current, feed, time.Now())
+	c.mu.Lock()
+	c.feed = &feed
+	c.mu.Unlock()
+	res := c.evaluate(time.Now())
 	c.record(res)
 	return res, nil
+}
+
+// ApplyMesh takes the coordinator's release channel from a ConfigUpdate.
+// Non-empty latest/minimum override the feed's from now on (the mesh is
+// authoritative: it knows the minimum it drains below); url fills in for
+// the feed's only when set. Empty latest and minimum mean the coordinator
+// sent nothing and change nothing. The result is recorded immediately, so
+// status.update.below_minimum flips as soon as the coordinator says so,
+// and a newly discovered version is announced once like a feed result.
+func (c *Checker) ApplyMesh(latest, minimum, url string) {
+	if latest == "" && minimum == "" {
+		return
+	}
+	c.mu.Lock()
+	c.mesh = &meshChannel{latest: latest, minimum: minimum, url: url}
+	c.mu.Unlock()
+	res := c.evaluate(time.Now())
+	c.log().Info("release channel from coordinator", "latest", res.Latest, "minimum", res.Minimum,
+		"url", res.URL, "available", res.Available, "below_minimum", res.BelowMinimum)
+	c.record(res)
+}
+
+// evaluate merges the feed and the mesh channel into one Result.
+func (c *Checker) evaluate(now time.Time) Result {
+	c.mu.Lock()
+	var feed Feed
+	if c.feed != nil {
+		feed = *c.feed
+	}
+	mesh := c.mesh
+	c.mu.Unlock()
+	source := SourceFeed
+	if mesh != nil {
+		source = SourceMesh
+		if mesh.latest != "" {
+			feed.Flockd.Latest = mesh.latest
+		}
+		if mesh.minimum != "" {
+			feed.Flockd.Minimum = mesh.minimum
+		}
+		if mesh.url != "" {
+			feed.Flockd.URL = mesh.url
+		}
+	}
+	res := Evaluate(c.Current, feed, now)
+	res.Source = source
+	return res
 }
 
 // Evaluate compares a feed against the running version.

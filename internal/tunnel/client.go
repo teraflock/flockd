@@ -62,6 +62,11 @@ type Options struct {
 	// OnConfigUpdate observes coordinator ConfigUpdates after the client
 	// has applied what it owns (heartbeat cadence, concurrency cap).
 	OnConfigUpdate func(cu *tunnelv1.ConfigUpdate)
+	// Releases receives the coordinator's release channel
+	// (ConfigUpdate.latest_version / minimum_version / release_url) as the
+	// authoritative version source. *update.Checker satisfies it. May be
+	// nil.
+	Releases ReleaseSink
 	// MaxConcurrent is the operator's dispatch concurrency ceiling
 	// (budget.max_concurrent). The coordinator may lower the effective cap
 	// with ConfigUpdate.max_concurrent_requests, never raise it. 0 = no cap.
@@ -71,6 +76,12 @@ type Options struct {
 	ReconnectMin      time.Duration
 	ReconnectMax      time.Duration
 	Log               *slog.Logger
+}
+
+// ReleaseSink is fed the coordinator's release channel. Empty strings
+// mean "unknown" and must not clear a previously known value.
+type ReleaseSink interface {
+	ApplyMesh(latest, minimum, url string)
 }
 
 // Client maintains the session and handles pushed work.
@@ -345,8 +356,13 @@ func (c *Client) handle(ctx context.Context, ss *sessionStream, msg *tunnelv1.Co
 
 // applyConfig applies a ConfigUpdate mid-session: heartbeat cadence to
 // the running loop, the concurrency cap as a ceiling the coordinator may
-// lower but not raise above the operator's budget.
+// lower but not raise above the operator's budget, and the release
+// channel to the update checker (the mesh knows the minimum it drains
+// below; status.update.below_minimum flips immediately).
 func (c *Client) applyConfig(cu *tunnelv1.ConfigUpdate) {
+	if c.o.Releases != nil && (cu.GetLatestVersion() != "" || cu.GetMinimumVersion() != "") {
+		c.o.Releases.ApplyMesh(cu.GetLatestVersion(), cu.GetMinimumVersion(), cu.GetReleaseUrl())
+	}
 	if s := cu.GetHeartbeatIntervalSeconds(); s > 0 {
 		d := time.Duration(s) * time.Second
 		select {

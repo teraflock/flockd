@@ -311,7 +311,7 @@ func run() error {
 			return err
 		}
 		tctx, cancel := context.WithCancel(ctx)
-		if err := startTunnel(tctx, cfg, dialer, cfg.Tunnel.CoordinatorAddr, creds.CoordinatorPubKey, creds.NodeID, identity, hw, gov, stats, eng, mgr, ops, asg, budget, log); err != nil {
+		if err := startTunnel(tctx, cfg, dialer, cfg.Tunnel.CoordinatorAddr, creds.CoordinatorPubKey, creds.NodeID, identity, hw, gov, stats, eng, mgr, ops, asg, upd, budget, log); err != nil {
 			cancel()
 			return err
 		}
@@ -334,7 +334,7 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		if err := startTunnel(ctx, cfg, coord.Dialer(), coord.Addr(), coord.PubKey(), creds.NodeID, identity, hw, gov, stats, eng, mgr, ops, asg, budget, log); err != nil {
+		if err := startTunnel(ctx, cfg, coord.Dialer(), coord.Addr(), coord.PubKey(), creds.NodeID, identity, hw, gov, stats, eng, mgr, ops, asg, upd, budget, log); err != nil {
 			return err
 		}
 		nodeID = creds.NodeID
@@ -523,7 +523,7 @@ func reportRuntimeBuild(hw *typesv1.CapabilityProfile, inst rt.Instance, log *sl
 // startTunnel runs the session client in the background. nodeID must be the
 // coordinator-assigned ID from enrollment — the session is rejected
 // otherwise.
-func startTunnel(ctx context.Context, cfg config.Config, dialer tunnel.Dialer, addr string, coordKey []byte, nodeID string, identity *enroll.Identity, hw *typesv1.CapabilityProfile, gov *governor.Governor, stats *telemetry.Stats, eng *engine.Engine, mgr *models.Manager, ops *modelops.Service, asg *assign.Service, budget rt.ResourceBudget, log *slog.Logger) error {
+func startTunnel(ctx context.Context, cfg config.Config, dialer tunnel.Dialer, addr string, coordKey []byte, nodeID string, identity *enroll.Identity, hw *typesv1.CapabilityProfile, gov *governor.Governor, stats *telemetry.Stats, eng *engine.Engine, mgr *models.Manager, ops *modelops.Service, asg *assign.Service, upd *update.Checker, budget rt.ResourceBudget, log *slog.Logger) error {
 	protoBudget := &typesv1.ResourceBudget{
 		MaxVramPercent:        uint32(cfg.Budget.MaxVRAMPercent),
 		MaxRamMb:              uint64(max(cfg.Budget.MaxRAMMB, 0)),
@@ -590,6 +590,9 @@ func startTunnel(ctx context.Context, cfg config.Config, dialer tunnel.Dialer, a
 				Models:     modelStates(),
 			})
 		},
+		// The coordinator's release channel (latest / minimum / url) is the
+		// authoritative version source; the public feed stays the fallback.
+		Releases: upd,
 		OnModelAssignment: func(ctx context.Context, ma *tunnelv1.ModelAssignment) {
 			log.Info("model assignment received", "assign", len(ma.GetAssign()), "stage", len(ma.GetStage()), "evict", len(ma.GetEvictModelIds()))
 			asg.Apply(ctx, ma)

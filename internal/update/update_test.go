@@ -137,3 +137,70 @@ func TestFeedUnavailableIsUnknownNotError(t *testing.T) {
 		t.Fatalf("connection error: %v", err)
 	}
 }
+
+// The coordinator's release channel overrides the feed's versions and is
+// applied at once (below_minimum flips without waiting for a poll); the
+// feed's URL survives when the mesh sends none.
+func TestMeshChannelOverridesFeed(t *testing.T) {
+	body := `{"flockd":{"latest":"0.4.0","minimum":"0.3.0","url":"https://feed/v0.4.0"}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+	hub := events.NewHub()
+	ch, cancel := hub.Subscribe()
+	defer cancel()
+	c := &Checker{FeedURL: srv.URL, Current: "0.3.0", Events: hub}
+	if res, err := c.Check(context.Background()); err != nil || res.BelowMinimum || res.Source != SourceFeed {
+		t.Fatalf("feed check: %+v %v", res, err)
+	}
+	<-ch // 0.4.0 announced
+
+	c.ApplyMesh("0.5.0", "0.4.0", "")
+	last, ok := c.Last()
+	if !ok || last.Latest != "0.5.0" || last.Minimum != "0.4.0" || !last.BelowMinimum || !last.Available || last.Source != SourceMesh {
+		t.Fatalf("after mesh: %+v", last)
+	}
+	if last.URL != "https://feed/v0.4.0" {
+		t.Fatalf("url = %q, want the feed's when release_url is empty", last.URL)
+	}
+	select {
+	case ev := <-ch:
+		if ev.Data.(Public).Latest != "0.5.0" || !ev.Data.(Public).BelowMinimum {
+			t.Fatalf("event = %+v", ev)
+		}
+	default:
+		t.Fatal("mesh version not announced")
+	}
+	// A later feed poll does not roll the mesh's answer back.
+	if res, err := c.Check(context.Background()); err != nil || res.Latest != "0.5.0" || !res.BelowMinimum {
+		t.Fatalf("feed after mesh: %+v %v", res, err)
+	}
+	// release_url wins over the feed's when present; empty versions are a
+	// no-op rather than a reset.
+	c.ApplyMesh("0.5.0", "0.4.0", "https://mesh/v0.5.0")
+	if last, _ = c.Last(); last.URL != "https://mesh/v0.5.0" {
+		t.Fatalf("url = %q", last.URL)
+	}
+	c.ApplyMesh("", "", "")
+	if last, _ = c.Last(); last.Latest != "0.5.0" || last.URL != "https://mesh/v0.5.0" {
+		t.Fatalf("empty ApplyMesh changed the result: %+v", last)
+	}
+}
+
+// Without any feed (offline, endpoint not built yet) the mesh alone
+// produces a result.
+func TestMeshChannelWithoutFeed(t *testing.T) {
+	c := &Checker{Current: "0.2.0"}
+	c.ApplyMesh("0.4.0", "0.3.0", "")
+	last, ok := c.Last()
+	if !ok || !last.Available || !last.BelowMinimum || last.Latest != "0.4.0" || last.URL != "" {
+		t.Fatalf("mesh-only: %+v (ok=%v)", last, ok)
+	}
+	// Dev builds learn the versions but are never nagged or drained.
+	d := &Checker{Current: "abc123-dev"}
+	d.ApplyMesh("0.4.0", "0.3.0", "")
+	if last, _ := d.Last(); last.Available || last.BelowMinimum || last.Latest != "0.4.0" {
+		t.Fatalf("dev build: %+v", last)
+	}
+}
