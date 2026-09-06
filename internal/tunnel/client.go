@@ -461,6 +461,7 @@ func (c *Client) runDispatch(ctx context.Context, ss *sessionStream, d *tunnelv1
 		tc := &tunnelv1.TokenChunk{
 			RequestId:    id,
 			Delta:        chunk.Delta,
+			Reasoning:    chunk.Reasoning, // chain-of-thought, billed like delta
 			TokenCount:   uint32(chunk.TokenCount),
 			Done:         chunk.Done,
 			FinishReason: finishToProto(chunk.FinishReason),

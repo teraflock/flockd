@@ -94,13 +94,17 @@ func (a *Adapter) Load(ctx context.Context, m rt.ModelSpec, res rt.ResourceBudge
 		"--port", strconv.Itoa(port),
 		"--parallel", strconv.Itoa(max(res.MaxConcurrent, 1)),
 		"--no-webui",
-		// Reasoning models otherwise put their chain-of-thought in
-		// `reasoning_content` and leave `content` empty, so a truncated
-		// generation returns nothing at all. A serving node must relay the
-		// model's whole token stream: the customer is billed for those
-		// tokens, and canary comparison (SPEC §2.2) diffs the output string,
-		// which would be empty for every reasoning model otherwise.
-		"--reasoning-format", "none",
+		// Reasoning models: llama-server splits chain-of-thought out of
+		// `content` into `reasoning_content` deltas (the DeepSeek wire
+		// format OpenAI-style clients understand). parseSSE relays BOTH
+		// streams as Chunks — reasoning in Chunk.Reasoning, the answer in
+		// Chunk.Delta, each counted in TokenCount — so a generation that
+		// stops mid-thought still returns every token: the customer is
+		// billed for them, and canary comparison (SPEC §2.2) diffs the
+		// whole stream. `<think>` tags therefore no longer appear inline
+		// for models llama.cpp knows how to parse; models it cannot parse
+		// still arrive as plain content and clients keep their splitter.
+		"--reasoning-format", "deepseek",
 	}
 	if ctxLen > 0 {
 		args = append(args, "--ctx-size", strconv.Itoa(ctxLen))
@@ -174,7 +178,8 @@ type oaStreamOpt struct {
 type oaStreamChunk struct {
 	Choices []struct {
 		Delta struct {
-			Content string `json:"content"`
+			Content          string `json:"content"`
+			ReasoningContent string `json:"reasoning_content"`
 		} `json:"delta"`
 		Text         string  `json:"text"` // /v1/completions stream
 		FinishReason *string `json:"finish_reason"`
@@ -259,8 +264,11 @@ func parseSSE(ctx context.Context, resp *http.Response, ch chan<- rt.Chunk) {
 			if delta == "" {
 				delta = choice.Text
 			}
-			if delta != "" {
-				if !send(ctx, ch, rt.Chunk{Delta: delta, TokenCount: 1}) {
+			// Content and reasoning are both relayed (see the
+			// --reasoning-format note in Load): one chunk per SSE delta,
+			// one token each, whichever field(s) it carries.
+			if delta != "" || choice.Delta.ReasoningContent != "" {
+				if !send(ctx, ch, rt.Chunk{Delta: delta, Reasoning: choice.Delta.ReasoningContent, TokenCount: 1}) {
 					return
 				}
 			}

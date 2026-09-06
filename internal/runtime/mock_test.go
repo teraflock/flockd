@@ -139,3 +139,36 @@ func TestDrainEOF(t *testing.T) {
 		t.Error("expected EOF after close")
 	}
 }
+
+func TestMockReasoningTokens(t *testing.T) {
+	m := &MockRuntime{ReasoningTokens: 3}
+	inst, err := m.Load(context.Background(), ModelSpec{ID: "m"}, ResourceBudget{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts, err := inst.Complete(context.Background(), CompletionRequest{
+		Kind: KindChat, Messages: []Message{{Role: "user", Content: "hi"}},
+		Params: GenerationParams{Seed: 3, MaxTokens: 10},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, reasoning, usage, _, err := DrainAll(ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reasoning == "" || text == "" {
+		t.Fatalf("reasoning=%q text=%q: want both", reasoning, text)
+	}
+	if usage.CompletionTokens != 10 {
+		t.Fatalf("completion_tokens = %d, want 10 (reasoning tokens billed)", usage.CompletionTokens)
+	}
+	// Raw completions have no chat template: no reasoning split.
+	ts, err = inst.Complete(context.Background(), CompletionRequest{Kind: KindCompletion, Prompt: "x", Params: GenerationParams{Seed: 3, MaxTokens: 5}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, reasoning, _, _, _ = DrainAll(ts); reasoning != "" {
+		t.Fatalf("completion produced reasoning %q", reasoning)
+	}
+}

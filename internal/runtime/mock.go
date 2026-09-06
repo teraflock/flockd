@@ -19,6 +19,11 @@ type MockRuntime struct {
 	TokensPerSec float64
 	// FailLoads causes the next N Load calls to fail (supervisor tests).
 	FailLoads int
+	// ReasoningTokens makes chat generations emit this many chain-of-thought
+	// tokens (Chunk.Reasoning) before the answer, the way llama.cpp's
+	// reasoning_content parsing does for reasoning models. They count
+	// toward max_tokens and completion_tokens like any other token.
+	ReasoningTokens int
 }
 
 // NewMockRuntime returns a mock producing ~tps tokens/second.
@@ -32,16 +37,18 @@ func (m *MockRuntime) Load(_ context.Context, spec ModelSpec, res ResourceBudget
 		return nil, fmt.Errorf("mock: simulated load failure for %s", spec.ID)
 	}
 	return &mockInstance{
-		spec:    spec,
-		tps:     m.TokensPerSec,
-		maxConc: res.MaxConcurrent,
+		spec:      spec,
+		tps:       m.TokensPerSec,
+		maxConc:   res.MaxConcurrent,
+		reasoning: m.ReasoningTokens,
 	}, nil
 }
 
 type mockInstance struct {
-	spec    ModelSpec
-	tps     float64
-	maxConc int
+	spec      ModelSpec
+	tps       float64
+	maxConc   int
+	reasoning int
 
 	mu       sync.Mutex
 	shutdown bool
@@ -103,16 +110,22 @@ func (i *mockInstance) Complete(ctx context.Context, req CompletionRequest) (Tok
 				break
 			}
 			word := mockWords[rng.Intn(len(mockWords))]
-			delta := word + " "
+			chunk := Chunk{Delta: word + " ", TokenCount: 1}
+			// Chain-of-thought first, then the answer (chat only: raw
+			// completions have no template for the runtime to parse).
+			thinking := req.Kind == KindChat && n < i.reasoning
+			if thinking {
+				chunk = Chunk{Reasoning: word + " ", TokenCount: 1}
+			}
 			i.tokTimes.record(time.Now())
 			select {
-			case ch <- Chunk{Delta: delta, TokenCount: 1}:
+			case ch <- chunk:
 			case <-genCtx.Done():
 				finish = "cancelled"
 				goto done
 			}
 			// Deterministic early stop ~ mimics EOS.
-			if n >= 8 && rng.Float64() < 0.02 {
+			if !thinking && n >= 8 && rng.Float64() < 0.02 {
 				n++
 				finish = "stop"
 				break

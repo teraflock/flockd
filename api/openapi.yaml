@@ -395,6 +395,14 @@ paths:
       tags: [openai]
       operationId: openaiChatCompletions
       summary: OpenAI-compatible chat completions (streaming supported)
+      description: |
+        Reasoning models: chain-of-thought is returned separately from the
+        answer as `reasoning_content` (the DeepSeek / llama.cpp extension
+        to the OpenAI shape) — on `choices[].message.reasoning_content` for
+        non-streaming responses and on `choices[].delta.reasoning_content`
+        for stream chunks — and is absent when the model produced none.
+        Reasoning tokens count in `usage.completion_tokens`. Models whose
+        thinking llama.cpp cannot parse still return it inline in `content`.
       security: []
       requestBody:
         required: true
@@ -403,7 +411,7 @@ paths:
             schema: { type: object }
       responses:
         "200":
-          description: "Completion (or SSE stream when `stream: true`)."
+          description: "Completion (or SSE stream when `stream: true`). Chat messages/deltas may carry `reasoning_content`."
           content:
             application/json:
               schema: { type: object }

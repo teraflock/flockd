@@ -26,8 +26,13 @@ func quietLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, n
 
 func newTestServer(t *testing.T, gov *governor.Governor) *httptest.Server {
 	t.Helper()
+	return newTestServerMock(t, gov, rt.NewMockRuntime(0))
+}
+
+// newTestServerMock is newTestServer with a caller-configured mock runtime.
+func newTestServerMock(t *testing.T, gov *governor.Governor, mock *rt.MockRuntime) *httptest.Server {
+	t.Helper()
 	eng := engine.New(gov, nil, nil)
-	mock := rt.NewMockRuntime(0)
 	inst, err := mock.Load(context.Background(), rt.ModelSpec{ID: "mock-8b-instruct"}, rt.ResourceBudget{MaxConcurrent: 4})
 	if err != nil {
 		t.Fatal(err)
@@ -488,5 +493,88 @@ func TestQueryTokenRejectedOnNonSSERoutes(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("status?token= -> %d, want 401 (query tokens are SSE-only)", resp.StatusCode)
+	}
+}
+
+// reasoning_content is the OpenAI-compatible extension for chain-of-thought:
+// per-delta on streams, on the message otherwise, absent when the model
+// produced none. Reasoning tokens are billed in completion_tokens.
+func TestChatCompletionsReasoningContent(t *testing.T) {
+	srv := newTestServerMock(t, servingGovernor(t), &rt.MockRuntime{ReasoningTokens: 3})
+	body := `{"model":"mock-8b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":8,"seed":7}`
+	resp, err := http.Post(srv.URL+"/v1/chat/completions", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Choices []struct {
+			Message struct {
+				Content          string `json:"content"`
+				ReasoningContent string `json:"reasoning_content"`
+			} `json:"message"`
+		} `json:"choices"`
+		Usage struct {
+			CompletionTokens int `json:"completion_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Choices) != 1 || out.Choices[0].Message.ReasoningContent == "" || out.Choices[0].Message.Content == "" {
+		t.Fatalf("non-stream: %+v", out)
+	}
+	if out.Usage.CompletionTokens != 8 {
+		t.Errorf("completion_tokens = %d, want 8 (reasoning billed)", out.Usage.CompletionTokens)
+	}
+
+	body = `{"model":"mock-8b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":8,"stream":true,"seed":7}`
+	resp, err = http.Post(srv.URL+"/v1/chat/completions", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	sc := bufio.NewScanner(resp.Body)
+	var reasoning, content string
+	sawRole := false
+	for sc.Scan() {
+		payload := strings.TrimPrefix(sc.Text(), "data: ")
+		if payload == "" || payload == "[DONE]" || !strings.HasPrefix(sc.Text(), "data: ") {
+			continue
+		}
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					Role             string `json:"role"`
+					Content          string `json:"content"`
+					ReasoningContent string `json:"reasoning_content"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			t.Fatalf("bad chunk %q: %v", payload, err)
+		}
+		for _, c := range chunk.Choices {
+			if c.Delta.Role == "assistant" {
+				sawRole = true
+			}
+			reasoning += c.Delta.ReasoningContent
+			content += c.Delta.Content
+		}
+	}
+	if reasoning == "" || content == "" || !sawRole {
+		t.Fatalf("stream: reasoning=%q content=%q role=%v", reasoning, content, sawRole)
+	}
+
+	// A model without reasoning never emits the field.
+	srv2 := newTestServer(t, servingGovernor(t))
+	resp, err = http.Post(srv2.URL+"/v1/chat/completions", "application/json", strings.NewReader(`{"messages":[{"role":"user","content":"hi"}],"max_tokens":4,"seed":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if strings.Contains(string(raw), "reasoning_content") {
+		t.Fatalf("reasoning_content present without reasoning: %s", raw)
 	}
 }

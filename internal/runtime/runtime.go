@@ -78,8 +78,18 @@ type CompletionRequest struct {
 
 // Chunk is one streamed unit. For KindEmbedding a single final chunk
 // carries Embeddings. Usage is set on the final chunk.
+//
+// Every token the model produces is relayed as either Delta (the answer)
+// or Reasoning (chain-of-thought, for models whose runtime separates it),
+// and TokenCount covers both: the customer is billed for reasoning tokens
+// and canary comparison diffs the whole stream, so nothing is dropped on
+// the node. A chunk may carry both when the runtime emits them together.
 type Chunk struct {
-	Delta        string
+	Delta string
+	// Reasoning is a chain-of-thought delta (OpenAI's `reasoning_content`).
+	// Empty for models the runtime cannot parse, whose thinking then
+	// arrives inline in Delta (e.g. as `<think>…</think>`).
+	Reasoning    string
 	TokenCount   int
 	Done         bool
 	FinishReason string // "stop", "length", "cancelled", "error"
@@ -142,18 +152,27 @@ func (s *chanStream) Close() error {
 }
 
 // Drain reads a stream to completion and concatenates deltas. Convenience
-// for non-streaming callers (localapi non-stream mode, challenges, tests).
+// for non-streaming callers (challenges, tests). Reasoning deltas are
+// discarded here; callers that must relay them use DrainAll.
 func Drain(ts TokenStream) (text string, usage Usage, finish string, err error) {
+	text, _, usage, finish, err = DrainAll(ts)
+	return text, usage, finish, err
+}
+
+// DrainAll is Drain that also concatenates the reasoning deltas (localapi
+// non-stream mode emits them as message.reasoning_content).
+func DrainAll(ts TokenStream) (text, reasoning string, usage Usage, finish string, err error) {
 	defer ts.Close()
 	for {
 		c, rerr := ts.Recv()
 		if rerr != nil {
 			if errors.Is(rerr, io.EOF) {
-				return text, usage, finish, nil
+				return text, reasoning, usage, finish, nil
 			}
-			return text, usage, finish, rerr
+			return text, reasoning, usage, finish, rerr
 		}
 		text += c.Delta
+		reasoning += c.Reasoning
 		if c.Usage != nil {
 			usage = *c.Usage
 		}
@@ -161,7 +180,7 @@ func Drain(ts TokenStream) (text string, usage Usage, finish string, err error) 
 			finish = c.FinishReason
 		}
 		if c.Err != "" {
-			return text, usage, finish, errors.New(c.Err)
+			return text, reasoning, usage, finish, errors.New(c.Err)
 		}
 	}
 }

@@ -242,12 +242,24 @@ Verified against a real `llama-server` for the first time (Homebrew
 llama.cpp b10360, M3 Max/Metal): Qwen3.5-9B Q4_K_M ~50 tok/s, a 20GB Q4_K_M
 ~64 tok/s, SHA verification 2.3s and 11s respectively.
 
-**Reasoning models**: the adapter passes `--reasoning-format none` so
-chain-of-thought stays inline in `content`. llama.cpp otherwise routes it to
-`reasoning_content` and leaves `content` empty, so a generation truncated
-mid-thought returned *nothing* while still billing the customer for the
-tokens — and canary comparison, which diffs output strings, would have seen
-empty output for every reasoning model.
+**Reasoning models** (plan 17 follow-up): the adapter passes
+`--reasoning-format deepseek`, so llama.cpp splits chain-of-thought into
+`reasoning_content` deltas, and `parseSSE` relays *both* streams —
+`rt.Chunk.Reasoning` and `rt.Chunk.Delta`, one token each in `TokenCount`.
+The guarantee that mattered under the old `--reasoning-format none` setting
+still holds: every token the model produces reaches the tunnel
+(`TokenChunk.reasoning` / `.delta`), the customer is billed for reasoning
+tokens (`completion_tokens` includes them, `stats.RecordTokens` counts every
+chunk) and canary comparison sees the whole stream. Consequences: `<think>`
+tags no longer appear inline in `content` for models llama.cpp knows how to
+parse; models it cannot parse still come through as plain content, so
+clients keep their `<think>` splitter for those. The local OpenAI API emits
+`delta.reasoning_content` on stream chunks and `message.reasoning_content`
+on non-stream chat responses (absent when empty); `/v1/completions` has no
+such field and folds reasoning into `text`. Fingerprint challenges go
+through `/v1/completions` (raw prompt, no chat template), where llama.cpp
+does no reasoning parsing — challenge outputs are unchanged. The mock
+runtime emits reasoning when `MockRuntime.ReasoningTokens > 0`.
 
 ## Local API auth
 

@@ -505,3 +505,50 @@ func TestSendModelStateReachesCoordinator(t *testing.T) {
 		}
 	}
 }
+
+// Reasoning deltas travel on TokenChunk.reasoning, separate from delta,
+// and are counted like any other token.
+func TestDispatchRelaysReasoning(t *testing.T) {
+	h := newHarness(t, func(o *tunnel.Options) {
+		mock := &rt.MockRuntime{ReasoningTokens: 4}
+		inst, err := mock.Load(context.Background(), rt.ModelSpec{ID: "mock-8b"}, rt.ResourceBudget{MaxConcurrent: 4})
+		if err != nil {
+			t.Fatal(err)
+		}
+		o.Engine = engine{inst}
+	})
+	_, acks, tokens, err := h.coord.Dispatch(fakecoord.DispatchOpts{
+		ModelID:  "mock-8b",
+		Kind:     typesv1.RequestKind_REQUEST_KIND_CHAT,
+		Messages: []*typesv1.ChatMessage{{Role: "user", Content: "hi"}},
+		Params:   &typesv1.GenerationParams{Seed: 5, MaxTokens: 10},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ack := <-acks; !ack.GetAccepted() {
+		t.Fatalf("rejected: %s", ack.GetRejectReason())
+	}
+	var reasoning, text string
+	var counted uint32
+	deadline := time.After(5 * time.Second)
+	for done := false; !done; {
+		select {
+		case c := <-tokens:
+			reasoning += c.GetReasoning()
+			text += c.GetDelta()
+			counted += c.GetTokenCount()
+			if c.GetDone() {
+				if got := c.GetUsage().GetCompletionTokens(); got != counted {
+					t.Errorf("usage completion_tokens = %d, relayed token_count sum = %d", got, counted)
+				}
+				done = true
+			}
+		case <-deadline:
+			t.Fatal("timed out")
+		}
+	}
+	if reasoning == "" || text == "" {
+		t.Fatalf("reasoning=%q text=%q: both must be relayed", reasoning, text)
+	}
+}

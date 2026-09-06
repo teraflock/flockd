@@ -162,3 +162,62 @@ func TestAdapterHealth(t *testing.T) {
 		t.Errorf("stats = %+v", st)
 	}
 }
+
+// A reasoning model's chain-of-thought arrives as reasoning_content deltas
+// (--reasoning-format deepseek); both streams are relayed, one token per
+// delta, so billing and canary diffs see everything the model produced.
+func TestAdapterRelaysReasoningContent(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		frames := []string{
+			`{"choices":[{"delta":{"role":"assistant","reasoning_content":"Let me"},"finish_reason":null}]}`,
+			`{"choices":[{"delta":{"reasoning_content":" think."},"finish_reason":null}]}`,
+			`{"choices":[{"delta":{"content":"Four"},"finish_reason":null}]}`,
+			`{"choices":[{"delta":{"content":"."},"finish_reason":null}]}`,
+			`{"choices":[{"delta":{},"finish_reason":"length"}],"usage":{"prompt_tokens":9,"completion_tokens":4}}`,
+		}
+		for _, f := range frames {
+			fmt.Fprintf(w, "data: %s\n\n", f)
+			fl.Flush()
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		fl.Flush()
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	inst := testInstance(t, srv.URL)
+
+	ts, err := inst.Complete(context.Background(), rt.CompletionRequest{
+		Kind:     rt.KindChat,
+		Messages: []rt.Message{{Role: "user", Content: "2+2?"}},
+		Params:   rt.GenerationParams{Seed: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokens := 0
+	var text, reasoning string
+	for {
+		c, rerr := ts.Recv()
+		if rerr != nil {
+			break
+		}
+		tokens += c.TokenCount
+		text += c.Delta
+		reasoning += c.Reasoning
+		if c.Done {
+			if c.FinishReason != "length" || c.Usage == nil || c.Usage.CompletionTokens != 4 {
+				t.Errorf("final chunk = %+v", c)
+			}
+			break
+		}
+	}
+	if reasoning != "Let me think." || text != "Four." {
+		t.Errorf("reasoning=%q text=%q", reasoning, text)
+	}
+	if tokens != 4 {
+		t.Errorf("relayed %d tokens, want 4 (reasoning tokens count)", tokens)
+	}
+}

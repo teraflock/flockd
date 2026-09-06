@@ -229,7 +229,7 @@ func (s *Server) serveGeneration(w http.ResponseWriter, r *http.Request, oa oaCh
 
 	if !oa.Stream {
 		defer stream.Close()
-		text, usage, finish, derr := rt.Drain(stream)
+		text, reasoning, usage, finish, derr := rt.DrainAll(stream)
 		if derr != nil {
 			writeEngineError(w, derr)
 			return
@@ -242,15 +242,23 @@ func (s *Server) serveGeneration(w http.ResponseWriter, r *http.Request, oa oaCh
 			"usage":   usageOf(usage),
 		}
 		if chat {
+			// reasoning_content is the OpenAI-compatible extension
+			// (DeepSeek, llama.cpp) for chain-of-thought; present only
+			// when the model produced any.
+			msg := map[string]any{"role": "assistant", "content": text}
+			if reasoning != "" {
+				msg["reasoning_content"] = reasoning
+			}
 			resp["choices"] = []map[string]any{{
 				"index":         0,
-				"message":       map[string]any{"role": "assistant", "content": text},
+				"message":       msg,
 				"finish_reason": mapFinish(finish),
 			}}
 		} else {
+			// Text completions have no reasoning field: nothing is dropped.
 			resp["choices"] = []map[string]any{{
 				"index":         0,
-				"text":          text,
+				"text":          reasoning + text,
 				"finish_reason": mapFinish(finish),
 			}}
 		}
@@ -291,17 +299,23 @@ func (s *Server) serveGeneration(w http.ResponseWriter, r *http.Request, oa oaCh
 			emit(map[string]any{"error": map[string]any{"message": chunk.Err, "type": "server_error"}})
 			break
 		}
-		if chunk.Delta != "" {
+		if chunk.Delta != "" || chunk.Reasoning != "" {
 			var choice map[string]any
 			if chat {
-				delta := map[string]any{"content": chunk.Delta}
+				delta := map[string]any{}
+				if chunk.Delta != "" {
+					delta["content"] = chunk.Delta
+				}
+				if chunk.Reasoning != "" {
+					delta["reasoning_content"] = chunk.Reasoning
+				}
 				if !sentRole {
 					delta["role"] = "assistant"
 					sentRole = true
 				}
 				choice = map[string]any{"index": 0, "delta": delta, "finish_reason": nil}
 			} else {
-				choice = map[string]any{"index": 0, "text": chunk.Delta, "finish_reason": nil}
+				choice = map[string]any{"index": 0, "text": chunk.Reasoning + chunk.Delta, "finish_reason": nil}
 			}
 			emit(map[string]any{
 				"id": id, "object": streamObj, "created": created, "model": model,
