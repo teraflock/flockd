@@ -119,8 +119,18 @@ func newHarnessMem(t *testing.T, maxDiskMB int64, blobs map[string][]byte, minRA
 	h.svc.SetReporter(h.rep.add)
 	ctx, cancel := context.WithCancel(context.Background())
 	h.cancel = cancel
-	t.Cleanup(cancel)
-	go h.svc.Run(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.svc.Run(ctx)
+	}()
+	// Stop the worker and wait for it: a test may end with a placement
+	// still polling for AC power, and package-level knobs (batteryPoll)
+	// are restored by later cleanups.
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
 	return h
 }
 
@@ -564,6 +574,9 @@ func TestAssignUpgradesStageInFlight(t *testing.T) {
 // (on disk or not), operator for what the operator installed — even when
 // the coordinator re-sends an assignment for it.
 func TestReportsAndModelStatesCarryOrigin(t *testing.T) {
+	old := batteryPoll // set before the worker starts: it reads the var
+	batteryPoll = 20 * time.Millisecond
+	t.Cleanup(func() { batteryPoll = old })
 	h := newHarnessMem(t, 0, map[string][]byte{"mine": []byte("mine"), "theirs": []byte("theirs"), "nope": []byte("nope")},
 		map[string]int64{"mine": 800, "theirs": 800})
 	if err := h.ops.Load(context.Background(), "mine"); err != nil {
@@ -618,9 +631,6 @@ func TestReportsAndModelStatesCarryOrigin(t *testing.T) {
 		t.Fatalf("evicted report origin = %q", got[len(got)-1])
 	}
 	// A queued placement in the heartbeat is the mesh's.
-	old := batteryPoll
-	batteryPoll = 20 * time.Millisecond
-	t.Cleanup(func() { batteryPoll = old })
 	h.mu.Lock()
 	h.battery = true
 	h.mu.Unlock()
