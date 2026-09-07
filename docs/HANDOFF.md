@@ -1,8 +1,8 @@
 # HANDOFF — implemented vs stubbed vs TODO
 
-Status as of Phase 0 completion. `go build ./... && go vet ./... && go
-test ./...` are green; `scripts/smoke.sh` proves the end-to-end standalone
-path.
+Status as of v0.5.0 — the hosted mesh is live and the daemon's defaults
+enroll against it. `make build && make test` are green; `scripts/smoke.sh`
+proves the end-to-end standalone path.
 
 ## Fully implemented and tested
 
@@ -16,9 +16,10 @@ path.
     download of a pinned `llama-server`; supervisor with health-gating and
     crash-restart w/ backoff (tested via re-exec helper process); ephemeral
     loopback port; OpenAI-HTTP/SSE translation (tested against a fake
-    llama-server). *Not yet run against a real llama-server binary in CI —
-    no artifact CDN exists; set `runtime.llama_server_path` to a local
-    build to use it today.*
+    llama-server). *Not yet run against a real llama-server binary in CI.
+    The pinned artifact manifest is published for darwin/arm64 Metal
+    (`runtime.artifact_manifest_url` default, `teraflock-downloads` S3);
+    set `runtime.llama_server_path` to a local build on other platforms.*
 - **Governor** (`internal/governor`): idle-only/always/scheduled policies,
   battery + thermal guards, schedule windows w/ midnight wrap, instant
   yield (drain-or-cancel within `yield_grace`), admission API, live policy
@@ -97,18 +98,22 @@ path.
   re-enrolls after a mesh-CA rotation, which the startup path cannot do)
   and swaps the tunnel client live. `tera login`'s claim-code file +
   restart flow still works for the CLI.
-- **Cert rotation**: `enroll.RotateIfNeeded` scaffolded (re-enrolls within
-  7 days of expiry); needs the real coordinator's rotation semantics and a
-  call site on session start.
+- **Cert rotation**: DONE — `rotateIfNeeded` (cmd/flockd) runs before the
+  session dial; within 7 days of the 30-day cert's expiry it calls
+  `enroll.RotateIfNeeded`, which re-enrolls over the server-authenticated
+  bootstrap dial with the `rotate:<nodeID>` sentinel (possession of the
+  node key is the credential, no claim code). A failed rotation keeps the
+  current cert and retries on the next start; it never takes the node
+  down. The coordinator side (`rotateCert`) is live on the hosted mesh.
 
 ## TODO for the next developer (rough priority)
 
 1. **Real llama-server E2E**: stand up the `runtimes/` build CI, publish an
    artifact manifest, and add an opt-in integration test
    (`FLOCKD_TEST_LLAMA_SERVER_PATH=… go test -tags realllama`).
-2. **Phase 1 tunnel remainder**: QUIC `Dialer` (quic-go); cert rotation call
-   site. (ModelAssignment and ConfigUpdate are done; enrollment against the
-   real coordinator works — see below.)
+2. **Phase 1 tunnel remainder**: QUIC `Dialer` (quic-go). (ModelAssignment,
+   ConfigUpdate and cert rotation are done; enrollment against the hosted
+   coordinator is the default path — see below.)
 3. **Limits persistence**: DONE — PUT /api/v1/limits persists to a
    daemon-owned `<data_dir>/limits.toml` overlay (config.toml untouched).
 4. **Keychain**: move `node.key` and `local_api_token` to
@@ -271,8 +276,11 @@ FLOCKD_TUNNEL__COORDINATOR_ADDR=coordinator:9090 flockd
 - `--standalone` enrolls into `<data_dir>/standalone/` so it can never
   overwrite a real mesh identity.
 - `tunnel.insecure = true` (config or `FLOCKD_TUNNEL__INSECURE`) dials the
-  coordinator over plaintext gRPC — needed against the dev coordinator until
-  mTLS termination lands, never for real deployments.
+  coordinator over plaintext gRPC — only for the kind/dev coordinator,
+  whose tunnel listener is plaintext by default. The hosted mesh
+  terminates TLS in the coordinator (public cert for the Enroll leg, mesh
+  client cert required on every session); the default
+  `tunnel.coordinator_addr` is `tunnel.teraflock.ai:443`.
 - The daemon reports `runtime_build_id` in its CapabilityProfile
   (`mock-runtime-v1`, or the pinned llama.cpp build id). The coordinator
   needs it to pick fingerprint challenges calibrated for that runtime;

@@ -20,9 +20,10 @@ API or redeem for cash.
 - 💰 **Earnings you can watch tick.** `tera dashboard` (terminal) and a
   built-in web dashboard at `localhost:7777`.
 
-> **Status: Phase 0.** The single-node vertical slice works end to end
-> (see the roadmap below). The hosted coordinator/mesh is under
-> construction — today the daemon runs standalone.
+> **Status: beta, hosted mesh live.** Nodes enroll against the hosted
+> coordinator at `tunnel.teraflock.ai` and serve traffic that arrives at
+> `api.teraflock.ai` (see the roadmap below). Standalone mode still works
+> without an account.
 
 ## Install
 
@@ -122,15 +123,54 @@ tera limits --serve idle-only   # resource policy
 scripts/smoke.sh      # the whole Phase 0 exit criterion as a script
 ```
 
-## Joining the mesh (Phase 1, soon)
+## Joining the mesh
+
+The hosted mesh is live: a node dials out to `tunnel.teraflock.ai:443` over
+mTLS and serves requests that arrive at `api.teraflock.ai`. Onboarding runs
+in cohorts from the [waitlist](https://teraflock.ai); once you have an
+invite link open:
 
 ```sh
-tera login   # browser handoff, claims this node to your account
-tera up      # install + start the service (launchd / systemd --user)
+tera login                     # browser handoff: claims this node to your account
+tera login --claim-code CODE   # headless boxes: paste the one-shot claim code instead
+tera up                        # install + start the service (launchd / systemd --user)
+tera dashboard                 # watch it serve
 ```
 
-Until the hosted coordinator ships, `tera login` stores your claim code and
-the daemon serves locally only.
+`tera login` stores the claim code; on first start the daemon exchanges it
+for a 30-day client certificate from the mesh CA (rotated automatically in
+its last 7 days) and then holds one outbound session to the coordinator.
+The defaults already point at the hosted coordinator, the published
+runtime manifest and the model catalog, so a fresh install needs no config
+file. The coordinator may ask the node to download and serve catalog
+models that fit the budget you set with `tera limits` — every such
+placement is reported in `tera dashboard` and the activity feed, and
+`mesh_managed = false` turns it off.
+
+### Residential ISP terms
+
+Many residential internet plans have terms that restrict running
+"servers" or "commercial" services on the connection. Read yours before
+you enroll. What a Teraflock node actually does on the network:
+
+- It opens **one outbound, client-initiated mTLS connection** to
+  `tunnel.teraflock.ai:443` and does all of its work over it. It never
+  listens on a public port, never needs port forwarding, and is not
+  reachable from the internet — the only listener is the loopback
+  dashboard on `localhost:7777`.
+- The traffic is tokens, not media. A completion token is a few bytes,
+  so a node serving flat out for an hour moves on the order of tens of
+  megabytes, not gigabytes; while idle the tunnel exchanges a keepalive
+  ping about every 20 seconds. The one large transfer is the one-time
+  **model download** (a few GB to tens of GB per model, from the
+  `teraflock-downloads` S3 bucket, and only while on AC power by default).
+- We have not yet published measured per-day totals from a production
+  node; when we have them, they will go here.
+
+Whether that fits your plan is between you and your ISP: **you are
+responsible for complying with your own ISP's terms of service**, and
+Teraflock does not represent that any particular ISP permits it. This is
+a description of the daemon's behaviour, not legal advice.
 
 ## Resource governance promises
 
@@ -180,8 +220,10 @@ Note: `web/dist/` is **committed on purpose** so `go build` works from a
 fresh clone without Node installed (it's embedded via `go:embed`). Rebuild
 it when you touch `web/src`.
 
-Task runner (`just build|test|lint|smoke`) and CI config are in the repo;
-`just lint` installs and runs revive (same tool CI enforces).
+`make build|test|lint|smoke` is the canonical interface (`make build`
+regenerates the management API from `api/openapi.yaml` first — never edit
+`internal/localapi/gen/` by hand); a `justfile` mirrors the same verbs.
+`make lint` installs and runs revive (same tool CI enforces).
 
 ## Roadmap
 
@@ -190,14 +232,21 @@ Task runner (`just build|test|lint|smoke`) and CI config are in the repo;
   endpoint on localhost, TUI + web dashboards, fake coordinator.
   *Exit criterion met: `OPENAI_BASE_URL=http://localhost:7777/v1` works
   with the OpenAI SDKs (`scripts/smoke.sh`).*
-- [ ] **Phase 1 — mesh MVP.** Real coordinator, enrollment, QUIC tunnel,
-  heterogeneous nodes behind the hosted gateway.
-- [ ] **Phase 2 — money.** Ledger, prepaid credits, earnings accrual +
-  escrow.
-- [ ] **Phase 3 — trust.** Fingerprint challenges (the daemon side already
-  answers them), canary sampling, reputation, slashing.
-- [ ] **Phase 4 — product.** Batch API, hosted console, redemption, signed
-  auto-update.
+- [x] **Phase 1 — mesh MVP.** Hosted coordinator (`tunnel.teraflock.ai`),
+  enrollment with one-shot claim codes + mTLS and cert rotation,
+  heterogeneous nodes behind the hosted gateway (`api.teraflock.ai`),
+  coordinator-driven model placement under the operator's budget. Still
+  open: QUIC transport (the tunnel is gRPC over H2/TLS).
+- [x] **Phase 2 — money.** Double-entry ledger, prepaid credits, earnings
+  accrual + 7-day escrow, slashing.
+- [ ] **Phase 3 — trust (partial).** Canary duplication, timing envelopes,
+  reputation and slashing are live. The daemon answers fingerprint
+  challenges, but real expected-output sets are not generated yet, so
+  fingerprint verification is not active on the hosted mesh.
+- [ ] **Phase 4 — product (partial).** Batch API and the hosted console
+  ([app.teraflock.com](https://app.teraflock.com)) shipped; redemption
+  moves credits but the payout leg is a stub; signed auto-update is open
+  (binaries are checksummed, not signed).
 
 What's implemented vs stubbed, in detail: [docs/HANDOFF.md](docs/HANDOFF.md).
 

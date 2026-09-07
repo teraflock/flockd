@@ -23,7 +23,7 @@ cgo (SPEC §A1.3).
                           └───┼─┼────────────────────────────────────── ┘
                               │ │ gRPC (H2/TLS today, QUIC planned)
                               ▼ │
-                    coordinator (Phase 1) or in-process
+                    hosted coordinator (tunnel.teraflock.ai:443, mTLS) or in-process
                     fake coordinator (--standalone, Phase 0)
 ```
 
@@ -45,7 +45,7 @@ cgo (SPEC §A1.3).
 | `internal/engine` | Single serving funnel: model lookup → governor admission → runtime → telemetry metering. Shared by localapi and tunnel so both paths behave identically. |
 | `internal/tunnel` | Node side of `flock.tunnel.v1.TunnelService`: Hello/HelloAck, heartbeat loop, Dispatch (signature-verified against the pinned coordinator Ed25519 key), TokenChunk streaming, Cancel, Challenge (fingerprint probes), Drain, jittered-backoff reconnect. Transport is behind a `Dialer` interface — gRPC/H2 now, QUIC (quic-go) is the planned production transport. |
 | `internal/tunnel/fakecoord` | In-process fake coordinator over bufconn implementing the same proto service: Enroll (real CSR signing with a throwaway CA), Session, and a driver API to push dispatches/challenges. Powers `--standalone` and the tunnel test-suite. |
-| `internal/enroll` | Ed25519 identity (0600, never leaves the device), CSR, Enroll RPC, credential storage, mTLS client config, PKCE-style loopback login flow, cert-rotation scaffold. |
+| `internal/enroll` | Ed25519 identity (0600, never leaves the device), CSR, Enroll RPC, credential storage, mTLS client config, PKCE-style loopback login flow, cert rotation (last 7 days of the 30-day cert, via the `rotate:` Enroll sentinel). |
 | `internal/localapi` | Loopback HTTP: OpenAI-compatible `/v1/*`, management `/api/v1/*` (bearer token), SSE `/api/v1/events`, embedded web dashboard. |
 | `internal/telemetry` | Rolling tok/s window, request counters, heartbeat assembly. |
 | `internal/svc` | launchd (macOS, real), systemd user unit (Linux, real), Windows SCM (stub with instructions). |
