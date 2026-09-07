@@ -4,22 +4,17 @@ package hardware
 
 import (
 	"context"
-	"errors"
 	"os"
 
 	typesv1 "github.com/teraflock/proto/gen/go/flock/types/v1"
 	"golang.org/x/sys/windows"
 )
 
-// ErrWindowsDetectionStub marks probes not yet implemented on Windows.
-// TODO(windows): WMI (Win32_VideoController) + NVML for GPU/VRAM,
-// GlobalMemoryStatusEx for RAM detail, registry for CPU model.
-var ErrWindowsDetectionStub = errors.New("hardware: windows detection is a stub")
-
+// detectPlatform is the minimal Windows probe: CPU model from the
+// environment, GPUs left empty so the caller applies the CPU-only
+// fallback. RAM, CPU model and GPU/VRAM detection (WMI + NVML) are the
+// Windows epic's job — flockd#29.
 func detectPlatform(ctx context.Context, p *typesv1.CapabilityProfile) error {
-	// Minimal viable detection so the daemon runs on Windows: RAM via
-	// GlobalMemoryStatusEx-equivalent is stubbed; GPUs left empty so the
-	// caller applies the CPU-only fallback.
 	p.CpuModel = os.Getenv("PROCESSOR_IDENTIFIER")
 	return nil
 }

@@ -51,6 +51,12 @@ jobs:
       - name: unit tests
         working-directory: flockd
         run: go test ./...
+      # Deliberate limits, revisited with the Windows epic
+      # (https://github.com/teraflock/docs/issues/9): the race detector runs
+      # on ubuntu only (the suites are platform-agnostic; macOS/Windows
+      # runners are slow and add nothing), and the smoke test skips Windows
+      # (scripts/smoke.sh is bash and Windows service management is not
+      # implemented yet — flockd#28).
       - name: race (concurrency-heavy packages)
         if: matrix.os == 'ubuntu-latest'
         working-directory: flockd
@@ -100,8 +106,20 @@ jobs:
         run: |
           npm ci
           npm run build
-      - name: ensure committed dist is not stale (informational)
-        run: git status --porcelain web/dist || true
+      # web/dist is committed (go:embed) so a fresh clone builds without
+      # Node. Vite output is content-hashed and npm ci pins deps, so two
+      # builds of the same tree are byte-identical: any diff here is a
+      # forgotten `make web`. Fails since flockd#36 — masked drift is the
+      # same bug class as the stale website image in the Phase 3 deploy.
+      - name: ensure committed dist is not stale
+        run: |
+          git diff --exit-code --stat web/dist || \
+            (echo "::error::web/dist is stale: run 'make web' and commit" && exit 1)
+          if [ -n "$(git status --porcelain --untracked-files=all web/dist)" ]; then
+            echo "::error::web/dist has untracked build output: run 'make web' and commit"
+            git status --porcelain --untracked-files=all web/dist
+            exit 1
+          fi
 
   release:
     # Tag builds produce (unsigned, draft) release artifacts.
