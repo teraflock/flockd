@@ -117,7 +117,15 @@ func cmdUp() *cobra.Command {
 				return err
 			}
 			m := svc.NewManager()
-			if err := m.Install(ctx, bin, daemonArgs, svc.Options{LogPath: logPath}); err != nil {
+			opts := svc.Options{
+				LogPath: logPath,
+				// Platform notes from the installer (Linux lingering): shown
+				// after the success line so they read as footnotes, not
+				// failures.
+				Warn: func(msg string) { fmt.Println(styleWarn.Render("!"), msg) },
+				Info: func(msg string) { fmt.Println(styleDim.Render("  " + msg)) },
+			}
+			if err := m.Install(ctx, bin, daemonArgs, opts); err != nil {
 				return err
 			}
 			if err := m.Start(ctx); err != nil {

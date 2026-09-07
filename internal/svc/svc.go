@@ -24,6 +24,23 @@ type Options struct {
 	// native log sink (launchd). systemd ignores it — journalctl already
 	// captures the unit's output.
 	LogPath string
+	// Notice receives non-fatal, operator-facing notes from Install
+	// (e.g. Linux lingering). Warn is for things the operator should act
+	// on; Info for confirmations. Either may be nil.
+	Warn func(msg string)
+	Info func(msg string)
+}
+
+func (o Options) warn(msg string) {
+	if o.Warn != nil {
+		o.Warn(msg)
+	}
+}
+
+func (o Options) info(msg string) {
+	if o.Info != nil {
+		o.Info(msg)
+	}
 }
 
 // Manager is the platform-specific service controller.

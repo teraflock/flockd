@@ -137,6 +137,13 @@ tera up                        # install + start the service (launchd / systemd 
 tera dashboard                 # watch it serve
 ```
 
+**Linux, headless / over SSH:** the service is a `systemd --user` unit,
+which systemd stops when your last session ends. `tera up` runs
+`loginctl enable-linger` for you so the node survives logout; if that
+needs a password (polkit), `tera up` still succeeds and prints the hint —
+run `sudo loginctl enable-linger $USER` once. `tera down` never disables
+lingering.
+
 `tera login` stores the claim code; on first start the daemon exchanges it
 for a 30-day client certificate from the mesh CA (rotated automatically in
 its last 7 days) and then holds one outbound session to the coordinator.

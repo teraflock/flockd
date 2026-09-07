@@ -52,7 +52,7 @@ WantedBy=default.target
 `, binPath, strings.Join(args, " "))
 }
 
-func (m *systemdManager) Install(ctx context.Context, binPath string, args []string, _ Options) error {
+func (m *systemdManager) Install(ctx context.Context, binPath string, args []string, opts Options) error {
 	path, err := m.unitPath()
 	if err != nil {
 		return err
@@ -66,7 +66,58 @@ func (m *systemdManager) Install(ctx context.Context, binPath string, args []str
 	if out, err := exec.CommandContext(ctx, "systemctl", "--user", "daemon-reload").CombinedOutput(); err != nil {
 		return fmt.Errorf("svc: daemon-reload: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
+	ensureLinger(ctx, opts)
 	return nil
+}
+
+// ensureLinger keeps a --user unit alive after the operator's last session
+// ends: without lingering, systemd tears the user manager down at logout,
+// so a node started over SSH dies when the session closes — exactly the
+// headless case where the governor's assume-idle default is right. Failure
+// is a warning, never an error: a desktop user who prefers non-lingering
+// should not be blocked, and a polkit prompt over SSH must not hang
+// `tera up`. `tera down` deliberately never disables lingering (other
+// units may rely on it).
+func ensureLinger(ctx context.Context, opts Options) {
+	user := os.Getenv("USER")
+	if user == "" {
+		if u, err := os.UserHomeDir(); err == nil {
+			user = filepath.Base(u)
+		}
+	}
+	hint := "flockd will stop when you log out; run `sudo loginctl enable-linger " + user + "` to keep it running"
+	out, err := exec.CommandContext(ctx, "loginctl", "show-user", user, "-p", "Linger").Output()
+	if err == nil {
+		if on, ok := parseLinger(string(out)); ok && on {
+			opts.info("lingering already enabled: flockd keeps running after you log out")
+			return
+		}
+	}
+	// No username: acts on the calling user, which needs no root on
+	// systemd >= 230 unless polkit says otherwise.
+	if out, err := exec.CommandContext(ctx, "loginctl", "enable-linger").CombinedOutput(); err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			msg = err.Error()
+		}
+		opts.warn(hint + " (" + msg + ")")
+		return
+	}
+	opts.info("lingering enabled: flockd keeps running after you log out")
+}
+
+// parseLinger reads `loginctl show-user <u> -p Linger` output
+// ("Linger=yes\n"). ok is false when the property is absent, so callers
+// fall through to enable-linger rather than trusting a blank answer.
+func parseLinger(out string) (on, ok bool) {
+	for _, line := range strings.Split(out, "\n") {
+		k, v, found := strings.Cut(strings.TrimSpace(line), "=")
+		if !found || k != "Linger" {
+			continue
+		}
+		return strings.EqualFold(strings.TrimSpace(v), "yes"), true
+	}
+	return false, false
 }
 
 func (m *systemdManager) Uninstall(ctx context.Context) error {
