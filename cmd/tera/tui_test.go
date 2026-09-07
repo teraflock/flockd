@@ -68,3 +68,43 @@ func TestLogPaneHeightClamps(t *testing.T) {
 		t.Errorf("tall terminal: h = %d, want 20", h)
 	}
 }
+
+// The MESH panel replaced a hardcoded "probation" placeholder (flockd#40):
+// it must only say what /api/v1/status says.
+func TestMeshPanelNeverFakesReputation(t *testing.T) {
+	now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
+	m := newDashModel(nil)
+	m.status.Version = "0.5.0"
+
+	m.status.Standalone = true
+	if p := m.meshPanel(now); !strings.Contains(p, "standalone") || strings.Contains(p, "probation") || !strings.Contains(p, "version check pending") {
+		t.Fatalf("standalone panel:\n%s", p)
+	}
+
+	exp := now.Add(27 * 24 * time.Hour)
+	m.status.Standalone, m.status.Enrolled, m.status.NodeID, m.status.CertExpiresAt = false, true, "node-abcdef123456", &exp
+	m.status.Update = &updateResp{Available: true, Latest: "0.5.1"}
+	m.status.Memory.UsedMB, m.status.Memory.BudgetMB = 2048, 32768
+	p := m.meshPanel(now)
+	for _, want := range []string{"enrolled", "node-abcdef1", "cert expires in 27d", "0.5.1 available", "2.0 / 32.0GB"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("enrolled panel missing %q:\n%s", want, p)
+		}
+	}
+	if strings.Contains(p, "probation") || strings.Contains(p, "reputation") {
+		t.Errorf("panel mentions reputation without data:\n%s", p)
+	}
+
+	soon := now.Add(3 * 24 * time.Hour)
+	m.status.CertExpiresAt = &soon
+	m.status.Update = &updateResp{BelowMinimum: true, Minimum: "0.6.0"}
+	p = m.meshPanel(now)
+	if !strings.Contains(p, "rotation due") || !strings.Contains(p, "below mesh minimum 0.6.0") {
+		t.Errorf("warnings missing:\n%s", p)
+	}
+
+	m.status.Enrolled, m.status.CertExpiresAt, m.status.Update = false, nil, nil
+	if p := m.meshPanel(now); !strings.Contains(p, "not enrolled") || !strings.Contains(p, "tera login") {
+		t.Errorf("not-enrolled panel:\n%s", p)
+	}
+}

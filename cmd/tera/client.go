@@ -140,16 +140,18 @@ func (c *apiClient) del(path string) error { return c.do(http.MethodDelete, path
 // ---- shared response shapes (mirror internal/localapi) ----
 
 type statusResp struct {
-	NodeID        string  `json:"node_id"`
-	Version       string  `json:"version"`
-	Standalone    bool    `json:"standalone"`
-	State         string  `json:"state"`
-	UptimeSeconds int64   `json:"uptime_seconds"`
-	DefaultModel  string  `json:"default_model"`
-	ModelsLoaded  int     `json:"models_loaded"`
-	Inflight      int     `json:"inflight"`
-	OnBattery     bool    `json:"on_battery"`
-	TempCelsius   float64 `json:"temp_celsius"`
+	NodeID        string     `json:"node_id"`
+	Version       string     `json:"version"`
+	Standalone    bool       `json:"standalone"`
+	Enrolled      bool       `json:"enrolled"`
+	CertExpiresAt *time.Time `json:"cert_expires_at"`
+	State         string     `json:"state"`
+	UptimeSeconds int64      `json:"uptime_seconds"`
+	DefaultModel  string     `json:"default_model"`
+	ModelsLoaded  int        `json:"models_loaded"`
+	Inflight      int        `json:"inflight"`
+	OnBattery     bool       `json:"on_battery"`
+	TempCelsius   float64    `json:"temp_celsius"`
 	Hardware      *struct {
 		OS       string `json:"os"`
 		Arch     string `json:"arch"`
@@ -188,12 +190,13 @@ type statusResp struct {
 }
 
 type updateResp struct {
-	Available    bool   `json:"available"`
-	Current      string `json:"current"`
-	Latest       string `json:"latest"`
-	Minimum      string `json:"minimum"`
-	BelowMinimum bool   `json:"below_minimum"`
-	URL          string `json:"url"`
+	Available    bool      `json:"available"`
+	Current      string    `json:"current"`
+	Latest       string    `json:"latest"`
+	Minimum      string    `json:"minimum"`
+	BelowMinimum bool      `json:"below_minimum"`
+	URL          string    `json:"url"`
+	CheckedAt    time.Time `json:"checked_at"`
 }
 
 // updateLine renders the one-line update notice for status/TUI ("" = none).

@@ -327,18 +327,12 @@ func (m *dashModel) View() string {
 			st.Hardware.OS, st.Hardware.Arch, st.Hardware.CPUCores, st.Hardware.RAMMB/1024,
 			strings.Join(gpus, "\n"), power, temp)
 	}
-	if st.Memory.BudgetMB > 0 {
-		hw += fmt.Sprintf("\nmodels %.1f / %.1fGB memory budget", float64(st.Memory.UsedMB)/1024, float64(st.Memory.BudgetMB)/1024)
-	}
 	if st.Disk.Dir != "" {
 		hw += fmt.Sprintf("\ndisk %s models · %s free", gb(st.Disk.ModelsBytes), gb(st.Disk.FreeBytes))
 	}
 	hardware := dashPanel.Width(46).Render(dashHeader.Render("HARDWARE") + "\n" + hw)
 
-	// Reputation placeholder until the trust engine exists (Phase 3).
-	rep := dashPanel.Width(40).Render(dashHeader.Render("REPUTATION") + "\n" +
-		dashBig.Render("—") + " " + dashLabel.Render("probation") + "\n" +
-		dashLabel.Render("reputation starts accruing once\nenrolled with a live coordinator"))
+	mesh := dashPanel.Width(40).Render(dashHeader.Render("MESH") + "\n" + m.meshPanel(time.Now()))
 
 	// Models panel.
 	var rows []string
@@ -380,7 +374,7 @@ func (m *dashModel) View() string {
 	}
 
 	top := lipgloss.JoinHorizontal(lipgloss.Top, throughput, earnings)
-	mid := lipgloss.JoinHorizontal(lipgloss.Top, hardware, rep)
+	mid := lipgloss.JoinHorizontal(lipgloss.Top, hardware, mesh)
 	parts := []string{header, top, mid, modelsPanel}
 	if line := updateLine(st.Update); line != "" {
 		parts = append(parts, dashAmber.Render("⬆ "+line))
@@ -390,6 +384,60 @@ func (m *dashModel) View() string {
 	}
 	parts = append(parts, footer)
 	return strings.Join(parts, "\n")
+}
+
+// meshPanel is what the daemon actually knows about its place in the
+// mesh — enrollment, certificate, version/update state, model memory —
+// from /api/v1/status. It replaced a hardcoded "probation" placeholder
+// (flockd#40): nothing on the wire tells a node its reputation yet, and
+// the panel must never fake or infer one (the proto ask is on docs#12).
+func (m *dashModel) meshPanel(now time.Time) string {
+	st := m.status
+	var lines []string
+	switch {
+	case st.Standalone:
+		lines = append(lines, dashAmber.Render("standalone")+dashLabel.Render(" · in-process fake coordinator"))
+	case st.Enrolled:
+		lines = append(lines, dashGreen.Render("enrolled")+dashLabel.Render(" · node "+short(st.NodeID)))
+	default:
+		lines = append(lines, dashAmber.Render("not enrolled")+dashLabel.Render(" · run tera login"))
+	}
+	if st.Enrolled && st.CertExpiresAt != nil {
+		left := st.CertExpiresAt.Sub(now)
+		cert := fmt.Sprintf("cert expires in %s", humanDays(left))
+		if left < 7*24*time.Hour {
+			cert = dashAmber.Render(cert + " · rotation due")
+		} else {
+			cert = dashLabel.Render(cert)
+		}
+		lines = append(lines, cert)
+	}
+	switch u := st.Update; {
+	case u == nil:
+		lines = append(lines, dashLabel.Render("v"+st.Version+" · version check pending"))
+	case u.BelowMinimum:
+		lines = append(lines, dashAmber.Render("v"+st.Version+" below mesh minimum "+u.Minimum+" · drained until updated"))
+	case u.Available:
+		lines = append(lines, dashAmber.Render("v"+st.Version+" · "+u.Latest+" available"))
+	default:
+		lines = append(lines, dashLabel.Render("v"+st.Version+" · up to date"))
+	}
+	if st.Memory.BudgetMB > 0 {
+		lines = append(lines, dashLabel.Render(fmt.Sprintf("models %.1f / %.1fGB memory budget",
+			float64(st.Memory.UsedMB)/1024, float64(st.Memory.BudgetMB)/1024)))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// humanDays renders a duration as days (or hours under a day).
+func humanDays(d time.Duration) string {
+	if d < 0 {
+		return "0h (expired)"
+	}
+	if d < 24*time.Hour {
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	}
+	return fmt.Sprintf("%dd", int(d.Hours()/24))
 }
 
 func short(s string) string {
