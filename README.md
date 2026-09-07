@@ -120,6 +120,8 @@ tera dashboard        # gorgeous terminal dashboard: tok/s sparkline, earnings t
 tera dashboard --web  # browser dashboard (prints the auth token to paste)
 tera status           # one-shot status
 tera limits --serve idle-only   # resource policy
+tera models pull <id>           # download a catalog model (progress bar, resumes)
+tera models load <id>           # load / unload / default — the daemon does the work
 scripts/smoke.sh      # the whole Phase 0 exit criterion as a script
 ```
 

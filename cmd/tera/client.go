@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,6 +21,10 @@ type apiClient struct {
 	tokenSource string // where the token came from, for error messages
 	dataDir     string
 	hc          *http.Client
+	// long has no timeout: SSE follows and synchronous loads (llama-server
+	// startup, download-then-load) outlive any sane fixed deadline. Callers
+	// bound it with a context instead.
+	long *http.Client
 }
 
 // newAPIClient resolves the bearer token, in precedence order: the --token
@@ -32,6 +37,7 @@ func newAPIClient(base, dataDir string) (*apiClient, error) {
 		base:    strings.TrimSuffix(base, "/"),
 		dataDir: dataDir,
 		hc:      &http.Client{Timeout: 10 * time.Second},
+		long:    &http.Client{},
 	}
 	switch {
 	case flagToken != "":
@@ -51,6 +57,10 @@ func newAPIClient(base, dataDir string) (*apiClient, error) {
 }
 
 func (c *apiClient) do(method, path string, body, out any) error {
+	return c.doWith(context.Background(), c.hc, method, path, body, out)
+}
+
+func (c *apiClient) doWith(ctx context.Context, hc *http.Client, method, path string, body, out any) error {
 	var rdr io.Reader
 	if body != nil {
 		raw, err := json.Marshal(body)
@@ -59,7 +69,7 @@ func (c *apiClient) do(method, path string, body, out any) error {
 		}
 		rdr = bytes.NewReader(raw)
 	}
-	req, err := http.NewRequest(method, c.base+path, rdr)
+	req, err := http.NewRequestWithContext(ctx, method, c.base+path, rdr)
 	if err != nil {
 		return err
 	}
@@ -69,11 +79,27 @@ func (c *apiClient) do(method, path string, body, out any) error {
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
-	resp, err := c.hc.Do(req)
+	resp, err := hc.Do(req)
 	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return fmt.Errorf("cannot reach flockd at %s (is it running? try `tera up` or `flockd --standalone`): %w", c.base, err)
 	}
 	defer resp.Body.Close()
+	if err := c.httpError(resp); err != nil {
+		return err
+	}
+	if out != nil {
+		return json.NewDecoder(resp.Body).Decode(out)
+	}
+	return nil
+}
+
+// httpError turns a non-2xx response into the CLI's user-facing error
+// (401 explains where the token was looked for; others carry the daemon's
+// message). Nil for success.
+func (c *apiClient) httpError(resp *http.Response) error {
 	if resp.StatusCode == http.StatusUnauthorized {
 		return fmt.Errorf("daemon rejected the auth token (%s).\n"+
 			"  The token is per-install and lives in the daemon's data dir.\n"+
@@ -93,13 +119,16 @@ func (c *apiClient) do(method, path string, body, out any) error {
 		}
 		return fmt.Errorf("daemon error (%d): %s", resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
-	if out != nil {
-		return json.NewDecoder(resp.Body).Decode(out)
-	}
 	return nil
 }
 
 func (c *apiClient) get(path string, out any) error { return c.do(http.MethodGet, path, nil, out) }
+
+// postLong is post without the 10s deadline, bounded by ctx — for
+// synchronous daemon operations that legitimately take a while (load).
+func (c *apiClient) postLong(ctx context.Context, path string, body, out any) error {
+	return c.doWith(ctx, c.long, http.MethodPost, path, body, out)
+}
 func (c *apiClient) put(path string, body, out any) error {
 	return c.do(http.MethodPut, path, body, out)
 }
@@ -195,18 +224,36 @@ type earningsResp struct {
 }
 
 type modelsResp struct {
-	Models []struct {
-		ID        string     `json:"id"`
-		SizeBytes int64      `json:"size_bytes"`
-		Pinned    bool       `json:"pinned"`
-		LastUsed  time.Time  `json:"last_used"`
-		State     string     `json:"state"`
-		Loaded    bool       `json:"loaded"`
-		Default   bool       `json:"default"`
-		Origin    string     `json:"origin"`
-		LoadedMB  *int64     `json:"loaded_mb"`
-		IdleSince *time.Time `json:"idle_since"`
-	} `json:"models"`
+	Models []modelRow `json:"models"`
+}
+
+// modelRow mirrors ModelRow in api/openapi.yaml.
+type modelRow struct {
+	ID            string     `json:"id"`
+	SizeBytes     int64      `json:"size_bytes"`
+	Pinned        bool       `json:"pinned"`
+	LastUsed      time.Time  `json:"last_used"`
+	State         string     `json:"state"`
+	Loaded        bool       `json:"loaded"`
+	Default       bool       `json:"default"`
+	Origin        string     `json:"origin"`
+	LoadedMB      *int64     `json:"loaded_mb"`
+	IdleSince     *time.Time `json:"idle_since"`
+	ReceivedBytes *int64     `json:"received_bytes"`
+}
+
+// findModel returns the row for id from GET /api/v1/models.
+func (c *apiClient) findModel(id string) (modelRow, bool, error) {
+	var mr modelsResp
+	if err := c.get("/api/v1/models", &mr); err != nil {
+		return modelRow{}, false, err
+	}
+	for _, m := range mr.Models {
+		if m.ID == id {
+			return m, true, nil
+		}
+	}
+	return modelRow{}, false, nil
 }
 
 type limitsResp struct {

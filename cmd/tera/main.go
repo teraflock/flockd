@@ -396,34 +396,9 @@ func cmdModels() *cobra.Command {
 					fmt.Println(styleDim.Render("no models cached"))
 					return nil
 				}
-				fmt.Printf("%-40s %-12s %-10s %-6s %-9s %s\n", "MODEL", "STATE", "SIZE", "PIN", "ORIGIN", "LOADED")
+				fmt.Println(modelsHeader())
 				for _, m := range mr.Models {
-					size := "—"
-					if m.SizeBytes > 0 {
-						size = fmt.Sprintf("%.1fGB", float64(m.SizeBytes)/1e9)
-					}
-					pin, loaded := "", ""
-					if m.Pinned {
-						pin = "📌"
-					}
-					if m.Loaded {
-						loaded = styleOK.Render("●")
-						if m.LoadedMB != nil {
-							loaded += fmt.Sprintf(" %.1fGB", float64(*m.LoadedMB)/1024)
-						}
-						if m.IdleSince != nil {
-							loaded += styleDim.Render(" idle " + time.Since(*m.IdleSince).Round(time.Second).String())
-						}
-					}
-					name := m.ID
-					if m.Default {
-						name += styleDim.Render(" (default)")
-					}
-					state := m.State
-					if state == "missing" {
-						state = styleWarn.Render(state)
-					}
-					fmt.Printf("%-40s %-12s %-10s %-6s %-9s %s\n", name, state, size, pin, m.Origin, loaded)
+					fmt.Println(modelRowLine(m))
 				}
 				return nil
 			},
@@ -444,6 +419,7 @@ func cmdModels() *cobra.Command {
 				return nil
 			},
 		},
+		cmdModelsPull(), cmdModelsLoad(), cmdModelsUnload(), cmdModelsDefault(),
 		&cobra.Command{
 			Use:   "rm <model-id>",
 			Short: "Remove a model from the local cache",
