@@ -98,6 +98,7 @@ type Service struct {
 	// Last VRAM sample (discrete GPUs); zero time = never sampled.
 	vramUsedMB    int64
 	vramSampledAt time.Time
+	vramSampleSeq uint64 // incremented per card read; see loadInfo.VRAMSeq
 }
 
 // Catalog returns the model catalog, cached for catalogTTL. refresh forces a
@@ -337,7 +338,7 @@ func (s *Service) LoadInstanceOrigin(ctx context.Context, id, origin string) (rt
 	if s.loads == nil {
 		s.loads = map[string]*loadInfo{}
 	}
-	s.loads[id] = &loadInfo{Origin: origin, EstimateMB: estimate, LoadedAt: time.Now()}
+	s.loads[id] = &loadInfo{Origin: origin, EstimateMB: estimate, LoadedAt: time.Now(), VRAMSeq: s.vramSampleSeq}
 	s.mu.Unlock()
 	s.Eng.Register(spec, inst)
 	if s.OnLoaded != nil {

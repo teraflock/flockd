@@ -30,6 +30,11 @@ type loadInfo struct {
 	EstimateMB int64 // pre-load prediction (memory.EstimateMB)
 	MeasuredMB int64 // last runtime footprint sample; 0 = not yet measured
 	LoadedAt   time.Time
+	// VRAMSeq is the VRAM sample sequence at load time. A model loaded
+	// since the last card read (VRAMSeq == current sequence) is charged at
+	// its estimate on top of the sample; clocks are too coarse on some
+	// platforms (Windows ~15 ms) to compare timestamps for this.
+	VRAMSeq uint64
 }
 
 // MemorySnapshot is the /api/v1/status memory view and the heartbeat's
@@ -133,7 +138,7 @@ func (s *Service) usedLocked() int64 {
 	if memory.Discrete(s.Hardware) && !s.vramSampledAt.IsZero() {
 		used = s.vramUsedMB
 		for _, m := range s.Eng.Models() {
-			if li, ok := s.loads[m.Spec.ID]; ok && li.LoadedAt.After(s.vramSampledAt) {
+			if li, ok := s.loads[m.Spec.ID]; ok && li.VRAMSeq == s.vramSampleSeq {
 				used += li.EstimateMB
 			}
 		}
@@ -260,6 +265,7 @@ func (s *Service) Measure(ctx context.Context) {
 	if mb, ok := s.vramSampler().Sample(ctx); ok {
 		s.mu.Lock()
 		s.vramUsedMB, s.vramSampledAt = mb, at
+		s.vramSampleSeq++
 		s.mu.Unlock()
 	}
 }
