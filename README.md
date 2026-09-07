@@ -1,7 +1,7 @@
 # ⬡ Teraflock — `flockd`
 
 **Turn idle GPUs into an inference mesh.** `flockd` is the open-source node
-daemon for [Teraflock](https://teraflock.dev): install it on a Mac, a gaming
+daemon for [Teraflock](https://teraflock.com): install it on a Mac, a gaming
 PC, or a homelab box, and your idle silicon serves open-weight LLM
 inference — earning credits you can spend on the network's OpenAI-compatible
 API or redeem for cash.

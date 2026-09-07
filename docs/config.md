@@ -112,7 +112,7 @@ retention_days = 0              # evict unpinned, unloaded models not used for N
 feed_url = "https://api.teraflock.ai/v1/versions"
 
 [tunnel]
-coordinator_addr     = "tunnel.teraflock.dev:443"
+coordinator_addr     = "tunnel.teraflock.ai:443"
 standalone           = false    # run the in-process fake coordinator (Phase 0)
 heartbeat_interval   = "5s"     # coordinator may override via HelloAck
 reconnect_min        = "1s"     # jittered exponential backoff bounds
@@ -123,7 +123,7 @@ insecure             = false    # dev only: plaintext gRPC to the coordinator
                                 # plaintext until mTLS termination lands)
 
 [enroll]
-login_url = "https://teraflock.dev/claim"   # browser page opened by `tera login`
+login_url = "https://teraflock.ai/claim"   # browser page opened by `tera login`
 ```
 
 ## Notes

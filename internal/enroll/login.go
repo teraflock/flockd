@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/teraflock/flockd/internal/browser"
 )
 
 // LoginFlow implements the `tera login` browser handoff: a PKCE-style
@@ -23,7 +25,7 @@ import (
 type LoginFlow struct {
 	// LoginURL is the browser page (config enroll.login_url).
 	LoginURL string
-	// OpenBrowser launches the URL; overridable in tests. Nil = xdg-open/open.
+	// OpenBrowser launches the URL; overridable in tests. Nil = browser.Open.
 	OpenBrowser func(url string) error
 }
 
@@ -107,7 +109,7 @@ func (f *LoginFlow) Run(ctx context.Context) (*Result, string, error) {
 			// Non-fatal: caller prints the URL for manual visiting.
 			_ = err
 		}
-	} else if err := openBrowser(openURL); err != nil {
+	} else if err := browser.Open(openURL); err != nil {
 		_ = err
 	}
 

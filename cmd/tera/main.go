@@ -15,6 +15,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
+	"github.com/teraflock/flockd/internal/browser"
 	"github.com/teraflock/flockd/internal/config"
 	"github.com/teraflock/flockd/internal/enroll"
 	"github.com/teraflock/flockd/internal/hardware"
@@ -574,20 +575,35 @@ func cmdEarnings() *cobra.Command {
 	}
 }
 
+// defaultRedeemURL is the customer console's redeem page (app.teraflock.com,
+// plan 12). The page carries the current truth about payouts — the CLI only
+// says where to go, so it never advertises a minimum or a rail that does
+// not exist yet (flockd#32).
+const defaultRedeemURL = "https://app.teraflock.com/redeem"
+
 func cmdRedeem() *cobra.Command {
 	var redeemURL string
 	c := &cobra.Command{
 		Use:   "redeem",
-		Short: "Redeem credits for USD (opens the payout page)",
+		Short: "Redeem earned credits (opens the console's redeem page)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Println("Redemption happens on the web (Stripe Connect, $25 minimum).")
-			fmt.Println(styleDim.Render("  " + redeemURL))
-			_ = openInBrowser(redeemURL)
+			fmt.Fprintln(cmd.OutOrStdout(), "Redeem earned credits at", redeemURL)
+			openOrPrint(cmd, redeemURL)
 			return nil
 		},
 	}
-	c.Flags().StringVar(&redeemURL, "url", "https://teraflock.dev/redeem", "payout page URL")
+	c.Flags().StringVar(&redeemURL, "url", defaultRedeemURL, "redeem page URL")
 	return c
+}
+
+// openOrPrint opens url in the browser; when that fails (headless box, SSH
+// session, no launcher) it says so and prints the URL to open by hand
+// instead of silently doing nothing.
+func openOrPrint(cmd *cobra.Command, url string) {
+	if err := browser.Open(url); err != nil {
+		fmt.Fprintln(cmd.OutOrStdout(), styleWarn.Render("could not open a browser:"), err)
+		fmt.Fprintln(cmd.OutOrStdout(), styleDim.Render("  open "+url+" manually"))
+	}
 }
 
 // cmdToken prints the local API bearer token. The web dashboard needs it
@@ -647,20 +663,4 @@ func cmdUninstall() *cobra.Command {
 	}
 	c.Flags().BoolVar(&purge, "purge", false, "also delete the data directory (models, node key, token)")
 	return c
-}
-
-func openInBrowser(url string) error {
-	var cmd *exec.Cmd
-	switch {
-	case fileExists("/usr/bin/open"):
-		cmd = exec.Command("open", url)
-	default:
-		cmd = exec.Command("xdg-open", url)
-	}
-	return cmd.Start()
-}
-
-func fileExists(p string) bool {
-	_, err := os.Stat(p)
-	return err == nil
 }

@@ -27,7 +27,8 @@ func cmdDashboard() *cobra.Command {
 				if err == nil {
 					fmt.Println(styleDim.Render("  bearer token (paste into the page): " + strings.TrimSpace(string(raw))))
 				}
-				return openInBrowser(flagAPI)
+				openOrPrint(cmd, flagAPI)
+				return nil
 			}
 			cl, err := client()
 			if err != nil {
