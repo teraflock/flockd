@@ -51,8 +51,13 @@ type dataMsg struct {
 	status   statusResp
 	earnings earningsResp
 	models   modelsResp
+	logs     []logEntry
+	withLogs bool
 	err      error
 }
+
+// logPaneLines is how many ring entries the TUI keeps for scrolling.
+const logPaneLines = 200
 
 type dashModel struct {
 	cl      *apiClient
@@ -64,21 +69,40 @@ type dashModel struct {
 	models  modelsResp
 	lastErr error
 	haveOne bool
+
+	// Logs pane (flockd#39): toggled with `l`; logScroll counts lines
+	// scrolled back from the newest (0 = following).
+	showLogs  bool
+	logs      []logEntry
+	logScroll int
 }
 
 func newDashModel(cl *apiClient) *dashModel {
 	return &dashModel{cl: cl, spark: make([]float64, 0, 64)}
 }
 
-func (m *dashModel) fetch() tea.Msg {
-	var d dataMsg
-	if err := m.cl.get("/api/v1/status", &d.status); err != nil {
-		d.err = err
+// fetchCmd snapshots the model's needs (logs pane on/off) before the
+// command runs on another goroutine.
+func (m *dashModel) fetchCmd() tea.Cmd {
+	withLogs := m.showLogs
+	return func() tea.Msg {
+		var d dataMsg
+		if err := m.cl.get("/api/v1/status", &d.status); err != nil {
+			d.err = err
+			return d
+		}
+		_ = m.cl.get("/api/v1/earnings", &d.earnings)
+		_ = m.cl.get("/api/v1/models", &d.models)
+		if withLogs {
+			var ll struct {
+				Logs []logEntry `json:"logs"`
+			}
+			if m.cl.get(fmt.Sprintf("/api/v1/logs?n=%d", logPaneLines), &ll) == nil {
+				d.logs, d.withLogs = ll.Logs, true
+			}
+		}
 		return d
 	}
-	_ = m.cl.get("/api/v1/earnings", &d.earnings)
-	_ = m.cl.get("/api/v1/models", &d.models)
-	return d
 }
 
 func tick() tea.Cmd {
@@ -86,7 +110,7 @@ func tick() tea.Cmd {
 }
 
 func (m *dashModel) Init() tea.Cmd {
-	return tea.Batch(m.fetch, tick())
+	return tea.Batch(m.fetchCmd(), tick())
 }
 
 func (m *dashModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -95,11 +119,35 @@ func (m *dashModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "q", "esc", "ctrl+c":
 			return m, tea.Quit
+		case "l":
+			m.showLogs = !m.showLogs
+			m.logScroll = 0
+			if m.showLogs {
+				return m, m.fetchCmd()
+			}
+		case "up", "k":
+			if m.showLogs {
+				m.scrollLogs(1)
+			}
+		case "down", "j":
+			if m.showLogs {
+				m.scrollLogs(-1)
+			}
+		case "pgup":
+			if m.showLogs {
+				m.scrollLogs(m.logPaneHeight())
+			}
+		case "pgdown":
+			if m.showLogs {
+				m.scrollLogs(-m.logPaneHeight())
+			}
+		case "end", "G":
+			m.logScroll = 0
 		}
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 	case tickMsg:
-		return m, tea.Batch(m.fetch, tick())
+		return m, tea.Batch(m.fetchCmd(), tick())
 	case dataMsg:
 		if msg.err != nil {
 			m.lastErr = msg.err
@@ -110,12 +158,75 @@ func (m *dashModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = msg.status
 		m.earn = msg.earnings
 		m.models = msg.models
+		if msg.withLogs {
+			m.logs = msg.logs
+		}
 		m.spark = append(m.spark, msg.status.Stats.TokensPerSec1m)
 		if len(m.spark) > 60 {
 			m.spark = m.spark[1:]
 		}
 	}
 	return m, nil
+}
+
+// scrollLogs moves the pane by n lines (positive = older), clamped.
+func (m *dashModel) scrollLogs(n int) {
+	maxBack := len(m.logs) - m.logPaneHeight()
+	if maxBack < 0 {
+		maxBack = 0
+	}
+	m.logScroll += n
+	if m.logScroll > maxBack {
+		m.logScroll = maxBack
+	}
+	if m.logScroll < 0 {
+		m.logScroll = 0
+	}
+}
+
+// logPaneHeight is the number of log lines the pane shows: whatever the
+// terminal has left under the panels, between 5 and 20.
+func (m *dashModel) logPaneHeight() int {
+	// header + two panel rows (5 rows each incl. borders) + models panel
+	// + update line + footer ≈ 20 rows on a fresh dash; the models panel
+	// grows with the model count.
+	used := 20 + len(m.models.Models)
+	h := m.height - used - 2 // pane border
+	if h < 5 {
+		h = 5
+	}
+	if h > 20 {
+		h = 20
+	}
+	return h
+}
+
+// logsPane renders the last lines of the ring, offset by logScroll.
+func (m *dashModel) logsPane() string {
+	h := m.logPaneHeight()
+	title := dashHeader.Render("LOGS")
+	if m.logScroll > 0 {
+		title += dashLabel.Render(fmt.Sprintf("  ↑ %d lines back · End to follow", m.logScroll))
+	} else {
+		title += dashLabel.Render("  following · ↑/↓ PgUp/PgDn scroll")
+	}
+	end := len(m.logs) - m.logScroll
+	if end < 0 {
+		end = 0
+	}
+	start := end - h
+	if start < 0 {
+		start = 0
+	}
+	lines := make([]string, 0, h+1)
+	lines = append(lines, title)
+	if len(m.logs) == 0 {
+		lines = append(lines, dashLabel.Render("nothing logged yet"))
+	}
+	for _, e := range m.logs[start:end] {
+		lines = append(lines, formatLog(e, 84))
+	}
+	return dashPanel.Width(88).Render(strings.Join(lines, "\n"))
 }
 
 var (
@@ -261,7 +372,9 @@ func (m *dashModel) View() string {
 	}
 	modelsPanel := dashPanel.Width(88).Render(dashHeader.Render("MODEL SLOTS") + "\n" + strings.Join(rows, "\n"))
 
-	footer := dashLabel.Render("q quit · polls " + flagAPI + "/api/v1 every 1s")
+	// Help line. The TUI is a read-only view today; writes live in the
+	// CLI (flockd#41 decides whether p/u keys join `l`).
+	footer := dashLabel.Render("q quit · l logs  |  read-only view — change things with tera limits / tera models  ·  polls every 1s")
 	if m.lastErr != nil {
 		footer = dashAmber.Render("connection lost: " + m.lastErr.Error())
 	}
@@ -271,6 +384,9 @@ func (m *dashModel) View() string {
 	parts := []string{header, top, mid, modelsPanel}
 	if line := updateLine(st.Update); line != "" {
 		parts = append(parts, dashAmber.Render("⬆ "+line))
+	}
+	if m.showLogs {
+		parts = append(parts, m.logsPane())
 	}
 	parts = append(parts, footer)
 	return strings.Join(parts, "\n")

@@ -119,6 +119,7 @@ Then watch it work:
 tera dashboard        # gorgeous terminal dashboard: tok/s sparkline, earnings ticker
 tera dashboard --web  # browser dashboard (prints the auth token to paste)
 tera status           # one-shot status
+tera logs -f          # follow the daemon's log ring (same source as the dashboards)
 tera limits --serve idle-only   # resource policy
 tera models pull <id>           # download a catalog model (progress bar, resumes)
 tera models load <id>           # load / unload / default — the daemon does the work

@@ -73,7 +73,7 @@ func main() {
 
 	root.AddCommand(
 		cmdUp(), cmdDown(), cmdStatus(), cmdLogin(), cmdModels(), cmdLimits(),
-		cmdEarnings(), cmdRedeem(), cmdDashboard(), cmdToken(), cmdVersion(), cmdUninstall(),
+		cmdEarnings(), cmdRedeem(), cmdDashboard(), cmdLogs(), cmdToken(), cmdVersion(), cmdUninstall(),
 	)
 
 	if err := root.Execute(); err != nil {
