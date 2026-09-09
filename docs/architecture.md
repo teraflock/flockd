@@ -32,7 +32,7 @@ cgo (SPEC §A1.3).
 | package | role |
 |---|---|
 | `internal/config` | koanf config: defaults ← TOML ← `FLOCKD_*` env. Every knob in [config.md](config.md). |
-| `internal/hardware` | CapabilityProfile detection. Real on macOS (`system_profiler`/`sysctl`), nvidia-smi on Linux, stub on Windows. |
+| `internal/hardware` | CapabilityProfile detection. Real on macOS (`system_profiler`/`sysctl`), nvidia-smi on Linux and Windows (`hw_nvidia.go`), plus `GlobalMemoryStatusEx` / registry CPU name / `Win32_VideoController` on Windows. |
 | `internal/governor` | The make-or-break piece. Polls `IdleSource` (macOS `ioreg` HIDIdleTime, Linux logind `IdleHint` via `loginctl`, Windows `GetLastInputInfo`) / `PowerSource`, applies `serve: always\|idle-only\|scheduled`, battery/thermal guards, and **instant-yield**: on activity, in-flight requests get `yield_grace` (2s) to drain, then are cancelled; the node reports YIELDED. Heavily tested with a fake clock and fake signal sources. |
 | `internal/runtime` | The `Runtime`/`Instance` interfaces (SPEC §A1.3 verbatim) + deterministic mock. |
 | `internal/runtime/llamacpp` | Artifact fetcher (pinned manifest, SHA256-verify), supervisor (health-gate, crash-restart with backoff), and the HTTP/SSE translation to llama-server's OpenAI API on an ephemeral loopback port. |

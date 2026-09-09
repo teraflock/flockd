@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 
@@ -19,7 +18,7 @@ func detectPlatform(ctx context.Context, p *typesv1.CapabilityProfile) error {
 	p.RamTotalMb = readMemTotalMB("/proc/meminfo")
 	p.CpuModel = readCPUModel("/proc/cpuinfo")
 
-	if gpus := detectNvidia(ctx); len(gpus) > 0 {
+	if gpus := detectNvidia(ctx, "nvidia-smi"); len(gpus) > 0 {
 		p.Gpus = gpus
 		return nil
 	}
@@ -62,37 +61,6 @@ func readCPUModel(path string) string {
 		}
 	}
 	return ""
-}
-
-// detectNvidia shells out to nvidia-smi when present. NVML bindings are a
-// Phase 1+ improvement; CSV output is stable enough for detection.
-func detectNvidia(ctx context.Context) []*typesv1.GpuInfo {
-	out, err := exec.CommandContext(ctx, "nvidia-smi",
-		"--query-gpu=name,memory.total,driver_version",
-		"--format=csv,noheader,nounits").Output()
-	if err != nil {
-		return nil
-	}
-	return parseNvidiaSMI(string(out))
-}
-
-func parseNvidiaSMI(out string) []*typesv1.GpuInfo {
-	var gpus []*typesv1.GpuInfo
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		parts := strings.Split(line, ",")
-		if len(parts) < 3 {
-			continue
-		}
-		memMB, _ := strconv.ParseUint(strings.TrimSpace(parts[1]), 10, 64)
-		gpus = append(gpus, &typesv1.GpuInfo{
-			Vendor:        "nvidia",
-			Model:         strings.TrimSpace(parts[0]),
-			VramMb:        memMB,
-			DriverVersion: strings.TrimSpace(parts[2]),
-			Accel:         "cuda12",
-		})
-	}
-	return gpus
 }
 
 func diskFreeBytes(path string) (uint64, error) {

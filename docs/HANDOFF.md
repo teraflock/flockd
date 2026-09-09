@@ -69,11 +69,17 @@ proves the end-to-end standalone path.
 
 ## Stubbed (compiles, documented, returns useful errors)
 
-- **Windows**: hardware detection (CPU env var only), power source
-  (reports AC), SCM service manager (`ErrUnsupported` + manual `sc.exe`
-  instructions), process terminate (Kill, no console event), host memory
-  footprint (estimate stays; `nvidia-smi` VRAM sampling works when on
-  PATH). Idle source is real (`GetLastInputInfo`).
+- **Windows**: power source (reports AC), SCM service manager
+  (`ErrUnsupported` + manual `sc.exe` instructions), process terminate
+  (Kill, no console event), host memory footprint (estimate stays;
+  `nvidia-smi` VRAM sampling works when on PATH). Idle source is real
+  (`GetLastInputInfo`). Hardware detection is real (flockd#29):
+  `GlobalMemoryStatusEx` RAM, registry `ProcessorNameString` CPU name,
+  NVIDIA GPUs + VRAM via `nvidia-smi` (shared with Linux, `hw_nvidia.go`,
+  System32 fallback), other adapters listed via `Win32_VideoController`
+  (PowerShell/CIM) with VRAM 0 and no accel until a Windows vulkan lane
+  exists. Verified only on the CPU-only `windows-latest` CI runner so
+  far — a real NVIDIA box still needs a manual `tera status` check.
 - **Reputation panel** in the TUI: placeholder until the trust engine
   exists (Phase 3).
 - **ModelAssignment handling**: DONE (plan 05, 2026-09-01) —
@@ -118,10 +124,10 @@ proves the end-to-end standalone path.
    daemon-owned `<data_dir>/limits.toml` overlay (config.toml untouched).
 4. **Keychain**: move `node.key` and `local_api_token` to
    Keychain/DPAPI/secret-service (files are 0600 today, documented).
-5. **Windows**: GlobalMemoryStatusEx + WMI/NVML hardware,
-   GetSystemPowerStatus battery, SCM via `x/sys/windows/svc`, job-object
-   child management, GetProcessMemoryInfo footprint. Budget real time for
-   this (SPEC §13.7). (Idle source: DONE.)
+5. **Windows**: GetSystemPowerStatus battery, SCM via `x/sys/windows/svc`,
+   job-object child management, GetProcessMemoryInfo footprint. Budget
+   real time for this (SPEC §13.7). (Idle source and hardware detection:
+   DONE.)
 6. **Governor extras**: foreground-GPU-usage signal, screen-lock signal
    (macOS `CGSession`, logind `LockedHint`).
 7. **VRAM on AMD**: NVIDIA is measured with `nvidia-smi` (see "Memory

@@ -38,7 +38,11 @@ We publish a Homebrew **cask**, which Homebrew supports only on macOS — on
 Linux use `install.sh`, or the `.deb` / `.rpm` on the release.
 
 Windows: grab the zip from the [latest release](https://github.com/teraflock/flockd/releases/latest)
-(`winget install Teraflock.tera` coming later).
+(`winget install Teraflock.tera` coming later). Hardware detection is real
+on Windows — RAM, CPU name, NVIDIA GPUs with VRAM via `nvidia-smi`
+(`cuda12`), other adapters listed on the CPU lane — but `tera up` and a
+Windows llama-server build are still in progress
+([epic](https://github.com/teraflock/docs/issues/9)).
 
 Beta note: binaries are checksummed but not yet code-signed/notarized.
 Joining the mesh needs an invite from [teraflock.ai](https://teraflock.ai) —
