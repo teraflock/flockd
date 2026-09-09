@@ -29,6 +29,41 @@ func TestParseLoginctlSession(t *testing.T) {
 	}
 }
 
+func TestParseLoginctlSessionLockedHint(t *testing.T) {
+	now := time.UnixMicro(1757100000000000).Add(90 * time.Second)
+	// Locked screen: idle regardless of IdleHint (a bare X session never
+	// sets it), and at least idleSinceUnknown so any idle_after passes.
+	for _, out := range []string{
+		"IdleHint=no\nIdleSinceHint=0\nLockedHint=yes\n",
+		"IdleHint=yes\nIdleSinceHint=1757100000000000\nLockedHint=yes\n",
+		"IdleHint=yes\nIdleSinceHint=0\nLockedHint=yes\n",
+	} {
+		if d, err := parseLoginctlSession(out, now); err != nil || d != idleSinceUnknown {
+			t.Errorf("%q: %v, %v; want %v", out, d, err, idleSinceUnknown)
+		}
+	}
+	// An idle stretch longer than idleSinceUnknown is not shortened by the lock.
+	long := "IdleHint=yes\nIdleSinceHint=1757100000000000\nLockedHint=yes\n"
+	if d, err := parseLoginctlSession(long, now.Add(48*time.Hour)); err != nil || d < 48*time.Hour {
+		t.Errorf("long idle + locked: %v, %v", d, err)
+	}
+	// LockedHint=no changes nothing: IdleHint/IdleSinceHint rule.
+	if d, err := parseLoginctlSession("IdleHint=no\nIdleSinceHint=0\nLockedHint=no\n", now); err != nil || d != 0 {
+		t.Errorf("unlocked, not idle: %v, %v", d, err)
+	}
+	if d, err := parseLoginctlSession("IdleHint=yes\nIdleSinceHint=1757100000000000\nLockedHint=no\n", now); err != nil || d != 90*time.Second {
+		t.Errorf("unlocked, idle 90s: %v, %v", d, err)
+	}
+	// Missing LockedHint (old systemd) behaves exactly as before.
+	if d, err := parseLoginctlSession("IdleHint=yes\nIdleSinceHint=1757100000000000\n", now); err != nil || d != 90*time.Second {
+		t.Errorf("no LockedHint: %v, %v", d, err)
+	}
+	// Still an error without IdleHint, lock or not.
+	if _, err := parseLoginctlSession("LockedHint=yes\n", now); err == nil {
+		t.Error("LockedHint alone accepted without IdleHint")
+	}
+}
+
 func TestPickLoginctlSession(t *testing.T) {
 	// systemd ≥ 255 prints STATE/IDLE/SINCE; the ssh session has no seat.
 	modern := "      5 1000 anderson -     pts/1 active no -\n      3 1000 anderson seat0 tty2  active no -\n"

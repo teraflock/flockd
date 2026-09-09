@@ -9,13 +9,16 @@ import (
 )
 
 // systemd-logind is the Linux idle signal: every seat session carries
-// IdleHint (set by the desktop's screensaver / idle monitor) and
-// IdleSinceHint (µs since the epoch, 0 = unknown). The parsers live here,
-// build-tag free, so the fixture tests run everywhere; sources_linux.go
-// does the exec.
+// IdleHint (set by the desktop's screensaver / idle monitor),
+// IdleSinceHint (µs since the epoch, 0 = unknown) and LockedHint (the
+// screen locker told logind the session is locked). The parsers live
+// here, build-tag free, so the fixture tests run everywhere;
+// sources_linux.go does the exec.
 
 // idleSinceUnknown is what a session that says "idle" without saying
-// since when counts as: long enough for any idle_after policy.
+// since when counts as: long enough for any idle_after policy. A locked
+// session counts as at least this too — logind has no LockedSinceHint,
+// and a locked screen is "operator away" regardless of how long ago.
 const idleSinceUnknown = 24 * time.Hour
 
 // errNoSeatSession means loginctl listed no active seat session (headless
@@ -23,16 +26,22 @@ const idleSinceUnknown = 24 * time.Hour
 var errNoSeatSession = errors.New("governor: no active seat session in loginctl list-sessions")
 
 // parseLoginctlSession reads `loginctl show-session <id> -p IdleHint
-// -p IdleSinceHint` output:
+// -p IdleSinceHint -p LockedHint` output:
 //
 //	IdleHint=yes
 //	IdleSinceHint=1757100000000000
+//	LockedHint=no
 //
-// and returns how long the session has been idle (0 when not idle).
+// and returns how long the session has been idle (0 when not idle). A
+// locked session (LockedHint=yes) is idle for at least idleSinceUnknown
+// whatever IdleHint says: the lock is the operator's own "I'm away", and
+// unlike IdleHint it does not depend on the desktop running an idle
+// daemon. LockedHint missing (systemd < 232, or a property list without
+// it) simply contributes nothing.
 func parseLoginctlSession(out string, now time.Time) (time.Duration, error) {
 	var hint string
 	var since int64
-	haveHint := false
+	haveHint, locked := false, false
 	for _, line := range strings.Split(out, "\n") {
 		k, v, ok := strings.Cut(strings.TrimSpace(line), "=")
 		if !ok {
@@ -43,20 +52,27 @@ func parseLoginctlSession(out string, now time.Time) (time.Duration, error) {
 			hint, haveHint = strings.ToLower(strings.TrimSpace(v)), true
 		case "IdleSinceHint":
 			since, _ = strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+		case "LockedHint":
+			locked = strings.ToLower(strings.TrimSpace(v)) == "yes"
 		}
 	}
 	if !haveHint {
 		return 0, fmt.Errorf("governor: IdleHint not in loginctl output")
 	}
-	if hint != "yes" {
-		return 0, nil
-	}
-	if since <= 0 {
-		return idleSinceUnknown, nil
-	}
-	d := now.Sub(time.UnixMicro(since))
-	if d < 0 {
+	var d time.Duration
+	switch {
+	case hint != "yes":
 		d = 0
+	case since <= 0:
+		d = idleSinceUnknown
+	default:
+		d = now.Sub(time.UnixMicro(since))
+		if d < 0 {
+			d = 0
+		}
+	}
+	if locked && d < idleSinceUnknown {
+		d = idleSinceUnknown
 	}
 	return d, nil
 }

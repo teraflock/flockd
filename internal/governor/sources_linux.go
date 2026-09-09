@@ -14,8 +14,8 @@ import (
 )
 
 // NewPlatformIdleSource returns the Linux idle source: systemd-logind's
-// IdleHint / IdleSinceHint for the operator's seat session, read through
-// `loginctl show-session`. The session is $XDG_SESSION_ID when the daemon
+// IdleHint / IdleSinceHint / LockedHint for the operator's seat session,
+// read through `loginctl show-session`. The session is $XDG_SESSION_ID when the daemon
 // runs inside a login session, else the first active seat session from
 // `loginctl list-sessions` (a systemd --user service has no
 // XDG_SESSION_ID). No logind, or no seat session at all (headless), is
@@ -24,8 +24,10 @@ import (
 //
 // Caveat: IdleHint is set by the desktop session (GNOME, KDE, sway with
 // an idle daemon…); a bare X session without one leaves it at "no", so
-// the node never counts as idle there — serve_policy = always or
-// scheduled is the operator's answer.
+// the node only counts as idle there while the screen is locked
+// (LockedHint, set by any locker that tells logind — loginctl
+// lock-session, GNOME, KDE, swaylock via swayidle…). Without either,
+// serve_policy = always or scheduled is the operator's answer.
 func NewPlatformIdleSource() IdleSource { return &linuxIdleSource{} }
 
 type linuxIdleSource struct {
@@ -38,7 +40,7 @@ func (s *linuxIdleSource) IdleFor(ctx context.Context) (time.Duration, error) {
 	if err != nil {
 		return 0, err
 	}
-	out, err := exec.CommandContext(ctx, "loginctl", "show-session", sid, "-p", "IdleHint", "-p", "IdleSinceHint").Output()
+	out, err := exec.CommandContext(ctx, "loginctl", "show-session", sid, "-p", "IdleHint", "-p", "IdleSinceHint", "-p", "LockedHint").Output()
 	if err != nil {
 		// The session may have ended (logout): resolve again next time.
 		s.mu.Lock()

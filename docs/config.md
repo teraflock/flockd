@@ -55,7 +55,11 @@ idle_after       = "2m"         # input quiet time before the node counts as idl
                                 # your seat session, so a desktop without an idle
                                 # daemon never counts as idle — use always/scheduled;
                                 # Windows: GetLastInputInfo in the daemon's session;
-                                # headless/no logind: assumed idle, logged once)
+                                # headless/no logind: assumed idle, logged once).
+                                # A locked screen counts as idle at once, whatever
+                                # idle_after says (macOS: IOConsoleLocked via ioreg;
+                                # Linux: logind LockedHint — any locker that tells
+                                # logind, incl. a bare X session; Windows: not yet)
 yield_grace      = "2s"         # drain-or-cancel window on operator activity
 poll_interval    = "2s"         # how often idle/power signals are sampled
 serve_on_battery = false        # never serve on battery by default

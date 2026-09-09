@@ -190,7 +190,7 @@ these are hard rules, enforced by the governor and its test suite:
 
 | promise | mechanism |
 |---|---|
-| never serve while you're using the machine | `serve = idle-only` (default), input-idle detection |
+| never serve while you're using the machine | `serve = idle-only` (default), input-idle detection; a locked screen counts as idle immediately (macOS, Linux) |
 | get out of the way *fast* | instant-yield: in-flight requests drain-or-cancel within `yield_grace` (2s default) |
 | never drain your battery | `serve_on_battery = false` by default |
 | never cook your laptop | `max_temp_celsius` pause threshold |

@@ -30,6 +30,51 @@ func TestParseHIDIdleTime(t *testing.T) {
 	}
 }
 
+// Trimmed `ioreg -n Root -d 1` dumps: unlocked (as seen live on macOS
+// 26), the root flag after loginwindow locked the screen, and the
+// per-user CGS key the same event sets in IOConsoleUsers.
+const (
+	ioregRootUnlocked = `
++-o Root  <class IORegistryEntry, id 0x100000100, retain 37>
+    {
+      "IOConsoleLocked" = No
+      "IOConsoleUsers" = ({"kCGSSessionOnConsoleKey"=Yes,"kCGSSessionUserNameKey"="anderson","kCGSSessionUserIDKey"=501})
+    }
+`
+	ioregRootLocked = `
++-o Root  <class IORegistryEntry, id 0x100000100, retain 37>
+    {
+      "IOConsoleLocked" = Yes
+      "IOConsoleUsers" = ({"kCGSSessionOnConsoleKey"=Yes,"kCGSSessionUserNameKey"="anderson","CGSSessionScreenIsLocked"=Yes,"CGSSessionScreenLockedTime"=1757100000,"kCGSSessionUserIDKey"=501})
+    }
+`
+	ioregRootLockedCGSOnly = `
++-o Root  <class IORegistryEntry, id 0x100000100, retain 37>
+    {
+      "IOConsoleUsers" = ({"kCGSSessionOnConsoleKey"=Yes,"CGSSessionScreenIsLocked"=Yes,"kCGSSessionUserIDKey"=501})
+    }
+`
+)
+
+func TestParseConsoleLocked(t *testing.T) {
+	if parseConsoleLocked(ioregRootUnlocked) {
+		t.Error("unlocked fixture reported locked")
+	}
+	if parseConsoleLocked("") || parseConsoleLocked("no keys at all") {
+		t.Error("missing keys must mean unlocked")
+	}
+	if !parseConsoleLocked(ioregRootLocked) {
+		t.Error("IOConsoleLocked = Yes not detected")
+	}
+	if !parseConsoleLocked(ioregRootLockedCGSOnly) {
+		t.Error("CGSSessionScreenIsLocked = Yes not detected")
+	}
+	// The key name alone (e.g. inside another string) is not a lock.
+	if parseConsoleLocked(`"IOConsoleLocked" = No "CGSSessionScreenIsLocked"=No`) {
+		t.Error("No values reported locked")
+	}
+}
+
 func TestParsePmsetBatt(t *testing.T) {
 	battery := "Now drawing from 'Battery Power'\n -InternalBattery-0 (id=123)\t87%; discharging; 4:32 remaining"
 	ac := "Now drawing from 'AC Power'\n -InternalBattery-0 (id=123)\t100%; charged"

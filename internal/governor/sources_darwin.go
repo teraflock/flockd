@@ -20,18 +20,42 @@ func NewPlatformPowerSource() PowerSource { return &darwinPowerSource{} }
 
 // darwinIdleSource parses HIDIdleTime (nanoseconds since last HID input)
 // from the IOKit registry. This covers keyboard/mouse/trackpad activity.
-// Screen-lock detection via CGSessionCopyCurrentDictionary is a TODO
-// (requires a cgo shim; ioreg gets us the important signal).
+// A locked screen counts as idle too: loginwindow mirrors the lock state
+// into the registry root as IOConsoleLocked (and, per console user,
+// CGSSessionScreenIsLocked in IOConsoleUsers), which is the same fact
+// CGSessionCopyCurrentDictionary reports — read via `ioreg -n Root -d 1`
+// (~20ms) instead of a cgo shim against CoreGraphics, so the release
+// build stays CGO_ENABLED=0.
 type darwinIdleSource struct{}
 
-var hidIdleRe = regexp.MustCompile(`"HIDIdleTime"\s*=\s*(\d+)`)
+var (
+	hidIdleRe       = regexp.MustCompile(`"HIDIdleTime"\s*=\s*(\d+)`)
+	consoleLockedRe = regexp.MustCompile(`"(?:IOConsoleLocked|CGSSessionScreenIsLocked)"\s*=\s*(?:Yes|1|true)\b`)
+)
 
 func (darwinIdleSource) IdleFor(ctx context.Context) (time.Duration, error) {
 	out, err := exec.CommandContext(ctx, "ioreg", "-c", "IOHIDSystem", "-d", "4").Output()
 	if err != nil {
 		return 0, fmt.Errorf("governor: ioreg: %w", err)
 	}
-	return parseHIDIdleTime(string(out))
+	d, err := parseHIDIdleTime(string(out))
+	if err != nil {
+		return 0, err
+	}
+	// The lock probe is best-effort on top of the input signal: if it
+	// fails, the HID idle time alone still answers.
+	if root, err := exec.CommandContext(ctx, "ioreg", "-n", "Root", "-d", "1").Output(); err == nil && parseConsoleLocked(string(root)) && d < idleSinceUnknown {
+		d = idleSinceUnknown
+	}
+	return d, nil
+}
+
+// parseConsoleLocked reads the `ioreg -n Root -d 1` property dump: the
+// screen is locked when IOConsoleLocked = Yes on the root, or a console
+// user carries CGSSessionScreenIsLocked = Yes. Absent keys mean unlocked
+// (both are only set once loginwindow has locked at least once).
+func parseConsoleLocked(out string) bool {
+	return consoleLockedRe.MatchString(out)
 }
 
 func parseHIDIdleTime(out string) (time.Duration, error) {
