@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/teraflock/flockd/internal/localapi/client"
 )
 
 // fakeDaemon serves just enough of the local API for the pull loop: the
@@ -38,6 +40,7 @@ func fakeDaemon(t *testing.T, script string, ready *atomic.Bool) *httptest.Serve
 		if ready.Load() {
 			state = "ready"
 		}
+		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"models": []map[string]any{
 			{"id": "m1", "size_bytes": 1000, "state": state, "origin": "operator"},
 		}})
@@ -47,8 +50,13 @@ func fakeDaemon(t *testing.T, script string, ready *atomic.Bool) *httptest.Serve
 	return srv
 }
 
-func newTestClient(base string) *apiClient {
-	return &apiClient{base: base, token: "tok", hc: http.DefaultClient, long: &http.Client{}}
+func newTestClient(t *testing.T, base string) *client.Client {
+	t.Helper()
+	c, err := client.FromResolved(client.Resolved{Base: base, Token: "tok", TokenSource: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
 }
 
 func TestWaitForPullFollowsProgressToReady(t *testing.T) {
@@ -61,7 +69,7 @@ func TestWaitForPullFollowsProgressToReady(t *testing.T) {
 	var out bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := waitForPull(ctx, newTestClient(srv.URL), &out, "m1", false); err != nil {
+	if err := waitForPull(ctx, newTestClient(t, srv.URL), &out, "m1", false); err != nil {
 		t.Fatalf("waitForPull: %v\n%s", err, out.String())
 	}
 	s := out.String()
@@ -80,7 +88,7 @@ func TestWaitForPullReportsFailure(t *testing.T) {
 	var out bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	err := waitForPull(ctx, newTestClient(srv.URL), &out, "m1", false)
+	err := waitForPull(ctx, newTestClient(t, srv.URL), &out, "m1", false)
 	if err == nil || !strings.Contains(err.Error(), "sha256 mismatch") {
 		t.Fatalf("err = %v, want the daemon's reason", err)
 	}
@@ -95,7 +103,7 @@ func TestWaitForPullFallsBackToPolling(t *testing.T) {
 	var out bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := waitForPull(ctx, newTestClient(srv.URL), &out, "m1", false); err != nil {
+	if err := waitForPull(ctx, newTestClient(t, srv.URL), &out, "m1", false); err != nil {
 		t.Fatalf("waitForPull: %v", err)
 	}
 	if !strings.Contains(out.String(), "m1 ready") {
@@ -104,11 +112,11 @@ func TestWaitForPullFallsBackToPolling(t *testing.T) {
 }
 
 func TestPullMsgFromEventIgnoresOtherModels(t *testing.T) {
-	ev := sseEvent{Name: "models_changed", Data: json.RawMessage(`{"model":"zzz","change":"downloaded"}`)}
+	ev := client.Event{Name: "models_changed", Data: json.RawMessage(`{"model":"zzz","change":"downloaded"}`)}
 	if _, ok := pullMsgFromEvent(ev, "m1"); ok {
 		t.Error("event for another model accepted")
 	}
-	ev = sseEvent{Name: "models_changed", Data: json.RawMessage(`{"model":"m1","change":"loaded"}`)}
+	ev = client.Event{Name: "models_changed", Data: json.RawMessage(`{"model":"m1","change":"loaded"}`)}
 	if _, ok := pullMsgFromEvent(ev, "m1"); ok {
 		t.Error("non-download change accepted")
 	}

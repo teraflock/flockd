@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/teraflock/flockd/internal/localapi/client"
+	"github.com/teraflock/flockd/internal/localapi/gen"
 )
 
 // The write half of the models API (plan 10 Phase A): pull, load, unload,
@@ -36,14 +38,14 @@ func cmdModelsLoad() *cobra.Command {
 		Short: "Load a model into the serving runtime (downloads first if needed)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cl, err := client()
+			cl, err := newClient()
 			if err != nil {
 				return err
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), styleDim.Render("loading "+args[0]+" … (llama-server startup takes a few seconds)"))
 			// Synchronous on the daemon side and legitimately slow;
 			// ctrl-c cancels our wait, not the load.
-			if err := cl.postLong(cmd.Context(), "/api/v1/models/"+args[0]+"/load", nil, nil); err != nil {
+			if err := cl.LoadModel(cmd.Context(), args[0]); err != nil {
 				return err
 			}
 			return reportModel(cmd, cl, "loaded", args[0])
@@ -57,11 +59,11 @@ func cmdModelsUnload() *cobra.Command {
 		Short: "Unload a model from the runtime (the file stays cached)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cl, err := client()
+			cl, err := newClient()
 			if err != nil {
 				return err
 			}
-			if err := cl.post("/api/v1/models/"+args[0]+"/unload", nil, nil); err != nil {
+			if err := cl.UnloadModel(cmd.Context(), args[0]); err != nil {
 				return err
 			}
 			return reportModel(cmd, cl, "unloaded", args[0])
@@ -75,11 +77,11 @@ func cmdModelsDefault() *cobra.Command {
 		Short: "Serve this model when a request names none (must be loaded)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cl, err := client()
+			cl, err := newClient()
 			if err != nil {
 				return err
 			}
-			if err := cl.post("/api/v1/models/"+args[0]+"/default", nil, nil); err != nil {
+			if err := cl.SetDefaultModel(cmd.Context(), args[0]); err != nil {
 				return err
 			}
 			return reportModel(cmd, cl, "default is now", args[0])
@@ -89,10 +91,10 @@ func cmdModelsDefault() *cobra.Command {
 
 // reportModel prints the success line and the model's row from
 // GET /api/v1/models, so the operator sees the resulting state.
-func reportModel(cmd *cobra.Command, cl *apiClient, verb, id string) error {
+func reportModel(cmd *cobra.Command, cl *client.Client, verb, id string) error {
 	out := cmd.OutOrStdout()
 	fmt.Fprintln(out, styleOK.Render("✓"), verb, id)
-	row, ok, err := cl.findModel(id)
+	row, ok, err := cl.FindModel(cmd.Context(), id)
 	if err != nil || !ok {
 		return err
 	}
@@ -106,7 +108,7 @@ func modelsHeader() string {
 }
 
 // modelRowLine renders one `tera models list` row.
-func modelRowLine(m modelRow) string {
+func modelRowLine(m gen.ModelRow) string {
 	size := "—"
 	if m.SizeBytes > 0 {
 		size = fmt.Sprintf("%.1fGB", float64(m.SizeBytes)/1e9)
@@ -117,14 +119,14 @@ func modelRowLine(m modelRow) string {
 	}
 	if m.Loaded {
 		loaded = styleOK.Render("●")
-		if m.LoadedMB != nil {
-			loaded += fmt.Sprintf(" %.1fGB", float64(*m.LoadedMB)/1024)
+		if m.LoadedMb != nil {
+			loaded += fmt.Sprintf(" %.1fGB", float64(*m.LoadedMb)/1024)
 		}
 		if m.IdleSince != nil {
 			loaded += styleDim.Render(" idle " + time.Since(*m.IdleSince).Round(time.Second).String())
 		}
 	}
-	name := m.ID
+	name := m.Id
 	if m.Default {
 		name += styleDim.Render(" (default)")
 	}
@@ -150,15 +152,13 @@ type pullMsg struct {
 }
 
 func runPull(cmd *cobra.Command, id string, noWait bool) error {
-	cl, err := client()
+	cl, err := newClient()
 	if err != nil {
 		return err
 	}
 	out := cmd.OutOrStdout()
-	var ds struct {
-		State string `json:"state"`
-	}
-	if err := cl.post("/api/v1/models/"+id+"/download", nil, &ds); err != nil {
+	ds, err := cl.StartDownload(cmd.Context(), id)
+	if err != nil {
 		return err
 	}
 	if ds.State == "ready" {
@@ -178,12 +178,12 @@ func runPull(cmd *cobra.Command, id string, noWait bool) error {
 // complete (models_changed/downloaded) or failed (activity/download_failed).
 // A 2s poll of the model list runs alongside so a completion that raced the
 // stream open — or a stream the daemon cannot serve — still ends the wait.
-func waitForPull(parent context.Context, cl *apiClient, out io.Writer, id string, tty bool) error {
+func waitForPull(parent context.Context, cl *client.Client, out io.Writer, id string, tty bool) error {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	msgs := make(chan pullMsg, 16)
 	go func() {
-		err := cl.follow(ctx, false, func(ev sseEvent) error {
+		err := cl.Follow(ctx, false, func(ev client.Event) error {
 			if m, ok := pullMsgFromEvent(ev, id); ok {
 				msgs <- m
 			}
@@ -218,7 +218,7 @@ func waitForPull(parent context.Context, cl *apiClient, out io.Writer, id string
 				bar.update(m.received, m.total)
 			}
 		case <-poll.C:
-			row, ok, err := cl.findModel(id)
+			row, ok, err := cl.FindModel(ctx, id)
 			if err != nil {
 				continue
 			}
@@ -246,7 +246,7 @@ func waitForPull(parent context.Context, cl *apiClient, out io.Writer, id string
 
 // pullMsgFromEvent maps the daemon's events onto the pull loop. Unrelated
 // events (other models, status snapshots) return ok=false.
-func pullMsgFromEvent(ev sseEvent, id string) (pullMsg, bool) {
+func pullMsgFromEvent(ev client.Event, id string) (pullMsg, bool) {
 	switch ev.Name {
 	case "model_progress":
 		var p struct {

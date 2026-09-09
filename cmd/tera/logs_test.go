@@ -5,7 +5,11 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/teraflock/flockd/internal/localapi/gen"
 )
+
+func strp(s string) *string { return &s }
 
 func TestLevelRank(t *testing.T) {
 	for in, want := range map[string]int{"debug": 0, "INFO": 1, "warn": 2, "WARNING": 2, "error": 3, "": 1} {
@@ -20,7 +24,7 @@ func TestLevelRank(t *testing.T) {
 
 func TestPrintLogFiltersBelowLevel(t *testing.T) {
 	var out bytes.Buffer
-	e := logEntry{Time: time.Now(), Level: "INFO", Message: "hello", Attrs: "model=m1"}
+	e := gen.LogEntry{Time: time.Now(), Level: "INFO", Message: "hello", Attrs: strp("model=m1")}
 	printLog(&out, e, 2, false)
 	if out.Len() != 0 {
 		t.Fatalf("INFO printed under --level warn: %q", out.String())
@@ -37,7 +41,7 @@ func TestPrintLogFiltersBelowLevel(t *testing.T) {
 }
 
 func TestFormatLogTruncatesForPane(t *testing.T) {
-	e := logEntry{Time: time.Now(), Level: "WARN", Message: strings.Repeat("x", 100)}
+	e := gen.LogEntry{Time: time.Now(), Level: "WARN", Message: strings.Repeat("x", 100)}
 	s := formatLog(e, 40)
 	if !strings.HasSuffix(s, "…") && !strings.Contains(s, "…") {
 		t.Fatalf("not truncated: %q", s)

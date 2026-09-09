@@ -5,12 +5,14 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/teraflock/flockd/internal/localapi/gen"
 )
 
-func fakeLogs(n int) []logEntry {
-	out := make([]logEntry, 0, n)
+func fakeLogs(n int) []gen.LogEntry {
+	out := make([]gen.LogEntry, 0, n)
 	for i := 0; i < n; i++ {
-		out = append(out, logEntry{Time: time.Now(), Level: "INFO", Message: fmt.Sprintf("line-%03d", i)})
+		out = append(out, gen.LogEntry{Time: time.Now(), Level: "INFO", Message: fmt.Sprintf("line-%03d", i)})
 	}
 	return out
 }
@@ -82,9 +84,9 @@ func TestMeshPanelNeverFakesReputation(t *testing.T) {
 	}
 
 	exp := now.Add(27 * 24 * time.Hour)
-	m.status.Standalone, m.status.Enrolled, m.status.NodeID, m.status.CertExpiresAt = false, true, "node-abcdef123456", &exp
-	m.status.Update = &updateResp{Available: true, Latest: "0.5.1"}
-	m.status.Memory.UsedMB, m.status.Memory.BudgetMB = 2048, 32768
+	m.status.Standalone, m.status.Enrolled, m.status.NodeId, m.status.CertExpiresAt = false, true, "node-abcdef123456", &exp
+	m.status.Update = &gen.Update{Available: true, Latest: "0.5.1"}
+	m.status.Memory.UsedMb, m.status.Memory.BudgetMb = 2048, 32768
 	p := m.meshPanel(now)
 	for _, want := range []string{"enrolled", "node-abcdef1", "cert expires in 27d", "0.5.1 available", "2.0 / 32.0GB"} {
 		if !strings.Contains(p, want) {
@@ -97,7 +99,8 @@ func TestMeshPanelNeverFakesReputation(t *testing.T) {
 
 	soon := now.Add(3 * 24 * time.Hour)
 	m.status.CertExpiresAt = &soon
-	m.status.Update = &updateResp{BelowMinimum: true, Minimum: "0.6.0"}
+	below, minimum := true, "0.6.0"
+	m.status.Update = &gen.Update{BelowMinimum: &below, Minimum: &minimum}
 	p = m.meshPanel(now)
 	if !strings.Contains(p, "rotation due") || !strings.Contains(p, "below mesh minimum 0.6.0") {
 		t.Errorf("warnings missing:\n%s", p)

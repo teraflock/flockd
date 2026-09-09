@@ -1,0 +1,13 @@
+# oapi-codegen config for the management client (make gen).
+# Generates the Go client for api/openapi.yaml into the same package as the
+# server + types (internal/localapi/gen), so `tera`, the TUI, `tera mcp` and
+# any Go tooling share one typed client of localhost:7777 — the spec is the
+# contract, and clients cannot drift from it (SPEC §A1.2).
+package: gen
+output: internal/localapi/gen/client.go
+generate:
+  models: false
+  client: true
+output-options:
+  include-tags:
+    - management

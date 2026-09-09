@@ -19,6 +19,7 @@ import (
 	"github.com/teraflock/flockd/internal/config"
 	"github.com/teraflock/flockd/internal/enroll"
 	"github.com/teraflock/flockd/internal/hardware"
+	"github.com/teraflock/flockd/internal/localapi/client"
 	"github.com/teraflock/flockd/internal/runtime/llamacpp"
 	"github.com/teraflock/flockd/internal/svc"
 )
@@ -30,26 +31,6 @@ var (
 	flagDataDir string
 	flagToken   string
 )
-
-// dataDir resolves the daemon's data directory the same way flockd does
-// (defaults <- TOML <- FLOCKD_* env), so that files exchanged between the two
-// processes — the claim code, the local API token — land where the daemon
-// actually looks. Falling back to the built-in default here would silently
-// break enrollment for anyone who moved data_dir.
-func dataDir() string {
-	if flagDataDir != "" {
-		return flagDataDir
-	}
-	cfg, err := config.Load("")
-	if err != nil {
-		return config.Default().DataDir
-	}
-	return cfg.DataDir
-}
-
-func client() (*apiClient, error) {
-	return newAPIClient(flagAPI, dataDir())
-}
 
 // Brand palette v1 (website/docs/brand.md): gold for the brand voice,
 // orange (never gold) for warnings. Hex degrades to ANSI where needed.
@@ -268,19 +249,19 @@ func cmdStatus() *cobra.Command {
 		Use:   "status",
 		Short: "Show node status",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := client()
+			c, err := newClient()
 			if err != nil {
 				return err
 			}
-			var st statusResp
-			if err := c.get("/api/v1/status", &st); err != nil {
+			st, err := c.Status(cmd.Context())
+			if err != nil {
 				return err
 			}
 			stateStyle := styleWarn
 			if st.State == "serving" {
 				stateStyle = styleOK
 			}
-			fmt.Println(styleTitle.Render("/// Teraflock node"), styleDim.Render(st.NodeID))
+			fmt.Println(styleTitle.Render("/// Teraflock node"), styleDim.Render(st.NodeId))
 			fmt.Printf("  state      %s\n", stateStyle.Render(st.State))
 			fmt.Printf("  version    %s%s\n", st.Version, map[bool]string{true: " (standalone)", false: ""}[st.Standalone])
 			fmt.Printf("  uptime     %s\n", (time.Duration(st.UptimeSeconds) * time.Second).String())
@@ -288,22 +269,22 @@ func cmdStatus() *cobra.Command {
 			fmt.Printf("  tok/s(1m)  %.1f   in-flight %d   total reqs %d\n",
 				st.Stats.TokensPerSec1m, st.Inflight, st.Stats.TotalRequests)
 			if st.Hardware != nil {
-				gpus := make([]string, 0, len(st.Hardware.GPUs))
-				for _, g := range st.Hardware.GPUs {
-					gpus = append(gpus, fmt.Sprintf("%s (%s, %dGB)", g.Model, g.Accel, g.VRAMMB/1024))
+				gpus := make([]string, 0, len(st.Hardware.Gpus))
+				for _, g := range st.Hardware.Gpus {
+					gpus = append(gpus, fmt.Sprintf("%s (%s, %dGB)", g.Model, g.Accel, g.VramMb/1024))
 				}
 				fmt.Printf("  hardware   %s/%s · %s · %dGB RAM\n             %s\n",
-					st.Hardware.OS, st.Hardware.Arch, st.Hardware.CPUModel,
-					st.Hardware.RAMMB/1024, strings.Join(gpus, ", "))
+					st.Hardware.Os, st.Hardware.Arch, st.Hardware.CpuModel,
+					st.Hardware.RamMb/1024, strings.Join(gpus, ", "))
 			}
 			power := "AC power"
 			if st.OnBattery {
 				power = styleWarn.Render("on battery")
 			}
 			fmt.Printf("  power      %s\n", power)
-			if st.Memory.BudgetMB > 0 || st.Memory.UsedMB > 0 {
+			if st.Memory.BudgetMb > 0 || st.Memory.UsedMb > 0 {
 				fmt.Printf("  memory     %.1fGB of %.1fGB budget used by models (%.0fGB total)\n",
-					float64(st.Memory.UsedMB)/1024, float64(st.Memory.BudgetMB)/1024, float64(st.Memory.TotalMB)/1024)
+					float64(st.Memory.UsedMb)/1024, float64(st.Memory.BudgetMb)/1024, float64(st.Memory.TotalMb)/1024)
 			}
 			if st.Disk.Dir != "" {
 				budget := "unlimited"
@@ -384,12 +365,12 @@ func cmdModels() *cobra.Command {
 			Use:   "list",
 			Short: "List cached/loaded models",
 			RunE: func(cmd *cobra.Command, args []string) error {
-				cl, err := client()
+				cl, err := newClient()
 				if err != nil {
 					return err
 				}
-				var mr modelsResp
-				if err := cl.get("/api/v1/models", &mr); err != nil {
+				mr, err := cl.Models(cmd.Context())
+				if err != nil {
 					return err
 				}
 				if len(mr.Models) == 0 {
@@ -408,11 +389,11 @@ func cmdModels() *cobra.Command {
 			Short: "Pin a model (exempt from LRU eviction)",
 			Args:  cobra.ExactArgs(1),
 			RunE: func(cmd *cobra.Command, args []string) error {
-				cl, err := client()
+				cl, err := newClient()
 				if err != nil {
 					return err
 				}
-				if err := cl.post("/api/v1/models/"+args[0]+"/pin", map[string]bool{"pinned": true}, nil); err != nil {
+				if err := cl.PinModel(cmd.Context(), args[0], true); err != nil {
 					return err
 				}
 				fmt.Println(styleOK.Render("✓"), "pinned", args[0])
@@ -425,11 +406,11 @@ func cmdModels() *cobra.Command {
 			Short: "Remove a model from the local cache",
 			Args:  cobra.ExactArgs(1),
 			RunE: func(cmd *cobra.Command, args []string) error {
-				cl, err := client()
+				cl, err := newClient()
 				if err != nil {
 					return err
 				}
-				if err := cl.del("/api/v1/models/" + args[0]); err != nil {
+				if err := cl.DeleteModel(cmd.Context(), args[0]); err != nil {
 					return err
 				}
 				fmt.Println(styleOK.Render("✓"), "removed", args[0])
@@ -456,12 +437,12 @@ func cmdLimits() *cobra.Command {
 		Use:   "limits",
 		Short: "Show or set resource-governance limits",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cl, err := client()
+			cl, err := newClient()
 			if err != nil {
 				return err
 			}
-			var lim limitsResp
-			if err := cl.get("/api/v1/limits", &lim); err != nil {
+			lim, err := cl.Limits(cmd.Context())
+			if err != nil {
 				return err
 			}
 			setAny = cmd.Flags().Changed("serve") || cmd.Flags().Changed("serve-on-battery") ||
@@ -470,16 +451,16 @@ func cmdLimits() *cobra.Command {
 				cmd.Flags().Changed("retention-days") || cmd.Flags().Changed("idle-unload")
 			if setAny {
 				if cmd.Flags().Changed("max-disk-mb") {
-					lim.MaxDiskMB = &maxDisk
+					lim.MaxDiskMb = &maxDisk
 				}
 				if cmd.Flags().Changed("max-ram-mb") {
-					lim.MaxRAMMB = &maxRAM
+					lim.MaxRamMb = &maxRAM
 				}
 				if cmd.Flags().Changed("retention-days") {
 					lim.RetentionDays = &retention
 				}
 				if cmd.Flags().Changed("idle-unload") {
-					lim.IdleUnloadSec = &idleUnload
+					lim.IdleUnloadSeconds = &idleUnload
 				}
 				if cmd.Flags().Changed("serve") {
 					lim.ServePolicy = policy
@@ -493,31 +474,31 @@ func cmdLimits() *cobra.Command {
 				if cmd.Flags().Changed("schedule") {
 					lim.Schedule = schedule
 				}
-				if err := cl.put("/api/v1/limits", lim, &lim); err != nil {
+				if lim, err = cl.UpdateLimits(cmd.Context(), lim); err != nil {
 					return err
 				}
 				fmt.Println(styleOK.Render("✓"), "limits updated")
 			}
 			fmt.Printf("  serve policy       %s\n", lim.ServePolicy)
-			fmt.Printf("  idle after         %ds\n", lim.IdleAfterSec)
-			fmt.Printf("  yield grace        %ds\n", lim.YieldGraceSec)
+			fmt.Printf("  idle after         %ds\n", lim.IdleAfterSeconds)
+			fmt.Printf("  yield grace        %ds\n", lim.YieldGraceSeconds)
 			fmt.Printf("  serve on battery   %v\n", lim.ServeOnBattery)
 			fmt.Printf("  max temp           %.0f°C\n", lim.MaxTempCelsius)
 			fmt.Printf("  schedule           %s\n", strings.Join(lim.Schedule, ", "))
 			if lim.MeshManaged != nil {
 				fmt.Printf("  mesh managed       %v\n", *lim.MeshManaged)
 			}
-			if lim.MaxDiskMB != nil {
-				fmt.Printf("  max disk           %d MB (0 = unlimited)\n", *lim.MaxDiskMB)
+			if lim.MaxDiskMb != nil {
+				fmt.Printf("  max disk           %d MB (0 = unlimited)\n", *lim.MaxDiskMb)
 			}
 			if lim.RetentionDays != nil {
 				fmt.Printf("  retention          %d days (0 = never)\n", *lim.RetentionDays)
 			}
-			if lim.MaxRAMMB != nil {
-				fmt.Printf("  max ram            %d MB (0 = auto)\n", *lim.MaxRAMMB)
+			if lim.MaxRamMb != nil {
+				fmt.Printf("  max ram            %d MB (0 = auto)\n", *lim.MaxRamMb)
 			}
-			if lim.IdleUnloadSec != nil {
-				fmt.Printf("  idle unload        %ds (0 = never)\n", *lim.IdleUnloadSec)
+			if lim.IdleUnloadSeconds != nil {
+				fmt.Printf("  idle unload        %ds (0 = never)\n", *lim.IdleUnloadSeconds)
 			}
 			return nil
 		},
@@ -538,18 +519,18 @@ func cmdEarnings() *cobra.Command {
 		Use:   "earnings",
 		Short: "Show credits earned",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cl, err := client()
+			cl, err := newClient()
 			if err != nil {
 				return err
 			}
-			var e earningsResp
-			if err := cl.get("/api/v1/earnings", &e); err != nil {
+			e, err := cl.Earnings(cmd.Context())
+			if err != nil {
 				return err
 			}
 			fmt.Println(styleTitle.Render("Earnings"))
 			fmt.Printf("  credits          %.6f\n", e.EarnedCredits)
-			fmt.Printf("  est USD          $%.6f\n", e.EstUSD)
-			fmt.Printf("  est USD/day      $%.4f\n", e.EstUSDPerDay)
+			fmt.Printf("  est USD          $%.6f\n", e.EstUsd)
+			fmt.Printf("  est USD/day      $%.4f\n", e.EstUsdPerDay)
 			fmt.Printf("  lifetime tokens  %d\n", e.LifetimeTokens)
 			if e.Note != "" {
 				fmt.Println(styleDim.Render("  note: " + e.Note))
@@ -598,7 +579,7 @@ func cmdToken() *cobra.Command {
 		Short: "Print the local API bearer token (for the web dashboard)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dir := dataDir()
-			path := filepath.Join(dir, "local_api_token")
+			path := filepath.Join(dir, client.TokenFile)
 			raw, err := os.ReadFile(path)
 			if err != nil {
 				return fmt.Errorf("no token at %s — is this the data dir flockd uses? "+

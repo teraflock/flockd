@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
+	"github.com/teraflock/flockd/internal/localapi/client"
+	"github.com/teraflock/flockd/internal/localapi/gen"
 )
 
 // cmdDashboard is the full-screen Bubbletea TUI: live tok/s sparkline,
@@ -23,14 +26,14 @@ func cmdDashboard() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if web {
 				fmt.Println("Opening", flagAPI, "…")
-				raw, err := os.ReadFile(filepath.Join(dataDir(), "local_api_token"))
+				raw, err := os.ReadFile(filepath.Join(dataDir(), client.TokenFile))
 				if err == nil {
 					fmt.Println(styleDim.Render("  bearer token (paste into the page): " + strings.TrimSpace(string(raw))))
 				}
 				openOrPrint(cmd, flagAPI)
 				return nil
 			}
-			cl, err := client()
+			cl, err := newClient()
 			if err != nil {
 				return err
 			}
@@ -48,10 +51,10 @@ func cmdDashboard() *cobra.Command {
 type tickMsg time.Time
 
 type dataMsg struct {
-	status   statusResp
-	earnings earningsResp
-	models   modelsResp
-	logs     []logEntry
+	status   gen.Status
+	earnings gen.Earnings
+	models   gen.ModelList
+	logs     []gen.LogEntry
 	withLogs bool
 	err      error
 }
@@ -60,24 +63,24 @@ type dataMsg struct {
 const logPaneLines = 200
 
 type dashModel struct {
-	cl      *apiClient
+	cl      *client.Client
 	width   int
 	height  int
 	spark   []float64
-	status  statusResp
-	earn    earningsResp
-	models  modelsResp
+	status  gen.Status
+	earn    gen.Earnings
+	models  gen.ModelList
 	lastErr error
 	haveOne bool
 
 	// Logs pane (flockd#39): toggled with `l`; logScroll counts lines
 	// scrolled back from the newest (0 = following).
 	showLogs  bool
-	logs      []logEntry
+	logs      []gen.LogEntry
 	logScroll int
 }
 
-func newDashModel(cl *apiClient) *dashModel {
+func newDashModel(cl *client.Client) *dashModel {
 	return &dashModel{cl: cl, spark: make([]float64, 0, 64)}
 }
 
@@ -86,19 +89,18 @@ func newDashModel(cl *apiClient) *dashModel {
 func (m *dashModel) fetchCmd() tea.Cmd {
 	withLogs := m.showLogs
 	return func() tea.Msg {
+		ctx := context.Background()
 		var d dataMsg
-		if err := m.cl.get("/api/v1/status", &d.status); err != nil {
+		var err error
+		if d.status, err = m.cl.Status(ctx); err != nil {
 			d.err = err
 			return d
 		}
-		_ = m.cl.get("/api/v1/earnings", &d.earnings)
-		_ = m.cl.get("/api/v1/models", &d.models)
+		d.earnings, _ = m.cl.Earnings(ctx)
+		d.models, _ = m.cl.Models(ctx)
 		if withLogs {
-			var ll struct {
-				Logs []logEntry `json:"logs"`
-			}
-			if m.cl.get(fmt.Sprintf("/api/v1/logs?n=%d", logPaneLines), &ll) == nil {
-				d.logs, d.withLogs = ll.Logs, true
+			if logs, err := m.cl.Logs(ctx, logPaneLines); err == nil {
+				d.logs, d.withLogs = logs, true
 			}
 		}
 		return d
@@ -289,7 +291,7 @@ func (m *dashModel) View() string {
 	}
 	header := dashHeader.Render("/// TERAFLOCK") + "  " +
 		stateStr + mode + "  " +
-		dashLabel.Render(fmt.Sprintf("node %s · v%s · up %s", short(st.NodeID), st.Version, (time.Duration(st.UptimeSeconds)*time.Second).String()))
+		dashLabel.Render(fmt.Sprintf("node %s · v%s · up %s", short(st.NodeId), st.Version, (time.Duration(st.UptimeSeconds)*time.Second).String()))
 
 	// Throughput panel.
 	tp := fmt.Sprintf("%s %s\n%s\n%s",
@@ -302,9 +304,9 @@ func (m *dashModel) View() string {
 
 	// Earnings ticker panel.
 	ep := fmt.Sprintf("%s %s\n%s\n%s",
-		dashBig.Render(fmt.Sprintf("$%.6f", m.earn.EstUSD)),
+		dashBig.Render(fmt.Sprintf("$%.6f", m.earn.EstUsd)),
 		dashLabel.Render("earned"),
-		dashLabel.Render(fmt.Sprintf("%.4f credits · est $%.4f/day", m.earn.EarnedCredits, m.earn.EstUSDPerDay)),
+		dashLabel.Render(fmt.Sprintf("%.4f credits · est $%.4f/day", m.earn.EarnedCredits, m.earn.EstUsdPerDay)),
 		dashLabel.Render(fmt.Sprintf("lifetime tokens %d", m.earn.LifetimeTokens)))
 	earnings := dashPanel.Width(40).Render(dashHeader.Render("EARNINGS") + "\n" + ep)
 
@@ -312,8 +314,8 @@ func (m *dashModel) View() string {
 	hw := "unknown"
 	if st.Hardware != nil {
 		var gpus []string
-		for _, g := range st.Hardware.GPUs {
-			gpus = append(gpus, fmt.Sprintf("%s · %s · %dGB", g.Model, g.Accel, g.VRAMMB/1024))
+		for _, g := range st.Hardware.Gpus {
+			gpus = append(gpus, fmt.Sprintf("%s · %s · %dGB", g.Model, g.Accel, g.VramMb/1024))
 		}
 		power := "⚡ AC"
 		if st.OnBattery {
@@ -324,7 +326,7 @@ func (m *dashModel) View() string {
 			temp = fmt.Sprintf(" · %.0f°C", st.TempCelsius)
 		}
 		hw = fmt.Sprintf("%s/%s · %d cores · %dGB RAM\n%s\n%s%s",
-			st.Hardware.OS, st.Hardware.Arch, st.Hardware.CPUCores, st.Hardware.RAMMB/1024,
+			st.Hardware.Os, st.Hardware.Arch, st.Hardware.CpuCores, st.Hardware.RamMb/1024,
 			strings.Join(gpus, "\n"), power, temp)
 	}
 	if st.Disk.Dir != "" {
@@ -350,8 +352,8 @@ func (m *dashModel) View() string {
 			def = dashLabel.Render(" (default)")
 		}
 		mem := ""
-		if mm.LoadedMB != nil {
-			mem = fmt.Sprintf(" %.1fGB", float64(*mm.LoadedMB)/1024)
+		if mm.LoadedMb != nil {
+			mem = fmt.Sprintf(" %.1fGB", float64(*mm.LoadedMb)/1024)
 		}
 		state := mm.State
 		if state == "missing" {
@@ -359,7 +361,7 @@ func (m *dashModel) View() string {
 		} else {
 			state = dashLabel.Render(state)
 		}
-		rows = append(rows, fmt.Sprintf("%s %s%s%s  %s%s", mark, mm.ID, def, pin, state, dashLabel.Render(mem)))
+		rows = append(rows, fmt.Sprintf("%s %s%s%s  %s%s", mark, mm.Id, def, pin, state, dashLabel.Render(mem)))
 	}
 	if len(rows) == 0 {
 		rows = []string{dashLabel.Render("no models")}
@@ -398,7 +400,7 @@ func (m *dashModel) meshPanel(now time.Time) string {
 	case st.Standalone:
 		lines = append(lines, dashAmber.Render("standalone")+dashLabel.Render(" · in-process fake coordinator"))
 	case st.Enrolled:
-		lines = append(lines, dashGreen.Render("enrolled")+dashLabel.Render(" · node "+short(st.NodeID)))
+		lines = append(lines, dashGreen.Render("enrolled")+dashLabel.Render(" · node "+short(st.NodeId)))
 	default:
 		lines = append(lines, dashAmber.Render("not enrolled")+dashLabel.Render(" · run tera login"))
 	}
@@ -415,16 +417,20 @@ func (m *dashModel) meshPanel(now time.Time) string {
 	switch u := st.Update; {
 	case u == nil:
 		lines = append(lines, dashLabel.Render("v"+st.Version+" · version check pending"))
-	case u.BelowMinimum:
-		lines = append(lines, dashAmber.Render("v"+st.Version+" below mesh minimum "+u.Minimum+" · drained until updated"))
+	case u.BelowMinimum != nil && *u.BelowMinimum:
+		floor := ""
+		if u.Minimum != nil {
+			floor = *u.Minimum
+		}
+		lines = append(lines, dashAmber.Render("v"+st.Version+" below mesh minimum "+floor+" · drained until updated"))
 	case u.Available:
 		lines = append(lines, dashAmber.Render("v"+st.Version+" · "+u.Latest+" available"))
 	default:
 		lines = append(lines, dashLabel.Render("v"+st.Version+" · up to date"))
 	}
-	if st.Memory.BudgetMB > 0 {
+	if st.Memory.BudgetMb > 0 {
 		lines = append(lines, dashLabel.Render(fmt.Sprintf("models %.1f / %.1fGB memory budget",
-			float64(st.Memory.UsedMB)/1024, float64(st.Memory.BudgetMB)/1024)))
+			float64(st.Memory.UsedMb)/1024, float64(st.Memory.BudgetMb)/1024)))
 	}
 	return strings.Join(lines, "\n")
 }

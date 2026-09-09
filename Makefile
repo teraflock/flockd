@@ -1,9 +1,10 @@
 # Teraflock flockd — canonical build interface. The same verbs work in every
 # Teraflock repo where they apply: make build / test / run / gen / lint / clean.
 #
-# `gen` regenerates the management API router+types from api/openapi.yaml
-# (oapi-codegen, pinned via the go.mod tool directive). build and test depend
-# on it, so the spec and the implementation cannot drift.
+# `gen` regenerates the management API router+types and the Go client from
+# api/openapi.yaml (oapi-codegen, pinned via the go.mod tool directive).
+# build and test depend on it, so the spec, the daemon and every Go client
+# (tera CLI/TUI, tera mcp) cannot drift.
 
 VERSION ?= $(shell git rev-parse --short HEAD)-dev
 
@@ -16,6 +17,7 @@ build: gen
 
 gen:
 	go tool oapi-codegen -config api/oapi-codegen.yaml api/openapi.yaml
+	go tool oapi-codegen -config api/oapi-codegen-client.yaml api/openapi.yaml
 	@gofmt -w internal/localapi/gen/
 
 # CI guard: fails when committed generated code doesn't match the spec.

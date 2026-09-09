@@ -9,16 +9,9 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
+	"github.com/teraflock/flockd/internal/localapi/client"
+	"github.com/teraflock/flockd/internal/localapi/gen"
 )
-
-// logEntry mirrors LogEntry in api/openapi.yaml (the daemon's 1024-entry
-// ring; request content is never logged).
-type logEntry struct {
-	Time    time.Time `json:"time"`
-	Level   string    `json:"level"`
-	Message string    `json:"message"`
-	Attrs   string    `json:"attrs,omitempty"`
-}
 
 // cmdLogs reads the daemon's log ring (GET /api/v1/logs) and, with -f,
 // follows the SSE `log` events on /api/v1/events?logs=1 (flockd#39). Same
@@ -35,7 +28,7 @@ func cmdLogs() *cobra.Command {
 		Use:   "logs",
 		Short: "Show recent daemon log lines (-f to follow)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cl, err := client()
+			cl, err := newClient()
 			if err != nil {
 				return err
 			}
@@ -44,23 +37,21 @@ func cmdLogs() *cobra.Command {
 				return fmt.Errorf("unknown --level %q (debug|info|warn|error)", level)
 			}
 			out := cmd.OutOrStdout()
-			var ll struct {
-				Logs []logEntry `json:"logs"`
-			}
-			if err := cl.get(fmt.Sprintf("/api/v1/logs?n=%d", n), &ll); err != nil {
+			logs, err := cl.Logs(cmd.Context(), n)
+			if err != nil {
 				return err
 			}
-			for _, e := range ll.Logs {
+			for _, e := range logs {
 				printLog(out, e, minRank, asJSON)
 			}
 			if !follow {
 				return nil
 			}
-			return cl.follow(cmd.Context(), true, func(ev sseEvent) error {
+			return cl.Follow(cmd.Context(), true, func(ev client.Event) error {
 				if ev.Name != "log" {
 					return nil
 				}
-				var e logEntry
+				var e gen.LogEntry
 				if json.Unmarshal(ev.Data, &e) != nil {
 					return nil
 				}
@@ -92,13 +83,20 @@ func levelRank(level string) (int, bool) {
 	return 1, false
 }
 
-func printLog(w io.Writer, e logEntry, minRank int, asJSON bool) {
+func printLog(w io.Writer, e gen.LogEntry, minRank int, asJSON bool) {
 	if r, _ := levelRank(e.Level); r < minRank {
 		return
 	}
 	if asJSON {
-		raw, err := json.Marshal(e)
-		if err == nil {
+		// Keyed in reading order (time first), not the generated struct's
+		// alphabetical one — this is a line format people grep.
+		line := struct {
+			Time    time.Time `json:"time"`
+			Level   string    `json:"level"`
+			Message string    `json:"message"`
+			Attrs   *string   `json:"attrs,omitempty"`
+		}{e.Time, e.Level, e.Message, e.Attrs}
+		if raw, err := json.Marshal(line); err == nil {
 			fmt.Fprintln(w, string(raw))
 		}
 		return
@@ -108,10 +106,10 @@ func printLog(w io.Writer, e logEntry, minRank int, asJSON bool) {
 
 // formatLog renders `time LEVEL message key=val…` in the dash's format.
 // width > 0 truncates for a TUI pane (rune-aware, keeps the level colour).
-func formatLog(e logEntry, width int) string {
+func formatLog(e gen.LogEntry, width int) string {
 	msg := e.Message
-	if e.Attrs != "" {
-		msg += " " + e.Attrs
+	if e.Attrs != nil && *e.Attrs != "" {
+		msg += " " + *e.Attrs
 	}
 	ts := e.Time.Local().Format("15:04:05")
 	lvl := fmt.Sprintf("%-5s", strings.ToUpper(e.Level))
