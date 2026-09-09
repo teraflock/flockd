@@ -36,18 +36,22 @@ import (
 
 // Deps wires the server to the daemon internals.
 type Deps struct {
-	Engine     *engine.Engine
-	Governor   *governor.Governor // may be nil
-	Models     *models.Manager    // may be nil
-	ModelOps   *modelops.Service  // may be nil (mock runtime)
-	Events     *events.Hub        // may be nil (SSE then ticks status only)
-	LogRing    *logging.Ring      // may be nil
-	Hardware   *typesv1.CapabilityProfile
-	Log        *slog.Logger
-	WebFS      fs.FS // embedded dashboard dist; may be nil
-	NodeID     string
-	Version    string
-	Standalone bool
+	Engine   *engine.Engine
+	Governor *governor.Governor // may be nil
+	Models   *models.Manager    // may be nil
+	ModelOps *modelops.Service  // may be nil (mock runtime)
+	Events   *events.Hub        // may be nil (SSE then ticks status only)
+	LogRing  *logging.Ring      // may be nil
+	Hardware *typesv1.CapabilityProfile
+	// RuntimeAccel reports the accelerator of the llama-server build in
+	// use (hardware.AccelPreference's first published lane). Nil for the
+	// mock runtime: status then omits runtime_accel.
+	RuntimeAccel func() string
+	Log          *slog.Logger
+	WebFS        fs.FS // embedded dashboard dist; may be nil
+	NodeID       string
+	Version      string
+	Standalone   bool
 	// DataDir persists live limit edits (limits.toml overlay); empty
 	// disables persistence.
 	DataDir string

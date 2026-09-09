@@ -199,6 +199,101 @@ func TestManifestPickCPUFallback(t *testing.T) {
 	}
 }
 
+// The flockd#21 chain: cuda12 > rocm > vulkan > cpu. The first published
+// lane wins; unpublished GPU lanes are skipped, not treated as CPU.
+func TestManifestPickWalksAccelChain(t *testing.T) {
+	m := &ArtifactManifest{RuntimeBuildID: "llamacpp-b9999-1", Artifacts: []Artifact{
+		{OS: "linux", Arch: "amd64", Accel: "cpu-avx2"},
+		{OS: "linux", Arch: "amd64", Accel: "vulkan"},
+		{OS: "linux", Arch: "amd64", Accel: "cuda12"},
+		{OS: "linux", Arch: "arm64", Accel: "cpu"},
+	}}
+	cases := []struct {
+		chain []string
+		want  string
+	}{
+		{[]string{"cuda12", "vulkan", "cpu-avx2"}, "cuda12"},
+		{[]string{"rocm", "vulkan", "cpu-avx2"}, "vulkan"}, // AMD box, no rocm lane published
+		{[]string{"rocm", "cpu-avx2"}, "cpu-avx2"},         // AMD box without a Vulkan driver
+		{[]string{"vulkan", "cpu-avx2"}, "vulkan"},         // Intel Arc
+		{[]string{"cpu-avx2"}, "cpu-avx2"},
+		{nil, "cpu-avx2"},
+		{[]string{"cpu"}, "cpu-avx2"}, // any CPU build satisfies a CPU request
+	}
+	for _, c := range cases {
+		b, err := m.pick("linux", "amd64", c.chain...)
+		if err != nil || b.Accel != c.want {
+			t.Errorf("pick(%v) = %s, %v; want %s", c.chain, b.Accel, err, c.want)
+		}
+	}
+	if _, err := m.pick("linux", "arm64", "vulkan", "cpu-avx2"); err != nil {
+		t.Errorf("arm64 should fall to its cpu build, got %v", err)
+	}
+	if _, err := m.pick("windows", "amd64", "cuda12", "cpu-avx2"); err == nil || !strings.Contains(err.Error(), "accel=cuda12>cpu-avx2") {
+		t.Errorf("want no-build error naming the chain, got %v", err)
+	}
+}
+
+func TestPickReason(t *testing.T) {
+	cases := []struct {
+		chain  []string
+		chosen string
+		want   string
+	}{
+		{[]string{"cuda12", "vulkan", "cpu-avx2"}, "cuda12", "preferred"},
+		{[]string{"rocm", "vulkan", "cpu-avx2"}, "vulkan", "no rocm artifact for linux/amd64"},
+		{[]string{"rocm", "vulkan", "cpu-avx2"}, "cpu-avx2", "no rocm/vulkan artifact for linux/amd64"},
+		{[]string{"cpu-avx2"}, "cpu-avx2", "preferred"},
+		{[]string{"cpu-avx2"}, "cpu", "preferred"},
+	}
+	for _, c := range cases {
+		if got := pickReason("linux", "amd64", c.chain, c.chosen); got != c.want {
+			t.Errorf("pickReason(%v, %s) = %q, want %q", c.chain, c.chosen, got, c.want)
+		}
+	}
+}
+
+func TestEnsureSelectionReportsChosenAccel(t *testing.T) {
+	tarball := makeTarball(t, []byte("#!/bin/sh\necho vulkan\n"))
+	srv, _ := serveBuild(t, tarball)
+	defer srv.Close()
+	sum := sha256.Sum256(tarball)
+	man := ArtifactManifest{RuntimeBuildID: "llamacpp-b9999-1", Artifacts: []Artifact{
+		{OS: runtime.GOOS, Arch: runtime.GOARCH, Accel: "vulkan", URL: srv.URL + "/llama-server.tar.gz", SHA256: hex.EncodeToString(sum[:])},
+	}}
+	mj, _ := json.Marshal(man)
+	msrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(mj) }))
+	defer msrv.Close()
+
+	f := &Fetcher{ManifestURL: msrv.URL, CacheDir: t.TempDir()}
+	sel, err := f.EnsureSelection(context.Background(), "rocm", "vulkan", "cpu-avx2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sel.Accel != "vulkan" || sel.BuildID != "llamacpp-b9999-1" || !strings.HasPrefix(sel.Reason, "no rocm artifact for") {
+		t.Errorf("selection = %+v", sel)
+	}
+	if _, err := os.Stat(sel.Path); err != nil {
+		t.Errorf("binary not extracted: %v", err)
+	}
+	// Preflight walks the same chain.
+	if err := f.Preflight(context.Background(), "rocm", "vulkan", "cpu-avx2"); err != nil {
+		t.Errorf("preflight: %v", err)
+	}
+	if err := f.Preflight(context.Background(), "rocm", "cpu-avx2"); err == nil {
+		t.Error("preflight without a matching lane and no cpu build should fail")
+	}
+
+	bin := filepath.Join(t.TempDir(), "llama-server")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sel, err = (&Fetcher{BinaryPath: bin}).EnsureSelection(context.Background(), "cuda12")
+	if err != nil || sel.Accel != "" || sel.BuildID != "local-binary" {
+		t.Errorf("local binary selection = %+v, %v", sel, err)
+	}
+}
+
 func TestFetcherRequiresConfig(t *testing.T) {
 	f := &Fetcher{CacheDir: t.TempDir()}
 	if _, _, err := f.Ensure(context.Background(), "metal"); err == nil {

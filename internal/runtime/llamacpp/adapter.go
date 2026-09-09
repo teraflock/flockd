@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/teraflock/flockd/internal/memory"
@@ -21,7 +22,12 @@ import (
 // translating CompletionRequests to its OpenAI-compatible HTTP API.
 type Adapter struct {
 	Fetcher *Fetcher
-	Accel   string // preferred accelerator backend from hardware detection
+	// Accels is the accelerator preference chain from
+	// hardware.AccelPreference (cuda12 > rocm > vulkan > cpu, flockd#21):
+	// the Fetcher serves the first lane the manifest publishes. Accel is
+	// the head of that chain; either may be set, Accels wins.
+	Accels []string
+	Accel  string
 	// VRAMMB is the detected GPU memory (system RAM on Apple Silicon);
 	// with budget.max_vram_percent it bounds GPU offload. 0 = unknown.
 	VRAMMB uint64
@@ -31,10 +37,66 @@ type Adapter struct {
 	// MaxContext caps the window passed as --ctx-size (0 = no cap); see
 	// config.Runtime.MaxContext.
 	MaxContext int
+
+	mu       sync.Mutex
+	selected string // accel of the build the last Load resolved
+	logged   bool   // "runtime accel selected" printed once
 }
 
 // gpuAccels are backends where llama-server offloads layers to a device.
 var gpuAccels = map[string]bool{"metal": true, "cuda12": true, "rocm": true, "vulkan": true}
+
+// chain is the accelerator preference to hand the Fetcher.
+func (a *Adapter) chain() []string {
+	if len(a.Accels) > 0 {
+		return a.Accels
+	}
+	if a.Accel != "" {
+		return []string{a.Accel}
+	}
+	return nil
+}
+
+// preferred is the head of the chain: what hardware detection wanted.
+func (a *Adapter) preferred() string {
+	if c := a.chain(); len(c) > 0 {
+		return c[0]
+	}
+	return ""
+}
+
+// SelectedAccel is the backend of the llama-server build actually running
+// — "vulkan" on an AMD box whose manifest has no rocm lane — so status
+// surfaces can show it; before the first Load it is the preferred accel.
+// A configured local binary reports the preferred accel too (its backend
+// is unknown to the daemon).
+func (a *Adapter) SelectedAccel() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.selected != "" {
+		return a.selected
+	}
+	return a.preferred()
+}
+
+// record remembers the Fetcher's pick and logs it the first time (and
+// whenever it changes, e.g. a manifest that grew a lane).
+func (a *Adapter) record(sel Selection) string {
+	accel := sel.Accel
+	if accel == "" {
+		accel = a.preferred()
+	}
+	a.mu.Lock()
+	changed := !a.logged || a.selected != accel
+	a.selected, a.logged = accel, true
+	a.mu.Unlock()
+	if changed {
+		a.logger().Info("runtime accel selected",
+			"accel", accel, "preferred", a.preferred(), "chain", strings.Join(a.chain(), ">"),
+			"reason", sel.Reason, "runtime_build", sel.BuildID)
+	}
+	return accel
+}
 
 // gpuLayers decides --n-gpu-layers. Full offload when the model fits the
 // VRAM budget (the common case; llama.cpp clamps 999 to the real layer
@@ -43,7 +105,7 @@ var gpuAccels = map[string]bool{"metal": true, "cuda12": true, "rocm": true, "vu
 // (TODO(gguf)), which errs toward offloading slightly less than possible
 // rather than blowing the operator's budget.
 func (a *Adapter) gpuLayers(m rt.ModelSpec, res rt.ResourceBudget) int {
-	if !gpuAccels[a.Accel] {
+	if !gpuAccels[a.SelectedAccel()] {
 		return 0
 	}
 	if res.MaxVRAMPercent <= 0 || a.VRAMMB == 0 {
@@ -84,10 +146,12 @@ func (a *Adapter) logger() *slog.Logger {
 // serving Instance. A sharded model is passed as its first part
 // (<name>-00001-of-0000N.gguf): llama-server opens the siblings itself.
 func (a *Adapter) Load(ctx context.Context, m rt.ModelSpec, res rt.ResourceBudget) (rt.Instance, error) {
-	bin, buildID, err := a.Fetcher.Ensure(ctx, a.Accel)
+	sel, err := a.Fetcher.EnsureSelection(ctx, a.chain()...)
 	if err != nil {
 		return nil, err
 	}
+	a.record(sel)
+	bin, buildID := sel.Path, sel.BuildID
 	port, err := ephemeralPort()
 	if err != nil {
 		return nil, err
@@ -141,7 +205,9 @@ func (a *Adapter) serverArgs(m rt.ModelSpec, res rt.ResourceBudget, port int) []
 		// it llama-server serves the text weights only.
 		args = append(args, "--mmproj", m.MmprojPath)
 	}
-	if gpuAccels[a.Accel] {
+	// Offload only when the build that will run is a GPU build: a chain
+	// that fell through to cpu-avx2 must not pass --n-gpu-layers.
+	if gpuAccels[a.SelectedAccel()] {
 		ngl := a.gpuLayers(m, res)
 		args = append(args, "--n-gpu-layers", strconv.Itoa(ngl))
 		if ngl < 999 {

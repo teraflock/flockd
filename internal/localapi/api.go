@@ -84,6 +84,11 @@ func (s *Server) status() gen.Status {
 		resp.Hardware = hs
 		resp.Memory.TotalMb = int64(hw.GetRamTotalMb())
 	}
+	if ra := s.deps.RuntimeAccel; ra != nil {
+		if accel := ra(); accel != "" {
+			resp.RuntimeAccel = &accel
+		}
+	}
 	if ops := s.deps.ModelOps; ops != nil {
 		m := ops.Memory()
 		resp.Memory.UsedMb, resp.Memory.BudgetMb = m.UsedMB, m.BudgetMB

@@ -241,9 +241,19 @@ a vendor SDK: the daemon reads sysfs / shells out to the vendor tool.
 | macOS (Intel + discrete) | `system_profiler` | `metal` |
 | Linux, NVIDIA | `nvidia-smi` CSV | `cuda12` |
 | Linux, AMD | sysfs (`/sys/class/drm/card*/device`, amdgpu driver) for id/VRAM, `pci.ids` for the retail name, `rocm-smi` (optional) to enrich | `rocm` |
+| Linux, any GPU with a Vulkan driver | `libvulkan.so.1` + a hardware ICD in `/usr/share/vulkan/icd.d` (RADV/AMDVLK, NVIDIA, ANV; lavapipe does not count) | `vulkan` (secondary lane) |
 | Linux, no usable GPU | — | `cpu-avx2` (amd64) / `cpu` |
 | Windows, NVIDIA | `nvidia-smi` CSV | `cuda12` |
 | Windows, other adapters | `Win32_VideoController` (listed; no VRAM/accel until a Windows Vulkan lane exists) | `cpu-avx2` |
+
+The `accel` column is what the profile reports; the build that actually
+runs is the first lane of the preference chain
+**`cuda12` > `rocm` > `vulkan` > `cpu-avx2`/`cpu`** that the pinned
+runtime manifest publishes (`hardware.AccelPreference`). An AMD box with
+Mesa's RADV therefore serves on `vulkan` until a ROCm build ships, and
+`tera status` / `GET /api/v1/status` (`runtime_accel`) show which lane is
+live. The daemon logs `runtime accel selected accel=… reason=…` on the
+first model load.
 
 AMD notes: a mixed NVIDIA+AMD box serves on CUDA (NVIDIA is probed first);
 APUs whose VRAM carveout is under 2 GB are logged at debug and the node is

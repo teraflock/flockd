@@ -554,6 +554,16 @@ components:
         on_battery: { type: boolean }
         temp_celsius: { type: number, format: double }
         hardware: { $ref: "#/components/schemas/Hardware" }
+        runtime_accel:
+          type: string
+          description: >
+            Accelerator backend of the llama-server build this node runs
+            (`cuda12`, `rocm`, `vulkan`, `metal`, `cpu-avx2`, `cpu`): the
+            first lane of the detection preference chain
+            (cuda12 > rocm > vulkan > cpu) that the pinned runtime manifest
+            publishes, so it can differ from `hardware.gpus[].accel` —
+            an AMD box serves on `vulkan` while no ROCm build is published.
+            Absent for the mock runtime.
         stats: { $ref: "#/components/schemas/Stats" }
         memory: { $ref: "#/components/schemas/Memory" }
         disk: { $ref: "#/components/schemas/Disk" }

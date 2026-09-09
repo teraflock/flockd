@@ -165,7 +165,7 @@ func preflightRuntime(ctx context.Context) error {
 		ManifestURL: cfg.Runtime.ArtifactManifestURL,
 		BinaryPath:  cfg.Runtime.LlamaServerPath,
 	}
-	if err := f.Preflight(preCtx, hardware.BestAccel(hw)); err != nil {
+	if err := f.Preflight(preCtx, hardware.AccelPreference(hw)...); err != nil {
 		return fmt.Errorf("%w\n\n"+
 			"Options:\n"+
 			"  · set runtime.kind = \"mock\" in ~/.teraflock/config.toml for a\n"+
@@ -281,6 +281,9 @@ func cmdStatus() *cobra.Command {
 				fmt.Printf("  hardware   %s/%s · %s · %dGB RAM\n             %s\n",
 					st.Hardware.Os, st.Hardware.Arch, st.Hardware.CpuModel,
 					st.Hardware.RamMb/1024, strings.Join(gpus, ", "))
+			}
+			if st.RuntimeAccel != nil && *st.RuntimeAccel != "" {
+				fmt.Printf("  runtime    llama-server %s build\n", *st.RuntimeAccel)
 			}
 			power := "AC power"
 			if st.OnBattery {

@@ -291,9 +291,12 @@ type Status struct {
 	ModelsLoaded int    `json:"models_loaded"`
 
 	// NodeId Key fingerprint until enrolled; coordinator-assigned id after.
-	NodeId     string `json:"node_id"`
-	OnBattery  bool   `json:"on_battery"`
-	Standalone bool   `json:"standalone"`
+	NodeId    string `json:"node_id"`
+	OnBattery bool   `json:"on_battery"`
+
+	// RuntimeAccel Accelerator backend of the llama-server build this node runs (`cuda12`, `rocm`, `vulkan`, `metal`, `cpu-avx2`, `cpu`): the first lane of the detection preference chain (cuda12 > rocm > vulkan > cpu) that the pinned runtime manifest publishes, so it can differ from `hardware.gpus[].accel` — an AMD box serves on `vulkan` while no ROCm build is published. Absent for the mock runtime.
+	RuntimeAccel *string `json:"runtime_accel,omitempty"`
+	Standalone   bool    `json:"standalone"`
 
 	// State serving | yielded | paused-battery | paused-thermal | outside-schedule
 	State       string  `json:"state"`

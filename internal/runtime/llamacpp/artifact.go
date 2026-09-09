@@ -54,13 +54,13 @@ type Fetcher struct {
 }
 
 // Preflight checks that a runtime binary is *resolvable* for this
-// (GOOS, GOARCH, accel) without actually downloading the tarball. Used by
-// `tera up` to refuse installing a service unit that would crash-loop on
-// first start when the pinned catalog has no build for this machine.
-// Returns nil when either f.BinaryPath is present on disk or f.ManifestURL
-// advertises a matching artifact (cpu fallback included, same rule as
-// Ensure).
-func (f *Fetcher) Preflight(ctx context.Context, accel string) error {
+// (GOOS, GOARCH) and accelerator chain without actually downloading the
+// tarball. Used by `tera up` to refuse installing a service unit that
+// would crash-loop on first start when the pinned catalog has no build
+// for this machine. Returns nil when either f.BinaryPath is present on
+// disk or f.ManifestURL advertises a matching artifact (cpu fallback
+// included, same rule as Ensure).
+func (f *Fetcher) Preflight(ctx context.Context, accels ...string) error {
 	if f.BinaryPath != "" {
 		if _, err := os.Stat(f.BinaryPath); err != nil {
 			return fmt.Errorf("llamacpp: configured llama_server_path: %w", err)
@@ -68,51 +68,81 @@ func (f *Fetcher) Preflight(ctx context.Context, accel string) error {
 		return nil
 	}
 	if f.ManifestURL == "" {
-		return fmt.Errorf("llamacpp: no runtime binary available: set runtime.llama_server_path to an existing llama-server binary or runtime.artifact_manifest_url to a pinned build manifest")
+		return errNoRuntimeConfigured
 	}
 	man, err := f.fetchManifest(ctx)
 	if err != nil {
 		return err
 	}
-	_, err = man.pick(runtime.GOOS, runtime.GOARCH, accel)
+	_, err = man.pick(runtime.GOOS, runtime.GOARCH, accels...)
 	return err
 }
 
-// Ensure returns the path to a verified llama-server binary and its build id.
-func (f *Fetcher) Ensure(ctx context.Context, accel string) (path, buildID string, err error) {
+var errNoRuntimeConfigured = fmt.Errorf("llamacpp: no runtime binary available: set runtime.llama_server_path to an existing llama-server binary or runtime.artifact_manifest_url to a pinned build manifest")
+
+// Selection is the llama-server build Ensure resolved for this node.
+type Selection struct {
+	Path    string
+	BuildID string
+	// Accel is the backend of the build actually chosen — the first entry
+	// of the requested chain the manifest publishes, or the CPU build.
+	// Empty for a configured local binary (runtime.llama_server_path),
+	// whose backend the daemon cannot know.
+	Accel string
+	// Reason says why that build was chosen, for the "runtime accel
+	// selected" log line: "preferred", "no cuda12 artifact for linux/amd64",
+	// "configured llama_server_path".
+	Reason string
+}
+
+// Ensure returns the path to a verified llama-server binary and its build
+// id for the accelerator chain (hardware.AccelPreference order: the first
+// accel with a published build wins, then the CPU build).
+func (f *Fetcher) Ensure(ctx context.Context, accels ...string) (path, buildID string, err error) {
+	sel, err := f.EnsureSelection(ctx, accels...)
+	return sel.Path, sel.BuildID, err
+}
+
+// EnsureSelection is Ensure plus which accel the build actually is.
+func (f *Fetcher) EnsureSelection(ctx context.Context, accels ...string) (Selection, error) {
 	if f.BinaryPath != "" {
 		if _, err := os.Stat(f.BinaryPath); err != nil {
-			return "", "", fmt.Errorf("llamacpp: configured llama_server_path: %w", err)
+			return Selection{}, fmt.Errorf("llamacpp: configured llama_server_path: %w", err)
 		}
-		return f.BinaryPath, "local-binary", nil
+		return Selection{Path: f.BinaryPath, BuildID: "local-binary", Reason: "configured llama_server_path"}, nil
 	}
 	if f.ManifestURL == "" {
-		return "", "", fmt.Errorf("llamacpp: no runtime binary available: set runtime.llama_server_path to an existing llama-server binary or runtime.artifact_manifest_url to a pinned build manifest")
+		return Selection{}, errNoRuntimeConfigured
 	}
 
 	man, err := f.fetchManifest(ctx)
 	if err != nil {
-		return "", "", err
+		return Selection{}, err
 	}
-	art, err := man.pick(runtime.GOOS, runtime.GOARCH, accel)
+	art, err := man.pick(runtime.GOOS, runtime.GOARCH, accels...)
 	if err != nil {
-		return "", "", err
+		return Selection{}, err
+	}
+	sel := Selection{
+		BuildID: man.RuntimeBuildID,
+		Accel:   art.Accel,
+		Reason:  pickReason(runtime.GOOS, runtime.GOARCH, accels, art.Accel),
 	}
 
 	dir := filepath.Join(f.CacheDir, man.RuntimeBuildID)
-	bin := filepath.Join(dir, binaryName())
+	sel.Path = filepath.Join(dir, binaryName())
 	// The stored SHA is of the tarball, not the binary, so reuse is gated
 	// on a stamp written after a verified extract.
 	if sha, err := os.ReadFile(filepath.Join(dir, ".tarball.sha256")); err == nil &&
 		strings.TrimSpace(string(sha)) == art.SHA256 {
-		if _, err := os.Stat(bin); err == nil {
-			return bin, man.RuntimeBuildID, nil
+		if _, err := os.Stat(sel.Path); err == nil {
+			return sel, nil
 		}
 	}
 	if err := f.fetchAndUnpack(ctx, art, dir); err != nil {
-		return "", "", err
+		return Selection{}, err
 	}
-	return bin, man.RuntimeBuildID, nil
+	return sel, nil
 }
 
 func (f *Fetcher) client() *http.Client {
@@ -145,23 +175,48 @@ func (f *Fetcher) fetchManifest(ctx context.Context) (*ArtifactManifest, error) 
 	return &m, nil
 }
 
-func (m *ArtifactManifest) pick(goos, goarch, accel string) (Artifact, error) {
+// pick walks the accelerator chain in order and returns the first
+// published build for this OS/arch; the CPU build (cpu-avx2 or cpu) is the
+// implicit last entry, so a chain whose GPU lanes are all unpublished
+// still resolves. Error only when not even a CPU build exists.
+func (m *ArtifactManifest) pick(goos, goarch string, accels ...string) (Artifact, error) {
 	var cpuFallback *Artifact
 	for i, a := range m.Artifacts {
-		if a.OS != goos || a.Arch != goarch {
-			continue
-		}
-		if a.Accel == accel {
-			return a, nil
-		}
-		if a.Accel == "cpu" || a.Accel == "cpu-avx2" {
+		if a.OS == goos && a.Arch == goarch && isCPUAccel(a.Accel) && cpuFallback == nil {
 			cpuFallback = &m.Artifacts[i]
+		}
+	}
+	for _, accel := range accels {
+		for _, a := range m.Artifacts {
+			if a.OS == goos && a.Arch == goarch && a.Accel == accel {
+				return a, nil
+			}
 		}
 	}
 	if cpuFallback != nil {
 		return *cpuFallback, nil
 	}
-	return Artifact{}, fmt.Errorf("llamacpp: manifest %s has no build for %s/%s accel=%s", m.RuntimeBuildID, goos, goarch, accel)
+	return Artifact{}, fmt.Errorf("llamacpp: manifest %s has no build for %s/%s accel=%s", m.RuntimeBuildID, goos, goarch, strings.Join(accels, ">"))
+}
+
+func isCPUAccel(accel string) bool { return accel == "cpu" || accel == "cpu-avx2" }
+
+// pickReason explains a pick for the log: which preferred lanes were
+// skipped because the manifest does not publish them.
+func pickReason(goos, goarch string, accels []string, chosen string) string {
+	var skipped []string
+	for _, a := range accels {
+		if a == chosen {
+			break
+		}
+		if !isCPUAccel(a) {
+			skipped = append(skipped, a)
+		}
+	}
+	if len(skipped) == 0 {
+		return "preferred"
+	}
+	return fmt.Sprintf("no %s artifact for %s/%s", strings.Join(skipped, "/"), goos, goarch)
 }
 
 // fetchAndUnpack downloads the tarball, verifies its SHA-256, and extracts

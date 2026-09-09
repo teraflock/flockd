@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -114,7 +115,8 @@ func run() error {
 		"os", hw.GetOs(), "arch", hw.GetArch(),
 		"cpu", hw.GetCpuModel(), "cores", hw.GetCpuCores(),
 		"ram_mb", hw.GetRamTotalMb(), "gpus", len(hw.GetGpus()),
-		"accel", hardware.BestAccel(hw))
+		"accel", hardware.BestAccel(hw),
+		"accel_chain", strings.Join(hardware.AccelPreference(hw), ">"))
 
 	// ---- identity & token ----
 	identity, err := enroll.LoadOrGenerateIdentity(cfg.DataDir)
@@ -195,6 +197,9 @@ func run() error {
 	// on-demand download/load/switch routes (llamacpp only: the mock
 	// runtime has no catalog or artifact cache to operate on).
 	var ops *modelops.Service
+	// runtimeAccel reports the accel of the llama-server build in use for
+	// /api/v1/status (nil for the mock runtime).
+	var runtimeAccel func() string
 	if cfg.Runtime.Kind == "llamacpp" {
 		adapter := &llamacpp.Adapter{
 			Fetcher: &llamacpp.Fetcher{
@@ -202,12 +207,13 @@ func run() error {
 				BinaryPath:  cfg.Runtime.LlamaServerPath,
 				CacheDir:    filepath.Join(cfg.DataDir, "runtimes"),
 			},
-			Accel:         hardware.BestAccel(hw),
+			Accels:        hardware.AccelPreference(hw),
 			VRAMMB:        hardware.BestVRAMMB(hw),
 			Log:           log,
 			ContextLength: cfg.Runtime.ContextLength,
 			MaxContext:    cfg.Runtime.MaxContext,
 		}
+		runtimeAccel = adapter.SelectedAccel
 		ops = &modelops.Service{
 			Mgr:           mgr,
 			Eng:           eng,
@@ -408,19 +414,20 @@ func run() error {
 		webFS = nil
 	}
 	srv := localapi.New(localapi.Deps{
-		Engine:     eng,
-		Governor:   gov,
-		Models:     mgr,
-		ModelOps:   ops,
-		Events:     hub,
-		DataDir:    cfg.DataDir,
-		LogRing:    ring,
-		Hardware:   hw,
-		Log:        log,
-		WebFS:      webFS,
-		NodeID:     nodeID,
-		Version:    version,
-		Standalone: cfg.Tunnel.Standalone,
+		Engine:       eng,
+		Governor:     gov,
+		Models:       mgr,
+		ModelOps:     ops,
+		Events:       hub,
+		DataDir:      cfg.DataDir,
+		LogRing:      ring,
+		Hardware:     hw,
+		RuntimeAccel: runtimeAccel,
+		Log:          log,
+		WebFS:        webFS,
+		NodeID:       nodeID,
+		Version:      version,
+		Standalone:   cfg.Tunnel.Standalone,
 		Mesh: func() localapi.MeshStatus {
 			mesh.mu.Lock()
 			defer mesh.mu.Unlock()

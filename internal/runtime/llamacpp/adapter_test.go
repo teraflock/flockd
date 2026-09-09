@@ -221,3 +221,37 @@ func TestAdapterRelaysReasoningContent(t *testing.T) {
 		t.Errorf("relayed %d tokens, want 4 (reasoning tokens count)", tokens)
 	}
 }
+
+// The accel that governs GPU offload is the one the Fetcher resolved, not
+// the one detection preferred: a chain that fell through to the CPU build
+// must not pass --n-gpu-layers (flockd#21).
+func TestAdapterSelectedAccelFollowsTheResolvedBuild(t *testing.T) {
+	a := &Adapter{Accels: []string{"rocm", "vulkan", "cpu-avx2"}, VRAMMB: 24560, Log: slog.New(slog.DiscardHandler)}
+	if got := a.SelectedAccel(); got != "rocm" {
+		t.Fatalf("before Load: SelectedAccel = %q, want the preferred lane", got)
+	}
+	a.record(Selection{Accel: "vulkan", BuildID: "b1", Reason: "no rocm artifact for linux/amd64"})
+	if got := a.SelectedAccel(); got != "vulkan" {
+		t.Errorf("after vulkan pick: SelectedAccel = %q", got)
+	}
+	if ngl := a.gpuLayers(rt.ModelSpec{Path: "nope"}, rt.ResourceBudget{}); ngl != 999 {
+		t.Errorf("vulkan build: gpuLayers = %d, want full offload", ngl)
+	}
+	a.record(Selection{Accel: "cpu-avx2", BuildID: "b1", Reason: "no rocm/vulkan artifact for linux/amd64"})
+	if ngl := a.gpuLayers(rt.ModelSpec{Path: "nope"}, rt.ResourceBudget{}); ngl != 0 {
+		t.Errorf("cpu build: gpuLayers = %d, want 0", ngl)
+	}
+	// A local binary has no known backend: assume the preferred lane.
+	a.record(Selection{Accel: "", BuildID: "local-binary", Reason: "configured llama_server_path"})
+	if got := a.SelectedAccel(); got != "rocm" {
+		t.Errorf("local binary: SelectedAccel = %q, want preferred", got)
+	}
+	// Legacy single-accel construction still works.
+	legacy := &Adapter{Accel: "metal"}
+	if got := legacy.SelectedAccel(); got != "metal" || len(legacy.chain()) != 1 {
+		t.Errorf("legacy Accel field: SelectedAccel = %q, chain = %v", got, legacy.chain())
+	}
+	if got := (&Adapter{}).SelectedAccel(); got != "" {
+		t.Errorf("empty adapter: SelectedAccel = %q", got)
+	}
+}

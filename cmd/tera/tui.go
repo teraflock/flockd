@@ -524,9 +524,13 @@ func (m *dashModel) View() string {
 		if st.TempCelsius > 0 {
 			temp = fmt.Sprintf(" · %.0f°C", st.TempCelsius)
 		}
-		hw = fmt.Sprintf("%s/%s · %d cores · %dGB RAM\n%s\n%s%s",
+		accel := ""
+		if st.RuntimeAccel != nil && *st.RuntimeAccel != "" {
+			accel = " · runtime " + *st.RuntimeAccel
+		}
+		hw = fmt.Sprintf("%s/%s · %d cores · %dGB RAM\n%s\n%s%s%s",
 			st.Hardware.Os, st.Hardware.Arch, st.Hardware.CpuCores, st.Hardware.RamMb/1024,
-			strings.Join(gpus, "\n"), power, temp)
+			strings.Join(gpus, "\n"), power, temp, accel)
 	}
 	if st.Disk.Dir != "" {
 		hw += fmt.Sprintf("\ndisk %s models · %s free", gb(st.Disk.ModelsBytes), gb(st.Disk.FreeBytes))
