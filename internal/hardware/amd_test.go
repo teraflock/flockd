@@ -1,8 +1,12 @@
 package hardware
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
+	"runtime"
+	"strings"
 	"testing"
 
 	typesv1 "github.com/teraflock/proto/gen/go/flock/types/v1"
@@ -14,15 +18,53 @@ import (
 // them was captured on real hardware — flockd#20 was written without an
 // AMD box — so a real box should diff `tera status` against what these
 // tests assert.
+//
+// PCI slot directories (0000:03:00.0) cannot be checked out on Windows —
+// NTFS forbids ':' in names, and one such path fails the whole
+// windows-latest checkout — so they are committed with '_' in place of
+// ':' and fixture() copies the tree into a temp dir with the real names.
+
+var pciSlotDirRe = regexp.MustCompile(`^[0-9a-f]{4}_[0-9a-f]{2}_[0-9a-f]{2}\.[0-9]$`)
 
 func fixture(t *testing.T, name string) string {
 	t.Helper()
-	root, err := filepath.Abs(filepath.Join("testdata", "amd", name))
+	if runtime.GOOS == "windows" {
+		t.Skip("sysfs fixture: PCI slot names contain ':' which NTFS cannot hold")
+	}
+	src, err := filepath.Abs(filepath.Join("testdata", "amd", name))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(root); err != nil {
+	if _, err := os.Stat(src); err != nil {
 		t.Fatalf("fixture %s: %v", name, err)
+	}
+	root := t.TempDir()
+	err = filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		parts := strings.Split(rel, string(filepath.Separator))
+		for i, p := range parts {
+			if pciSlotDirRe.MatchString(p) {
+				parts[i] = strings.ReplaceAll(p, "_", ":")
+			}
+		}
+		dst := filepath.Join(root, filepath.Join(parts...))
+		if d.IsDir() {
+			return os.MkdirAll(dst, 0o755)
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(dst, b, 0o644)
+	})
+	if err != nil {
+		t.Fatalf("copy fixture %s: %v", name, err)
 	}
 	return root
 }
