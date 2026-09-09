@@ -97,7 +97,7 @@ const logPaneLines = 200
 
 const (
 	pollEvery      = 10 * time.Second
-	backoffMin     = time.Second
+	backoffStart   = time.Second
 	backoffMax     = 30 * time.Second
 	modelsRefetchT = time.Second // model_progress arrives ~4×/s; refetch at most this often
 )
@@ -134,7 +134,7 @@ type dashModel struct {
 
 func newDashModel(cl *client.Client) *dashModel {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &dashModel{cl: cl, spark: make([]float64, 0, 64), ctx: ctx, cancel: cancel, backoff: backoffMin, now: time.Now()}
+	return &dashModel{cl: cl, spark: make([]float64, 0, 64), ctx: ctx, cancel: cancel, backoff: backoffStart, now: time.Now()}
 }
 
 // fetchCmd is the poll: status (only needed while the stream is down, but
@@ -257,7 +257,7 @@ func (m *dashModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.scheduleReconnect()
 		}
 		m.stream, m.connected, m.streamErr = msg.s, true, nil
-		m.backoff = backoffMin
+		m.backoff = backoffStart
 		if m.showLogs {
 			// The stream carries new lines only; seed the pane with history.
 			return m, tea.Batch(readCmd(m.stream), m.logsCmd())

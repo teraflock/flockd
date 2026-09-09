@@ -43,7 +43,7 @@ func TestEventStreamDrivesDashboard(t *testing.T) {
 		t.Fatalf("connect = %#v", msg)
 	}
 	m.Update(sm)
-	if !m.connected || m.stream == nil || m.backoff != backoffMin {
+	if !m.connected || m.stream == nil || m.backoff != backoffStart {
 		t.Fatalf("after connect: connected=%v backoff=%s", m.connected, m.backoff)
 	}
 
@@ -125,7 +125,7 @@ func TestReconnectBackoffDoublesAndCaps(t *testing.T) {
 
 	// A successful connect resets the backoff.
 	m.Update(streamMsg{s: &client.Stream{}})
-	if !m.connected || m.backoff != backoffMin || m.streamErr != nil {
+	if !m.connected || m.backoff != backoffStart || m.streamErr != nil {
 		t.Fatalf("after reconnect: connected=%v backoff=%s err=%v", m.connected, m.backoff, m.streamErr)
 	}
 	if v := m.View(); strings.Contains(v, "reconnecting") || !strings.Contains(v, "live") {

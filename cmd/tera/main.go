@@ -54,7 +54,7 @@ func main() {
 
 	root.AddCommand(
 		cmdUp(), cmdDown(), cmdStatus(), cmdLogin(), cmdModels(), cmdLimits(),
-		cmdEarnings(), cmdRedeem(), cmdDashboard(), cmdLogs(), cmdChat(), cmdToken(), cmdVersion(), cmdUninstall(),
+		cmdEarnings(), cmdRedeem(), cmdDashboard(), cmdLogs(), cmdChat(), cmdMCP(), cmdToken(), cmdVersion(), cmdUninstall(),
 	)
 
 	if err := root.Execute(); err != nil {

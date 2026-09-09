@@ -226,7 +226,7 @@ func TestFollowStopsOnErrStop(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	n := 0
-	err := c.Follow(ctx, false, func(ev client.Event) error {
+	err := c.Follow(ctx, false, func(client.Event) error {
 		n++
 		return client.ErrStop
 	})
@@ -305,8 +305,11 @@ func TestChatGovernorRefusal(t *testing.T) {
 	c := newClient(t, d, d.Token)
 	req := client.ChatRequest{Messages: []client.Message{{Role: "user", Content: "hi"}}}
 	for name, call := range map[string]func() error{
-		"chat":   func() error { _, err := c.Chat(context.Background(), req); return err },
-		"stream": func() error { _, err := c.ChatStream(context.Background(), req, func(client.Delta) error { return nil }); return err },
+		"chat": func() error { _, err := c.Chat(context.Background(), req); return err },
+		"stream": func() error {
+			_, err := c.ChatStream(context.Background(), req, func(client.Delta) error { return nil })
+			return err
+		},
 	} {
 		err := call()
 		var ae *client.APIError
