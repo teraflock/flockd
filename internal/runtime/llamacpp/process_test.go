@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"time"
 )
 
 // runJobParentHelper is the second helper-process mode of TestMain: it
@@ -34,5 +35,11 @@ func runJobParentHelper(port string) {
 		os.Exit(1)
 	}
 	fmt.Printf("child %d\n", cmd.Process.Pid)
-	select {}
+	// Block until killed. Not select{}: with no other goroutine the Go
+	// runtime reports "all goroutines are asleep" and exits — which, on
+	// the first CI run, killed the child through the job before the test
+	// could even see it alive.
+	for {
+		time.Sleep(time.Hour)
+	}
 }
