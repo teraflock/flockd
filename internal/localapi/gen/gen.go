@@ -173,7 +173,7 @@ type Limits struct {
 	// RetentionDays Evict unpinned models not used for this many days (0 = never). Omitted on PUT = unchanged.
 	RetentionDays *int `json:"retention_days,omitempty"`
 
-	// Schedule Windows like "22:00-08:00" (overnight wraps).
+	// Schedule Daily serving windows for serve_policy=scheduled, one per entry, each "HH:MM-HH:MM" in the node's local time on a 24-hour clock (the hour may be one or two digits, the minute must be two — Go's "15:04" layout). The end is exclusive: "09:00-17:00" serves 09:00 through 16:59. A start later than its end wraps overnight ("22:00-08:00"); "22:00-00:00" runs to midnight; a window whose start equals its end matches nothing, so a full day is ["00:00-12:00", "12:00-00:00"]. The same windows apply every day (there is no day-of-week syntax) and an empty list never serves. An entry the daemon can't parse fails the whole PUT with 400; reads return windows normalised to zero-padded "HH:MM-HH:MM".
 	Schedule       []string `json:"schedule"`
 	ServeOnBattery bool     `json:"serve_on_battery"`
 
