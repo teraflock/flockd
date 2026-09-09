@@ -235,7 +235,17 @@ what is loaded versus merely on disk.
   run once the default model is loaded and then hourly, `Reconcile` adopts
   unindexed `<id>.gguf` files whose name, size and — when the catalog has
   a real hash — sha256 match a catalog entry (verified outside the lock,
-  once per distinct file). `max_disk_mb`, `retention_days`, `max_ram_mb` and
+  once per distinct file), and complete `<id>/` multi-file sets the same
+  way. Multi-file artifacts (`internal/models/parts.go`): a spec with
+  `parts` and/or `mmproj` resolves to an `artifactSet` laid out in
+  `<Dir>/<id>/` under the upstream basenames; `EnsureArtifact` downloads
+  the files in order through the same per-file `.partial` + Range + sha256
+  path (`downloadSet`), skipping a file already in place that verifies,
+  reports summed progress, and hands modelops an `Artifact{Path,
+  MmprojPath, SizeBytes}` — `Path` is part 1, the llamacpp adapter adds
+  `--mmproj`. `cacheEntry.Parts`/`Mmproj` persist the layout; `SHA256`
+  is then the composite id (`CompositeSHA256`, same definition as
+  models/tools/validate and the registry), verified never against a file. `max_disk_mb`, `retention_days`, `max_ram_mb` and
   `idle_unload_seconds` are live via `PUT /api/v1/limits` and persist in
   `limits.toml`.
 - **Activity feed** (`internal/activity`): a 200-row ring of what happened

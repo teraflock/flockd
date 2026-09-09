@@ -72,18 +72,34 @@ func (s *Server) GetCatalog(w http.ResponseWriter, r *http.Request, params gen.G
 			Loaded:        loaded[m.ID],
 			Default:       m.ID == def,
 		}
+		if len(m.Parts) > 0 || m.Mmproj != nil {
+			// A multi-file artifact: shards, or one GGUF plus its mmproj.
+			n := max(len(m.Parts), 1) + boolInt(m.Mmproj != nil)
+			row.PartsTotal = &n
+		}
 		if i, ok := installed[m.ID]; ok {
 			row.Installed = i.State == "ready"
 			st := i.State
 			row.State = &st
 			if i.State == "downloading" {
-				rb := i.ReceivedBytes
-				row.ReceivedBytes = &rb
+				rb, tb := i.ReceivedBytes, i.SizeBytes
+				row.ReceivedBytes, row.TotalBytes = &rb, &tb
+				if i.PartsTotal > 0 {
+					done := i.PartsDone
+					row.PartsDone = &done
+				}
 			}
 		}
 		rows = append(rows, row)
 	}
 	writeJSON(w, http.StatusOK, gen.CatalogList{Models: rows})
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // StartModelDownload implements gen.ServerInterface.

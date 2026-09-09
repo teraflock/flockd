@@ -686,7 +686,23 @@ components:
         received_bytes:
           type: integer
           format: int64
-          description: Live progress; present only while downloading.
+          description: >
+            Live progress summed over every file of the artifact; present
+            only while downloading.
+        parts_total:
+          type: integer
+          description: >
+            Files in the artifact: the GGUF shards of a sharded model plus
+            its mmproj sidecar when it has one. Present only for such
+            multi-file models (a plain single-file model omits it). They
+            live in `<models dir>/<id>/` under their upstream names;
+            `path` is the first shard.
+        parts_done:
+          type: integer
+          description: >
+            How many of `parts_total` are downloaded and verified; present
+            with it. Shards download one at a time, so the one in flight is
+            `parts_done + 1`.
         assignment: { $ref: "#/components/schemas/Assignment" }
 
     Assignment:
@@ -748,7 +764,29 @@ components:
         state:
           type: string
           description: downloading | ready; present when the artifact is local.
-        received_bytes: { type: integer, format: int64 }
+        received_bytes:
+          type: integer
+          format: int64
+          description: >
+            Live progress summed over every file; present only while
+            downloading.
+        total_bytes:
+          type: integer
+          format: int64
+          description: >
+            What the download fetches in all — `size_bytes` plus the mmproj
+            sidecar when there is one — the denominator for
+            `received_bytes`. Present only while downloading.
+        parts_total:
+          type: integer
+          description: >
+            Files in the artifact (GGUF shards plus mmproj); present only
+            for multi-file models. `size_bytes` is already their sum.
+        parts_done:
+          type: integer
+          description: >
+            Files downloaded and verified so far; present while downloading
+            a multi-file model.
         loaded: { type: boolean }
         default: { type: boolean }
 

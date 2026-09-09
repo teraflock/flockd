@@ -53,24 +53,35 @@ type CatalogEntry struct {
 	Default       bool   `json:"default"`
 
 	// DisplayName Human-readable name incl. quant ("Qwen3.8 27B · Q4_K_M") — show this, not the id: ids are ambiguous now that model lines carry point versions (qwen3-8b vs qwen3.8-27b). Optional: absent when the daemon's catalog predates the field.
-	DisplayName   *string `json:"display_name,omitempty"`
-	Embeddings    bool    `json:"embeddings"`
-	Family        string  `json:"family"`
-	Id            string  `json:"id"`
-	Installed     bool    `json:"installed"`
-	License       string  `json:"license"`
-	Loaded        bool    `json:"loaded"`
-	MinRamMb      int64   `json:"min_ram_mb"`
-	MinVramMb     int64   `json:"min_vram_mb"`
-	ParamsB       float64 `json:"params_b"`
-	PayoutClass   string  `json:"payout_class"`
-	Quant         string  `json:"quant"`
-	ReceivedBytes *int64  `json:"received_bytes,omitempty"`
-	Sha256        string  `json:"sha256"`
-	SizeBytes     int64   `json:"size_bytes"`
+	DisplayName *string `json:"display_name,omitempty"`
+	Embeddings  bool    `json:"embeddings"`
+	Family      string  `json:"family"`
+	Id          string  `json:"id"`
+	Installed   bool    `json:"installed"`
+	License     string  `json:"license"`
+	Loaded      bool    `json:"loaded"`
+	MinRamMb    int64   `json:"min_ram_mb"`
+	MinVramMb   int64   `json:"min_vram_mb"`
+	ParamsB     float64 `json:"params_b"`
+
+	// PartsDone Files downloaded and verified so far; present while downloading a multi-file model.
+	PartsDone *int `json:"parts_done,omitempty"`
+
+	// PartsTotal Files in the artifact (GGUF shards plus mmproj); present only for multi-file models. `size_bytes` is already their sum.
+	PartsTotal  *int   `json:"parts_total,omitempty"`
+	PayoutClass string `json:"payout_class"`
+	Quant       string `json:"quant"`
+
+	// ReceivedBytes Live progress summed over every file; present only while downloading.
+	ReceivedBytes *int64 `json:"received_bytes,omitempty"`
+	Sha256        string `json:"sha256"`
+	SizeBytes     int64  `json:"size_bytes"`
 
 	// State downloading | ready; present when the artifact is local.
 	State *string `json:"state,omitempty"`
+
+	// TotalBytes What the download fetches in all — `size_bytes` plus the mmproj sidecar when there is one — the denominator for `received_bytes`. Present only while downloading.
+	TotalBytes *int64 `json:"total_bytes,omitempty"`
 }
 
 // CatalogList defines model for CatalogList.
@@ -225,11 +236,17 @@ type ModelRow struct {
 	// Origin Who installed it: `operator` (you, via the app/CLI/config) or `mesh` (coordinator placement). The mesh can only evict its own; yours are never touched.
 	Origin string `json:"origin"`
 
+	// PartsDone How many of `parts_total` are downloaded and verified; present with it. Shards download one at a time, so the one in flight is `parts_done + 1`.
+	PartsDone *int `json:"parts_done,omitempty"`
+
+	// PartsTotal Files in the artifact: the GGUF shards of a sharded model plus its mmproj sidecar when it has one. Present only for such multi-file models (a plain single-file model omits it). They live in `<models dir>/<id>/` under their upstream names; `path` is the first shard.
+	PartsTotal *int `json:"parts_total,omitempty"`
+
 	// Path Absolute artifact path; present when the file exists.
 	Path   *string `json:"path,omitempty"`
 	Pinned bool    `json:"pinned"`
 
-	// ReceivedBytes Live progress; present only while downloading.
+	// ReceivedBytes Live progress summed over every file of the artifact; present only while downloading.
 	ReceivedBytes *int64 `json:"received_bytes,omitempty"`
 	SizeBytes     int64  `json:"size_bytes"`
 

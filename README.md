@@ -118,6 +118,16 @@ manifest_path = "/path/to/catalog.yaml"   # teraflock/models format; artifact_ur
 default = "llama-3.1-8b-instruct-q4_k_m"
 ```
 
+Downloads land in `<data_dir>/models/`: a single-file model as
+`<id>.gguf`; a sharded model (catalog `parts`) or one with a vision
+projector (`mmproj`) in its own `<id>/` directory under the upstream file
+names (`<name>-00001-of-0000N.gguf` ... and `mmproj-*.gguf`), because
+llama-server discovers the sibling shards from the name of part 1, which
+it is given as `-m`, and takes the projector via `--mmproj`. Every file is
+verified against its own pinned sha256 as it arrives; shards download one
+at a time, resume individually, and a finished shard is never fetched
+twice. `models.json` next to them is the daemon's index.
+
 Then watch it work:
 
 ```sh

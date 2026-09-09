@@ -155,6 +155,17 @@ login_url = "https://teraflock.ai/claim"   # browser page opened by `tera login`
   re-downloads it). `.partial` downloads older than 7 days are removed on
   start and hourly. A `<catalog-id>.gguf` found in the model dir without an
   index entry (size matching the catalog) is adopted as an operator model.
+- **Multi-file models**: a sharded GGUF (catalog `parts`) or a model with
+  an `mmproj` vision projector lives in `<models dir>/<id>/` under the
+  upstream file names, so llama-server finds the sibling shards from part
+  1 (`-m`) and gets the projector via `--mmproj`. Each file is verified
+  against its own sha256; the model's `sha256` is the composite id of its
+  parts, never a file hash. Shards download sequentially with per-file
+  resume, `size_bytes`/disk budgeting cover the whole set, and
+  `/api/v1/models` reports `parts_total`/`parts_done` next to the summed
+  `received_bytes`. A complete `<id>/` set found without an index entry is
+  adopted like a single file, once every file verifies. A spec that names
+  neither an artifact nor parts fails with `no artifact in spec`.
 - **Memory measurement** is the runtime child's physical footprint
   (`proc_pid_rusage` on macOS, `/proc/<pid>/smaps_rollup` Pss on Linux),
   not RSS — mmap'd weights shared with the page cache are not double

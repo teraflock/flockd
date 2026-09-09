@@ -218,6 +218,10 @@ func (s *Server) ListModels(w http.ResponseWriter, _ *http.Request) {
 				rb := i.ReceivedBytes
 				row.ReceivedBytes = &rb
 			}
+			if i.PartsTotal > 0 {
+				total, done := i.PartsTotal, i.PartsDone
+				row.PartsTotal, row.PartsDone = &total, &done
+			}
 			if p, ok := assignments[i.ID]; ok {
 				row.Assignment = assignmentToGen(p)
 				delete(assignments, i.ID)
