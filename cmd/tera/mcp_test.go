@@ -265,7 +265,8 @@ func TestMCPDocsQuoteDescribeVerbatim(t *testing.T) {
 	if err := describeMCP(&out, newMCPServer(chatClient(t, d), "test")); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(doc), out.String()) {
+	// Windows checkouts may carry CRLF; the comparison is about content.
+	if !strings.Contains(strings.ReplaceAll(string(doc), "\r\n", "\n"), out.String()) {
 		t.Fatalf("docs/mcp.md does not contain the current `tera mcp --describe` output verbatim; paste this in:\n%s", out.String())
 	}
 	readme, err := os.ReadFile("../../README.md")
