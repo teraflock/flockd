@@ -34,7 +34,7 @@ func TestLocalArtifactSlashPath(t *testing.T) {
 		{"file://nas/share/a.gguf", false, "", false}, // some other host
 		{`C:\models\a.gguf`, false, "", false},        // just a relative name on POSIX
 		{"file://", false, "", false},
-		{"file:///", false, "/", true}, // the root; ensureLocal rejects directories
+		{"file:///", false, "/", true}, // the root; ensureLocalFile rejects directories
 		{"https://huggingface.co/x/y.gguf", false, "", false},
 		{"http://example.com/y.gguf", false, "", false},
 		{"", false, "", false},

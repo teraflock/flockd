@@ -120,38 +120,107 @@ func expandHome(p string) string {
 	return filepath.Join(home, strings.TrimPrefix(p, "~/"))
 }
 
-// ensureLocal validates a locally-supplied artifact and returns its path
-// unchanged. The file is never copied, moved, or evicted.
-func (m *Manager) ensureLocal(path string, spec *typesv1.ModelSpec) (string, error) {
+// isLocalSpec reports whether a spec's artifact is already on this
+// machine: a file:// (or bare path) artifact_url, or, for a sharded
+// model, a file:// first part.
+func isLocalSpec(spec *typesv1.ModelSpec) bool {
+	u := spec.GetArtifactUrl()
+	if parts := spec.GetParts(); len(parts) > 0 {
+		u = parts[0].GetUrl()
+	}
+	_, ok := LocalArtifactPath(u)
+	return ok
+}
+
+// ensureLocalSet validates a locally-supplied artifact — one file, or a
+// sharded set plus mmproj that must then be local too — and returns its
+// paths unchanged. Nothing is copied, moved, indexed or evicted.
+func (m *Manager) ensureLocalSet(spec *typesv1.ModelSpec) (Artifact, error) {
+	id := spec.GetId()
+	local := func(what, raw string) (string, error) {
+		p, ok := LocalArtifactPath(raw)
+		if !ok {
+			return "", fmt.Errorf("models: %s of local artifact %s is not a local file: %s", what, id, raw)
+		}
+		return p, nil
+	}
+	var a Artifact
+	if parts := spec.GetParts(); len(parts) > 0 {
+		for i, p := range parts {
+			path, err := local(fmt.Sprintf("part %d", i+1), p.GetUrl())
+			if err != nil {
+				return Artifact{}, err
+			}
+			size, err := m.ensureLocalFile(path, id, p.GetSha256())
+			if err != nil {
+				return Artifact{}, err
+			}
+			a.SizeBytes += size
+			if i == 0 {
+				a.Path = path
+			} else if filepath.Dir(path) != filepath.Dir(a.Path) {
+				m.Log.Warn("local sharded model has parts in different directories; llama-server looks for them next to part 1",
+					"model", id, "part", i+1, "path", path)
+			}
+		}
+	} else {
+		path, err := local("artifact", spec.GetArtifactUrl())
+		if err != nil {
+			return Artifact{}, err
+		}
+		size, err := m.ensureLocalFile(path, id, spec.GetSha256())
+		if err != nil {
+			return Artifact{}, err
+		}
+		a.Path, a.SizeBytes = path, size
+	}
+	if mm := spec.GetMmproj(); mm != nil {
+		path, err := local("mmproj", mm.GetUrl())
+		if err != nil {
+			return Artifact{}, err
+		}
+		size, err := m.ensureLocalFile(path, id, mm.GetSha256())
+		if err != nil {
+			return Artifact{}, err
+		}
+		a.MmprojPath = path
+		a.SizeBytes += size
+	}
+	return a, nil
+}
+
+// ensureLocalFile holds one local file to the hash the manifest states
+// for it and returns its size.
+func (m *Manager) ensureLocalFile(path, id, want string) (int64, error) {
 	fi, err := os.Stat(path)
 	if err != nil {
-		return "", fmt.Errorf("models: local artifact for %s: %w", spec.GetId(), err)
+		return 0, fmt.Errorf("models: local artifact for %s: %w", id, err)
 	}
 	if fi.IsDir() {
-		return "", fmt.Errorf("models: local artifact for %s is a directory: %s", spec.GetId(), path)
+		return 0, fmt.Errorf("models: local artifact for %s is a directory: %s", id, path)
 	}
 
-	switch want := spec.GetSha256(); {
+	switch {
 	case isRealSHA(want):
 		// Hash pinning is the whole basis of the fingerprint trust story
 		// (SPEC §6), so when a manifest states a hash we hold the file to
 		// it — even a local one, where a stale or truncated download is the
 		// likeliest failure.
 		start := time.Now()
-		m.Log.Info("verifying local model artifact", "model", spec.GetId(),
+		m.Log.Info("verifying local model artifact", "model", id,
 			"path", path, "size_mb", fi.Size()/(1024*1024))
 		if err := verifySHA(path, want); err != nil {
-			return "", err
+			return 0, err
 		}
-		m.Log.Info("local model artifact verified", "model", spec.GetId(), "took", time.Since(start).Round(time.Millisecond))
+		m.Log.Info("local model artifact verified", "model", id, "took", time.Since(start).Round(time.Millisecond))
 	default:
 		// No usable hash: serve it, but say plainly that the integrity
 		// guarantee is off for this model rather than implying it holds.
 		m.Log.Warn("local model artifact has no sha256: serving unverified",
-			"model", spec.GetId(), "path", path,
+			"model", id, "path", path,
 			"note", "hash pinning is disabled for this model; the mesh will not schedule it for verified tiers")
 	}
-	return path, nil
+	return fi.Size(), nil
 }
 
 // isRealSHA reports whether a manifest carries an actual digest rather than

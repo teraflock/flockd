@@ -63,7 +63,9 @@ idle_after       = "2m"         # input quiet time before the node counts as idl
 yield_grace      = "2s"         # drain-or-cancel window on operator activity
 poll_interval    = "2s"         # how often idle/power signals are sampled
 serve_on_battery = false        # never serve on battery by default
-max_temp_celsius = 90.0         # pause above this temperature (0 disables)
+max_temp_celsius = 90.0         # pause above this temperature (0 disables;
+                                # Linux thermal zones only — macOS and Windows
+                                # report no temperature, so this never trips there)
 schedule         = []           # serve_policy=scheduled windows, e.g. ["22:00-08:00"]
 
 [budget]

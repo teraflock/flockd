@@ -34,7 +34,7 @@ proves the end-to-end standalone path.
   `x/sys/windows` lazy DLLs (per-session: the daemon must run in the
   operator's session, which `tera up` / the desktop app do). Parsers are
   build-tag free with fixture tests. Battery: `pmset` (macOS), sysfs
-  (Linux), stub AC (Windows).
+  (Linux), `GetSystemPowerStatus` (Windows; no temperature source).
 - **Models manager** (`internal/models`): YAML/JSON catalog, resumable
   downloads (Range/206), SHA256 verify with refusal + poisoned-partial
   cleanup, LRU eviction under budget, pin survival, state persistence.
@@ -69,11 +69,13 @@ proves the end-to-end standalone path.
 
 ## Stubbed (compiles, documented, returns useful errors)
 
-- **Windows**: power source (reports AC), SCM service manager
-  (`ErrUnsupported` + manual `sc.exe` instructions), process terminate
-  (Kill, no console event), host memory footprint (estimate stays;
-  `nvidia-smi` VRAM sampling works when on PATH). Idle source is real
-  (`GetLastInputInfo`). Hardware detection is real (flockd#29):
+- **Windows**: SCM service manager (`ErrUnsupported` + manual `sc.exe`
+  instructions), process terminate (Kill, no console event), host memory
+  footprint (estimate stays; `nvidia-smi` VRAM sampling works when on
+  PATH). Idle source is real (`GetLastInputInfo`); power source is real
+  (flockd#30: `GetSystemPowerStatus`, battery when the AC line is offline
+  on a machine with a battery; temperature stays unknown, so
+  `max_temp_celsius` is inert). Hardware detection is real (flockd#29):
   `GlobalMemoryStatusEx` RAM, registry `ProcessorNameString` CPU name,
   NVIDIA GPUs + VRAM via `nvidia-smi` (shared with Linux, `hw_nvidia.go`,
   System32 fallback), other adapters listed via `Win32_VideoController`
@@ -124,10 +126,9 @@ proves the end-to-end standalone path.
    daemon-owned `<data_dir>/limits.toml` overlay (config.toml untouched).
 4. **Keychain**: move `node.key` and `local_api_token` to
    Keychain/DPAPI/secret-service (files are 0600 today, documented).
-5. **Windows**: GetSystemPowerStatus battery, SCM via `x/sys/windows/svc`,
-   job-object child management, GetProcessMemoryInfo footprint. Budget
-   real time for this (SPEC §13.7). (Idle source and hardware detection:
-   DONE.)
+5. **Windows**: SCM via `x/sys/windows/svc`, job-object child
+   management, GetProcessMemoryInfo footprint. Budget real time for this
+   (SPEC §13.7). (Idle source, hardware detection, battery: DONE.)
 6. **Governor extras**: foreground-GPU-usage signal, screen-lock signal
    (macOS `CGSession`, logind `LockedHint`).
 7. **VRAM on AMD**: NVIDIA is measured with `nvidia-smi` (see "Memory

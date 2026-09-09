@@ -52,15 +52,57 @@ func (windowsIdleSource) IdleFor(context.Context) (time.Duration, error) {
 	return idleFromTicks(uint64(now), lii.dwTime), nil
 }
 
-// NewPlatformPowerSource returns the Windows power source.
+// NewPlatformPowerSource returns the Windows power source
+// (kernel32 GetSystemPowerStatus).
 //
-// TODO(windows): GetSystemPowerStatus for battery; WMI MSAcpi_ThermalZone
-// for temperature. Stub reports AC power / unknown temperature so desktop
-// nodes serve by default.
+// Temperature stays unknown (TempCelsius 0): the WMI
+// MSAcpi_ThermalZoneTemperature class is absent or static on most consumer
+// boards and needs an elevated token, so max_temp_celsius is inert on
+// Windows. NVIDIA GPU temperature via nvidia-smi is a possible follow-up
+// next to flockd#16.
 func NewPlatformPowerSource() PowerSource { return windowsPowerSource{} }
+
+var procGetSystemPowerStatus = kernel32.NewProc("GetSystemPowerStatus")
+
+// systemPowerStatus mirrors SYSTEM_POWER_STATUS (winbase.h).
+type systemPowerStatus struct {
+	ACLineStatus        uint8
+	BatteryFlag         uint8
+	BatteryLifePercent  uint8
+	SystemStatusFlag    uint8
+	BatteryLifeTime     uint32
+	BatteryFullLifeTime uint32
+}
+
+// ACLineStatus values.
+const (
+	acLineOffline = 0   // running on battery
+	acLineOnline  = 1   // mains power
+	acLineUnknown = 255 // no battery driver / virtual machine
+)
+
+// batteryFlagNoBattery is the BatteryFlag bit for "no system battery".
+const batteryFlagNoBattery = 128
 
 type windowsPowerSource struct{}
 
 func (windowsPowerSource) Status(context.Context) (PowerStatus, error) {
-	return PowerStatus{OnBattery: false}, nil
+	if err := procGetSystemPowerStatus.Find(); err != nil {
+		return PowerStatus{}, fmt.Errorf("governor: GetSystemPowerStatus: %w", err)
+	}
+	var sps systemPowerStatus
+	r, _, e := procGetSystemPowerStatus.Call(uintptr(unsafe.Pointer(&sps)))
+	if r == 0 {
+		return PowerStatus{}, fmt.Errorf("governor: GetSystemPowerStatus: %w", e)
+	}
+	return powerFromSystemStatus(sps.ACLineStatus, sps.BatteryFlag), nil
+}
+
+// powerFromSystemStatus is the pure mapping: on battery only when the AC
+// line is reported offline on a machine that has a battery. Unknown (255,
+// desktops and VMs without a battery driver) and "no system battery"
+// both read as mains power, so desktop nodes serve by default.
+func powerFromSystemStatus(acLineStatus, batteryFlag uint8) PowerStatus {
+	onBattery := acLineStatus == acLineOffline && batteryFlag&batteryFlagNoBattery == 0
+	return PowerStatus{OnBattery: onBattery}
 }

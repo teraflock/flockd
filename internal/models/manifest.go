@@ -42,11 +42,34 @@ type CatalogModel struct {
 	PayoutClass   string  `yaml:"payout_class" json:"payout_class"`
 	ContextLength uint32  `yaml:"context_length" json:"context_length"`
 	Embeddings    bool    `yaml:"embeddings" json:"embeddings"`
+	// Parts lists the shards of a sharded GGUF in series order
+	// (<name>-00001-of-0000N.gguf ...), each with its own hash. Empty for a
+	// single-file model. When set, ArtifactURL is empty, SizeBytes is the
+	// total across parts and SHA256 is the composite id (CompositeSHA256),
+	// never a file hash.
+	Parts []CatalogPart `yaml:"parts" json:"parts,omitempty"`
+	// Mmproj is the optional vision projector sidecar (mmproj-*.gguf)
+	// llama-server takes via --mmproj; verified and stored like a part,
+	// not counted in SizeBytes.
+	Mmproj *CatalogPart `yaml:"mmproj" json:"mmproj,omitempty"`
+}
+
+// CatalogPart is one pinned file of a multi-file artifact: a GGUF shard or
+// the mmproj sidecar. Same three names as the proto ArtifactPart and the
+// catalog YAML so nothing is renamed between them.
+type CatalogPart struct {
+	URL       string `yaml:"url" json:"url"`
+	SHA256    string `yaml:"sha256" json:"sha256"`
+	SizeBytes uint64 `yaml:"size_bytes" json:"size_bytes"`
+}
+
+func (p CatalogPart) proto() *typesv1.ArtifactPart {
+	return &typesv1.ArtifactPart{Url: p.URL, Sha256: p.SHA256, SizeBytes: p.SizeBytes}
 }
 
 // Spec converts a catalog entry to the proto ModelSpec.
 func (m CatalogModel) Spec() *typesv1.ModelSpec {
-	return &typesv1.ModelSpec{
+	spec := &typesv1.ModelSpec{
 		Id:            m.ID,
 		Family:        m.Family,
 		ParamsB:       m.ParamsB,
@@ -61,6 +84,13 @@ func (m CatalogModel) Spec() *typesv1.ModelSpec {
 		ContextLength: m.ContextLength,
 		Embeddings:    m.Embeddings,
 	}
+	for _, p := range m.Parts {
+		spec.Parts = append(spec.Parts, p.proto())
+	}
+	if m.Mmproj != nil {
+		spec.Mmproj = m.Mmproj.proto()
+	}
+	return spec
 }
 
 // ParseCatalog decodes YAML or JSON manifest bytes.

@@ -91,6 +91,10 @@ type Manager struct {
 	// verification (keyed by id, size and mtime) so a 20 GB mismatch is
 	// hashed once, not on every catalog refresh.
 	reconcileRejected map[string]bool
+	// verified remembers files this process hashed successfully (keyed by
+	// path, size and mtime), so a resumed multi-part download does not
+	// re-hash the shards it already finished.
+	verified map[string]bool
 }
 
 // States a cache entry moves through.
@@ -132,6 +136,12 @@ type cacheEntry struct {
 	// models are never the mesh's to delete. Empty = operator (pre-field
 	// cache files).
 	Origin string `json:"origin,omitempty"`
+	// Parts and Mmproj are set for a multi-file artifact (sharded GGUF
+	// and/or vision projector), which lives in <Dir>/<id>/ under the
+	// upstream basenames; SHA256 is then the composite id, not a file
+	// hash, and each file carries its own. Absent for a plain <id>.gguf.
+	Parts  []partEntry `json:"parts,omitempty"`
+	Mmproj *partEntry  `json:"mmproj,omitempty"`
 }
 
 // Origins for cache entries.
@@ -158,6 +168,7 @@ func NewManager(dir string, maxDiskMB int64, log *slog.Logger) (*Manager, error)
 		missingSeen: map[string]bool{},
 
 		reconcileRejected: map[string]bool{},
+		verified:          map[string]bool{},
 	}
 	if raw, err := os.ReadFile(m.statePath()); err == nil {
 		if err := json.Unmarshal(raw, &m.state); err != nil {
@@ -210,8 +221,32 @@ func (m *Manager) SetRetentionDays(days int) {
 	m.mu.Unlock()
 }
 
-// Path returns where a model artifact lives locally.
-func (m *Manager) Path(id string) string { return filepath.Join(m.Dir, id+".gguf") }
+// Path returns where a model artifact lives locally: <Dir>/<id>.gguf, or
+// for a multi-file entry the first shard inside <Dir>/<id>/ (llama-server
+// discovers the sibling shards from it). An id the cache does not know is
+// assumed single-file.
+func (m *Manager) Path(id string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.pathLocked(id)
+}
+
+func (m *Manager) pathLocked(id string) string {
+	if e, ok := m.state.Entries[id]; ok && e.multi() {
+		return m.artifact(e).Path
+	}
+	return filepath.Join(m.Dir, id+".gguf")
+}
+
+// Artifact is a model's files as the runtime needs them.
+type Artifact struct {
+	// Path is the GGUF to load: the file, or part 1 of a sharded set.
+	Path string
+	// MmprojPath is the vision projector sidecar for --mmproj; "" when none.
+	MmprojPath string
+	// SizeBytes is what the whole set occupies on disk (0 = unknown).
+	SizeBytes int64
+}
 
 func (m *Manager) saveLocked() {
 	raw, err := json.MarshalIndent(&m.state, "", "  ")
@@ -233,41 +268,60 @@ func (m *Manager) Ensure(ctx context.Context, spec *typesv1.ModelSpec) (string, 
 // off limits to the coordinator), and a model the operator already has is
 // never re-labelled as the mesh's.
 func (m *Manager) EnsureOrigin(ctx context.Context, spec *typesv1.ModelSpec, origin string) (string, error) {
+	a, err := m.EnsureArtifact(ctx, spec, origin)
+	return a.Path, err
+}
+
+// EnsureArtifact is EnsureOrigin returning every path the runtime needs
+// (the mmproj sidecar has no place in a single string).
+//
+// A sharded spec (parts) is fetched one part at a time, each through the
+// same resumable, hash-verified download as a single file, into
+// <Dir>/<id>/ under the upstream names; a shard that verified once is
+// never fetched again, and progress is the sum over the whole set.
+func (m *Manager) EnsureArtifact(ctx context.Context, spec *typesv1.ModelSpec, origin string) (Artifact, error) {
 	// A file:// artifact is a model the operator already has on disk (an
 	// LM Studio or ollama collection, a hand-built quant). Serve it in
 	// place: copying a 20GB GGUF into our cache to satisfy bookkeeping
 	// would be absurd, and since we do not own the file the LRU must never
 	// be allowed to delete it — so it is deliberately not registered in the
 	// cache state at all.
-	if err := ValidateID(spec.GetId()); err != nil {
-		return "", err
+	id := spec.GetId()
+	if err := ValidateID(id); err != nil {
+		return Artifact{}, err
 	}
-
-	if path, ok := LocalArtifactPath(spec.GetArtifactUrl()); ok {
-		return m.ensureLocal(path, spec)
+	if spec.GetArtifactUrl() == "" && len(spec.GetParts()) == 0 {
+		return Artifact{}, fmt.Errorf("models: %s: %w", id, ErrNoArtifact)
 	}
-
-	dest := m.Path(spec.GetId())
+	if isLocalSpec(spec) {
+		return m.ensureLocalSet(spec)
+	}
+	set, err := m.artifactSet(spec)
+	if err != nil {
+		return Artifact{}, err
+	}
 
 	m.mu.Lock()
-	if e, ok := m.state.Entries[spec.GetId()]; ok && e.State == "ready" {
+	if e, ok := m.state.Entries[id]; ok && e.State == StateReady {
 		e.LastUsed = time.Now()
 		m.saveLocked()
-		m.mu.Unlock()
 		// Trust-but-verify on startup use: cheap stat; full hash was done at
 		// download time. Serving re-verification happens in Verify().
-		if _, err := os.Stat(dest); err == nil {
-			return dest, nil
+		if m.filesExistLocked(e) {
+			a := m.artifact(e)
+			m.mu.Unlock()
+			return a, nil
 		}
 		// File vanished under us: fall through to re-download.
-		m.mu.Lock()
-		delete(m.state.Entries, spec.GetId())
+		delete(m.state.Entries, id)
 		m.saveLocked()
 	}
 	m.mu.Unlock()
 
-	if err := m.evictForLocked(ctx, int64(spec.GetSizeBytes()), origin == OriginMesh); err != nil {
-		return "", err
+	// Pre-flight on the whole set: nothing is fetched that cannot fit.
+	need := set.totalBytes()
+	if err := m.evictForLocked(ctx, need, origin == OriginMesh); err != nil {
+		return Artifact{}, err
 	}
 
 	// The entry exists (state "downloading") for the whole transfer so the
@@ -278,58 +332,128 @@ func (m *Manager) EnsureOrigin(ctx context.Context, spec *typesv1.ModelSpec, ori
 	// one, and download() only reports its first byte count after the
 	// HTTP round-trip — long enough for the hourly (or startup) GC to
 	// delete an old .partial out from under the resume.
+	entry := set.entry(spec.GetSha256(), origin)
+	entry.SizeBytes = need
+	entry.LastUsed = time.Now()
+	entry.State = StateDownloading
 	m.mu.Lock()
-	m.state.Entries[spec.GetId()] = &cacheEntry{
-		ID:        spec.GetId(),
-		SHA256:    spec.GetSha256(),
-		SizeBytes: int64(spec.GetSizeBytes()),
-		LastUsed:  time.Now(),
-		State:     "downloading",
-		Origin:    origin,
-	}
-	m.progress[spec.GetId()] = Progress{TotalBytes: int64(spec.GetSizeBytes())}
+	m.state.Entries[id] = entry
+	m.progress[id] = Progress{TotalBytes: need}
 	m.saveLocked()
 	m.mu.Unlock()
 	actor := actorFor(origin)
-	m.Activity.Record(activity.KindDownloadStarted, actor, spec.GetId(),
-		fmt.Sprintf("%s started downloading %s (%s)", actor, spec.GetId(), humanBytes(int64(spec.GetSizeBytes()))), "")
+	m.Activity.Record(activity.KindDownloadStarted, actor, id,
+		fmt.Sprintf("%s started downloading %s (%s)", actor, id, humanBytes(need)), "")
 
-	if err := m.download(ctx, spec, dest); err != nil {
+	if err := m.downloadSet(ctx, set, entry); err != nil {
 		m.mu.Lock()
-		delete(m.state.Entries, spec.GetId())
-		delete(m.progress, spec.GetId())
+		delete(m.state.Entries, id)
+		delete(m.progress, id)
 		m.saveLocked()
 		m.mu.Unlock()
 		detail := err.Error()
 		if ctx.Err() != nil {
 			detail = "cancelled"
 		}
-		m.Activity.Record(activity.KindDownloadFailed, actor, spec.GetId(), "download of "+spec.GetId()+" failed", detail)
-		return "", err
+		m.Activity.Record(activity.KindDownloadFailed, actor, id, "download of "+id+" failed", detail)
+		return Artifact{}, err
 	}
 	m.mu.Lock()
-	delete(m.progress, spec.GetId())
+	delete(m.progress, id)
 	m.mu.Unlock()
 
-	fi, err := os.Stat(dest)
-	if err != nil {
-		return "", fmt.Errorf("models: stat %s: %w", dest, err)
+	var size int64
+	for _, f := range m.entryFiles(entry) {
+		fi, err := os.Stat(f.Path)
+		if err != nil {
+			return Artifact{}, fmt.Errorf("models: stat %s: %w", f.Path, err)
+		}
+		size += fi.Size()
 	}
 	m.mu.Lock()
-	m.state.Entries[spec.GetId()] = &cacheEntry{
-		ID:        spec.GetId(),
-		SHA256:    spec.GetSha256(),
-		SizeBytes: fi.Size(),
-		LastUsed:  time.Now(),
-		State:     "ready",
-		Origin:    origin,
-	}
-	delete(m.missingSeen, spec.GetId())
+	entry.SizeBytes = size
+	entry.LastUsed = time.Now()
+	entry.State = StateReady
+	m.state.Entries[id] = entry
+	delete(m.missingSeen, id)
 	m.saveLocked()
+	a := m.artifact(entry)
 	m.mu.Unlock()
-	m.Activity.Record(activity.KindDownloaded, actor, spec.GetId(),
-		fmt.Sprintf("downloaded %s (%s)", spec.GetId(), humanBytes(fi.Size())), "")
-	return dest, nil
+	m.Activity.Record(activity.KindDownloaded, actor, id,
+		fmt.Sprintf("downloaded %s (%s)", id, humanBytes(size)), "")
+	return a, nil
+}
+
+// downloadSet fetches the set's files in order. A file already in place
+// with the right size and hash (a shard finished before a crash or a
+// cancel, or copied in by hand) is kept; anything else goes through
+// download(), whose .partial is per file, so a failed shard costs only
+// its own progress.
+func (m *Manager) downloadSet(ctx context.Context, set artifactSet, entry *cacheEntry) error {
+	if set.Multi {
+		if err := os.MkdirAll(set.Dir, 0o755); err != nil {
+			return fmt.Errorf("models: mkdir %s: %w", set.Dir, err)
+		}
+	}
+	total := set.totalBytes()
+	var done int64
+	for i, f := range set.Files {
+		dest := filepath.Join(set.Dir, f.Name)
+		if !m.haveVerified(dest, f) {
+			if err := m.download(ctx, set.ID, f, dest, done, total); err != nil {
+				return err
+			}
+		}
+		fi, err := os.Stat(dest)
+		if err != nil {
+			return fmt.Errorf("models: stat %s: %w", dest, err)
+		}
+		done += fi.Size()
+		m.mu.Lock()
+		if files := entry.files(); i < len(files) {
+			files[i].State = StateReady
+			m.saveLocked()
+		}
+		m.mu.Unlock()
+		m.setProgress(set.ID, done, total)
+	}
+	return nil
+}
+
+// haveVerified reports whether dest already holds f: the expected size and,
+// unless this process hashed that very file before, the expected hash. A
+// wrong file is left for download() to overwrite.
+func (m *Manager) haveVerified(dest string, f artifactFile) bool {
+	fi, err := os.Stat(dest)
+	if err != nil || fi.IsDir() || (f.SizeBytes > 0 && fi.Size() != f.SizeBytes) {
+		return false
+	}
+	key := verifiedKey(dest, fi)
+	m.mu.Lock()
+	ok := m.verified[key]
+	m.mu.Unlock()
+	if ok {
+		return true
+	}
+	if !isRealSHA(f.SHA256) || verifySHA(dest, f.SHA256) != nil {
+		return false
+	}
+	m.rememberVerified(dest)
+	return true
+}
+
+func verifiedKey(path string, fi os.FileInfo) string {
+	return fmt.Sprintf("%s:%d:%d", path, fi.Size(), fi.ModTime().UnixNano())
+}
+
+func (m *Manager) rememberVerified(path string) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return
+	}
+	m.mu.Lock()
+	m.verified[verifiedKey(path, fi)] = true
+	m.mu.Unlock()
 }
 
 func actorFor(origin string) string {
@@ -351,25 +475,28 @@ func humanBytes(n int64) string {
 	}
 }
 
-// download performs a resumable fetch into dest via a .partial temp file,
-// verifying SHA256 over the complete content before renaming into place.
-func (m *Manager) download(ctx context.Context, spec *typesv1.ModelSpec, dest string) error {
+// download performs a resumable fetch of one file into dest via a
+// .partial temp file, verifying SHA256 over the complete content before
+// renaming into place. base is what the model's earlier files already
+// add up to and total the whole set, so progress is reported for the
+// model, not the file.
+func (m *Manager) download(ctx context.Context, id string, f artifactFile, dest string, base, total int64) error {
 	tmp := dest + ".partial"
 	var offset int64
 	if fi, err := os.Stat(tmp); err == nil {
 		offset = fi.Size()
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, spec.GetArtifactUrl(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.URL, nil)
 	if err != nil {
-		return fmt.Errorf("models: request %s: %w", spec.GetArtifactUrl(), err)
+		return fmt.Errorf("models: request %s: %w", f.URL, err)
 	}
 	if offset > 0 {
 		req.Header.Set("Range", "bytes="+strconv.FormatInt(offset, 10)+"-")
 	}
 	resp, err := m.Client.Do(req)
 	if err != nil {
-		return fmt.Errorf("models: download %s: %w", spec.GetId(), err)
+		return fmt.Errorf("models: download %s: %w", id, err)
 	}
 	defer resp.Body.Close()
 
@@ -377,11 +504,11 @@ func (m *Manager) download(ctx context.Context, spec *typesv1.ModelSpec, dest st
 	switch resp.StatusCode {
 	case http.StatusPartialContent:
 		flags |= os.O_APPEND
-		m.Log.Info("resuming model download", "model", spec.GetId(), "offset", offset)
+		m.Log.Info("resuming model download", "model", id, "file", f.Name, "offset", offset)
 	case http.StatusOK:
 		flags |= os.O_TRUNC // server ignored Range: start over
 	default:
-		return fmt.Errorf("models: download %s: status %s", spec.GetId(), resp.Status)
+		return fmt.Errorf("models: download %s (%s): status %s", id, f.Name, resp.Status)
 	}
 
 	out, err := os.OpenFile(tmp, flags, 0o644) //nolint:gosec
@@ -393,15 +520,14 @@ func (m *Manager) download(ctx context.Context, spec *typesv1.ModelSpec, dest st
 	if resp.StatusCode == http.StatusOK {
 		offset = 0
 	}
-	total := int64(spec.GetSizeBytes())
 	if total == 0 && resp.ContentLength > 0 {
-		total = offset + resp.ContentLength
+		total = base + offset + resp.ContentLength
 	}
 	cw := &countingWriter{
 		w: out,
 		n: offset,
 		report: func(n int64) {
-			m.setProgress(spec.GetId(), n, total)
+			m.setProgress(id, base+n, total)
 		},
 	}
 	cw.report(offset)
@@ -409,20 +535,21 @@ func (m *Manager) download(ctx context.Context, spec *typesv1.ModelSpec, dest st
 	cw.flush()
 	closeErr := out.Close()
 	if cpErr != nil {
-		return fmt.Errorf("models: write %s: %w", spec.GetId(), cpErr) // .partial kept for resume
+		return fmt.Errorf("models: write %s: %w", id, cpErr) // .partial kept for resume
 	}
 	if closeErr != nil {
 		return fmt.Errorf("models: close %s: %w", tmp, closeErr)
 	}
 
-	if err := verifySHA(tmp, spec.GetSha256()); err != nil {
+	if err := verifySHA(tmp, f.SHA256); err != nil {
 		_ = os.Remove(tmp) // poisoned: do not resume garbage
 		return err
 	}
 	if err := os.Rename(tmp, dest); err != nil {
 		return fmt.Errorf("models: finalize %s: %w", dest, err)
 	}
-	m.Log.Info("model downloaded and verified", "model", spec.GetId(), "sha256", spec.GetSha256())
+	m.rememberVerified(dest)
+	m.Log.Info("model file downloaded and verified", "model", id, "file", f.Name, "sha256", f.SHA256)
 	return nil
 }
 
@@ -464,16 +591,27 @@ func (m *Manager) DownloadProgress(id string) (Progress, bool) {
 	return p, ok
 }
 
-// Verify re-hashes a cached artifact against its recorded SHA. Serving
-// paths call this before loading a model into the runtime.
+// Verify re-hashes a cached artifact against its recorded SHA — every
+// shard and the mmproj against their own hash for a multi-file entry;
+// the composite id is never checked against a file. Serving paths call
+// this before loading a model into the runtime.
 func (m *Manager) Verify(id string) error {
 	m.mu.Lock()
 	e, ok := m.state.Entries[id]
+	var files []fileRef
+	if ok {
+		files = m.entryFiles(e)
+	}
 	m.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("models: %s not in cache", id)
 	}
-	return verifySHA(m.Path(id), e.SHA256)
+	for _, f := range files {
+		if err := verifySHA(f.Path, f.SHA256); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func verifySHA(path, want string) error {
@@ -509,7 +647,7 @@ func (m *Manager) evictForLocked(_ context.Context, need int64, meshOnly bool) e
 	total := need
 	var candidates []*cacheEntry
 	for _, e := range m.state.Entries {
-		if e.State == StateReady && !m.fileExistsLocked(e.ID) {
+		if e.State == StateReady && !m.filesExistLocked(e) {
 			continue // missing from disk: occupies nothing
 		}
 		total += e.SizeBytes
@@ -528,7 +666,7 @@ func (m *Manager) evictForLocked(_ context.Context, need int64, meshOnly bool) e
 			break
 		}
 		m.Log.Info("evicting model (LRU, disk budget)", "model", e.ID, "size_mb", e.SizeBytes/1024/1024)
-		if err := os.Remove(m.Path(e.ID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := m.removeFilesLocked(e); err != nil {
 			return fmt.Errorf("models: evict %s: %w", e.ID, err)
 		}
 		total -= e.SizeBytes
@@ -547,9 +685,28 @@ func (m *Manager) evictForLocked(_ context.Context, need int64, meshOnly bool) e
 	return nil
 }
 
-func (m *Manager) fileExistsLocked(id string) bool {
-	_, err := os.Stat(m.Path(id))
-	return err == nil
+// filesExistLocked reports whether every file of the entry is on disk.
+func (m *Manager) filesExistLocked(e *cacheEntry) bool {
+	for _, f := range m.entryFiles(e) {
+		if _, err := os.Stat(f.Path); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+// removeFilesLocked deletes an entry's files: the one GGUF, or the whole
+// <Dir>/<id>/ directory of a multi-file set (the id was validated when the
+// entry was created, so the directory is ours). A file already gone is
+// not an error.
+func (m *Manager) removeFilesLocked(e *cacheEntry) error {
+	if e.multi() {
+		return os.RemoveAll(filepath.Join(m.Dir, e.ID))
+	}
+	if err := os.Remove(filepath.Join(m.Dir, e.ID+".gguf")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 // Has reports whether id is on disk, complete and verified (a `cached`
@@ -558,7 +715,7 @@ func (m *Manager) Has(id string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	e, ok := m.state.Entries[id]
-	return ok && e.State == StateReady && m.fileExistsLocked(id)
+	return ok && e.State == StateReady && m.filesExistLocked(e)
 }
 
 // Origin reports who owns a cached model ("" when not cached).
@@ -598,10 +755,11 @@ func (m *Manager) Remove(id string) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, ok := m.state.Entries[id]; !ok {
+	e, ok := m.state.Entries[id]
+	if !ok {
 		return fmt.Errorf("models: %s not in cache", id)
 	}
-	if err := os.Remove(m.Path(id)); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := m.removeFilesLocked(e); err != nil {
 		return fmt.Errorf("models: remove %s: %w", id, err)
 	}
 	delete(m.state.Entries, id)
@@ -631,7 +789,14 @@ type Info struct {
 	// ReceivedBytes is live progress, present only while downloading.
 	ReceivedBytes int64 `json:"received_bytes,omitempty"`
 	// Path is the artifact's absolute path; empty unless the file exists.
+	// For a multi-file entry it is the first shard (see Manager.Path).
 	Path string `json:"path,omitempty"`
+	// PartsTotal is the number of files in a multi-file artifact (shards
+	// plus the mmproj sidecar); 0 for a plain single-file model.
+	PartsTotal int `json:"parts_total,omitempty"`
+	// PartsDone is how many of them are verified and in place; equal to
+	// PartsTotal once ready.
+	PartsDone int `json:"parts_done,omitempty"`
 }
 
 // List returns cache contents sorted by id. Every ready entry is stat'd:
@@ -653,9 +818,13 @@ func (m *Manager) List() []Info {
 				row.SizeBytes = p.TotalBytes
 			}
 		}
+		if e.multi() {
+			row.PartsTotal = len(e.files())
+			row.PartsDone = e.partsDone()
+		}
 		if e.State == StateReady {
-			if m.fileExistsLocked(e.ID) {
-				row.Path = m.Path(e.ID)
+			if m.filesExistLocked(e) {
+				row.Path = m.pathLocked(e.ID)
 				delete(m.missingSeen, e.ID)
 			} else {
 				row.State = StateMissing
@@ -668,7 +837,7 @@ func (m *Manager) List() []Info {
 		out = append(out, row)
 	}
 	for _, id := range newlyMissing {
-		m.Log.Warn("model file missing from disk", "model", id, "path", m.Path(id))
+		m.Log.Warn("model file missing from disk", "model", id, "path", m.pathLocked(id))
 		m.Activity.Record(activity.KindMissing, activity.ActorDaemon, id,
 			id+" is missing from disk (deleted outside the daemon); it will be re-downloaded on the next load", "")
 	}
@@ -705,13 +874,15 @@ func (m *Manager) Stats() DiskStats {
 		if e.State != StateReady {
 			continue
 		}
-		if fi, err := os.Stat(m.Path(e.ID)); err == nil {
-			st.ModelsBytes += fi.Size()
+		for _, f := range m.entryFiles(e) {
+			if fi, err := os.Stat(f.Path); err == nil {
+				st.ModelsBytes += fi.Size()
+			}
 		}
 	}
 	m.mu.Unlock()
 	for _, p := range m.partials() {
-		st.PartialBytes += p.Size()
+		st.PartialBytes += p.info.Size()
 	}
 	if free, err := hardware.DiskFreeBytes(m.Dir); err == nil {
 		st.FreeBytes = int64(free)
@@ -719,19 +890,45 @@ func (m *Manager) Stats() DiskStats {
 	return st
 }
 
-// partials lists the .partial files in Dir.
-func (m *Manager) partials() []os.FileInfo {
+// partial is a resumable download file: <id>.gguf.partial in Dir, or
+// <file>.partial inside a multi-file entry's <Dir>/<id>/.
+type partial struct {
+	id   string
+	path string
+	info os.FileInfo
+}
+
+// partials lists the .partial files in Dir and one level below it.
+func (m *Manager) partials() []partial {
 	entries, err := os.ReadDir(m.Dir)
 	if err != nil {
 		return nil
 	}
-	var out []os.FileInfo
+	var out []partial
 	for _, de := range entries {
-		if de.IsDir() || !strings.HasSuffix(de.Name(), ".partial") {
-			continue
-		}
-		if fi, err := de.Info(); err == nil {
-			out = append(out, fi)
+		name := de.Name()
+		switch {
+		case de.IsDir():
+			if ValidateID(name) != nil {
+				continue
+			}
+			sub, err := os.ReadDir(filepath.Join(m.Dir, name))
+			if err != nil {
+				continue
+			}
+			for _, sd := range sub {
+				if sd.IsDir() || !strings.HasSuffix(sd.Name(), ".partial") {
+					continue
+				}
+				if fi, err := sd.Info(); err == nil {
+					out = append(out, partial{id: name, path: filepath.Join(m.Dir, name, sd.Name()), info: fi})
+				}
+			}
+		case strings.HasSuffix(name, ".partial"):
+			if fi, err := de.Info(); err == nil {
+				id := strings.TrimSuffix(strings.TrimSuffix(name, ".partial"), ".gguf")
+				out = append(out, partial{id: id, path: filepath.Join(m.Dir, name), info: fi})
+			}
 		}
 	}
 	return out
@@ -743,21 +940,19 @@ func (m *Manager) partials() []os.FileInfo {
 func (m *Manager) GCPartials(maxAge time.Duration) []string {
 	cutoff := time.Now().Add(-maxAge)
 	var removed []string
-	for _, fi := range m.partials() {
-		id := strings.TrimSuffix(strings.TrimSuffix(fi.Name(), ".partial"), ".gguf")
+	for _, p := range m.partials() {
 		m.mu.Lock()
-		_, live := m.progress[id]
+		_, live := m.progress[p.id]
 		m.mu.Unlock()
-		if live || fi.ModTime().After(cutoff) {
+		if live || p.info.ModTime().After(cutoff) {
 			continue
 		}
-		path := filepath.Join(m.Dir, fi.Name())
-		if err := os.Remove(path); err != nil {
-			m.Log.Warn("could not remove stale partial download", "path", path, "err", err)
+		if err := os.Remove(p.path); err != nil {
+			m.Log.Warn("could not remove stale partial download", "path", p.path, "err", err)
 			continue
 		}
-		m.Log.Info("removed stale partial download", "model", id, "size_mb", fi.Size()/1024/1024, "age", time.Since(fi.ModTime()).Round(time.Hour))
-		removed = append(removed, id)
+		m.Log.Info("removed stale partial download", "model", p.id, "file", p.info.Name(), "size_mb", p.info.Size()/1024/1024, "age", time.Since(p.info.ModTime()).Round(time.Hour))
+		removed = append(removed, p.id)
 	}
 	return removed
 }
@@ -786,7 +981,7 @@ func (m *Manager) Retain() []string {
 	}
 	var evicted []string
 	for _, e := range victims {
-		if err := os.Remove(m.Path(e.ID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := m.removeFilesLocked(e); err != nil {
 			m.Log.Warn("retention eviction failed", "model", e.ID, "err", err)
 			continue
 		}
@@ -812,8 +1007,9 @@ func (m *Manager) Retain() []string {
 // their sha256 verifies. Hash pinning is what lets the mesh trust what a
 // node serves (SPEC §6), so a file that merely has the right name and
 // size is not enough; the hash is computed outside the lock, once per
-// distinct file. Anything else is logged and left alone. Returns the
-// adopted ids.
+// distinct file. A multi-file set (<id>/ holding the catalog's shards and
+// mmproj) is adopted only when every file is present and verifies.
+// Anything else is logged and left alone. Returns the adopted ids.
 func (m *Manager) Reconcile(cat *Catalog) []string {
 	if cat == nil {
 		return nil
@@ -823,28 +1019,22 @@ func (m *Manager) Reconcile(cat *Catalog) []string {
 		return nil
 	}
 	type candidate struct {
-		id   string
-		sha  string
-		size int64
-		mod  time.Time
-		key  string
+		entry *cacheEntry
+		files []fileRef
+		key   string
 	}
 	var cands []candidate
 	m.mu.Lock()
 	for _, de := range entries {
 		name := de.Name()
-		if de.IsDir() || !strings.HasSuffix(name, ".gguf") {
+		id := strings.TrimSuffix(name, ".gguf")
+		if !de.IsDir() && id == name {
 			continue
 		}
-		id := strings.TrimSuffix(name, ".gguf")
 		if _, known := m.state.Entries[id]; known {
 			continue
 		}
 		if ValidateID(id) != nil {
-			continue
-		}
-		fi, err := de.Info()
-		if err != nil {
 			continue
 		}
 		cm, ok := cat.Find(id)
@@ -852,46 +1042,84 @@ func (m *Manager) Reconcile(cat *Catalog) []string {
 			m.Log.Debug("unindexed file in model dir is not a catalog model; leaving it", "file", name)
 			continue
 		}
-		if cm.SizeBytes > 0 && int64(cm.SizeBytes) != fi.Size() {
-			m.Log.Warn("unindexed model file has an unexpected size; not adopting it", "model", id, "size", fi.Size(), "catalog_size", cm.SizeBytes)
+		set, err := m.artifactSet(cm.Spec())
+		if err != nil {
+			m.Log.Warn("unindexed model file has an unusable catalog entry; not adopting it", "model", id, "err", err)
 			continue
 		}
-		key := fmt.Sprintf("%s:%d:%d", id, fi.Size(), fi.ModTime().UnixNano())
+		if set.Multi != de.IsDir() {
+			m.Log.Warn("unindexed model file does not match the catalog's layout; not adopting it", "model", id, "multi_part", set.Multi)
+			continue
+		}
+		e := set.entry(cm.SHA256, OriginOperator)
+		files := m.entryFiles(e)
+		var size int64
+		var mod time.Time
+		complete := true
+		for i, f := range files {
+			fi, err := os.Stat(f.Path)
+			if err != nil || fi.IsDir() {
+				complete = false
+				break
+			}
+			if want := set.Files[i].SizeBytes; want > 0 && fi.Size() != want {
+				m.Log.Warn("unindexed model file has an unexpected size; not adopting it", "model", id, "file", filepath.Base(f.Path), "size", fi.Size(), "catalog_size", want)
+				complete = false
+				break
+			}
+			size += fi.Size()
+			if fi.ModTime().After(mod) {
+				mod = fi.ModTime()
+			}
+		}
+		if !complete {
+			continue
+		}
+		key := fmt.Sprintf("%s:%d:%d", id, size, mod.UnixNano())
 		if m.reconcileRejected[key] {
 			continue
 		}
-		cands = append(cands, candidate{id: id, sha: cm.SHA256, size: fi.Size(), mod: fi.ModTime(), key: key})
+		e.SizeBytes, e.LastUsed, e.State = size, mod, StateReady
+		for _, f := range e.files() {
+			f.State = StateReady
+		}
+		cands = append(cands, candidate{entry: e, files: files, key: key})
 	}
 	m.mu.Unlock()
 
 	var adopted []string
 	for _, c := range cands {
-		if isRealSHA(c.sha) {
-			start := time.Now()
-			if err := verifySHA(m.Path(c.id), c.sha); err != nil {
-				m.Log.Warn("unindexed model file failed verification; not adopting it", "model", c.id, "err", err)
-				m.mu.Lock()
-				m.reconcileRejected[c.key] = true
-				m.mu.Unlock()
+		id := c.entry.ID
+		verified := true
+		for _, f := range c.files {
+			if !isRealSHA(f.SHA256) {
+				m.Log.Warn("adopting unindexed model file without a catalog sha256: serving unverified", "model", id, "file", filepath.Base(f.Path))
 				continue
 			}
-			m.Log.Info("unindexed model file verified", "model", c.id, "took", time.Since(start).Round(time.Millisecond))
-		} else {
-			m.Log.Warn("adopting unindexed model file without a catalog sha256: serving unverified", "model", c.id)
+			start := time.Now()
+			if err := verifySHA(f.Path, f.SHA256); err != nil {
+				m.Log.Warn("unindexed model file failed verification; not adopting it", "model", id, "err", err)
+				verified = false
+				break
+			}
+			m.Log.Info("unindexed model file verified", "model", id, "file", filepath.Base(f.Path), "took", time.Since(start).Round(time.Millisecond))
+		}
+		if !verified {
+			m.mu.Lock()
+			m.reconcileRejected[c.key] = true
+			m.mu.Unlock()
+			continue
 		}
 		m.mu.Lock()
-		if _, known := m.state.Entries[c.id]; known {
+		if _, known := m.state.Entries[id]; known {
 			m.mu.Unlock()
 			continue // a download of the same id started meanwhile
 		}
-		m.state.Entries[c.id] = &cacheEntry{
-			ID: c.id, SHA256: c.sha, SizeBytes: c.size, LastUsed: c.mod,
-			State: StateReady, Origin: OriginOperator,
-		}
+		m.state.Entries[id] = c.entry
 		m.saveLocked()
 		m.mu.Unlock()
-		adopted = append(adopted, c.id)
-		m.Log.Info("adopted model file found in the model dir", "model", c.id, "size_mb", c.size/1024/1024)
+		adopted = append(adopted, id)
+		m.Log.Info("adopted model file found in the model dir", "model", id, "files", len(c.files), "size_mb", c.entry.SizeBytes/1024/1024)
 	}
 	return adopted
 }
