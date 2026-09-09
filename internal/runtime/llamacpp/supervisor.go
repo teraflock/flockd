@@ -29,6 +29,7 @@ type supervisor struct {
 
 	mu      sync.Mutex
 	cmd     *exec.Cmd
+	guard   *childGuard // ties every child's lifetime to ours (Windows job object)
 	stopped bool
 	done    chan struct{} // closed when the run loop exits
 }
@@ -75,10 +76,24 @@ func (s *supervisor) spawn() error {
 	cmd := exec.CommandContext(context.Background(), s.bin, s.args...) //nolint:gosec // pinned, SHA-verified binary
 	cmd.Stdout = slogWriter{s.log, slog.LevelDebug}
 	cmd.Stderr = slogWriter{s.log, slog.LevelDebug}
+	cmd.SysProcAttr = childSysProcAttr()
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("llamacpp: start llama-server: %w", err)
 	}
 	s.cmd = cmd
+	// One guard per supervisor, created on first spawn and closed by
+	// stop(); a respawned child joins the same job. Failure is a warning:
+	// the guard is a safety net for daemon crashes, not the stop path.
+	if s.guard == nil {
+		g, err := newChildGuard()
+		if err != nil {
+			s.log.Warn("llama-server child guard unavailable; an orphan may survive a daemon crash", "err", err)
+		}
+		s.guard = g
+	}
+	if err := s.guard.adopt(cmd); err != nil {
+		s.log.Warn("llama-server not adopted by child guard", "pid", cmd.Process.Pid, "err", err)
+	}
 	s.log.Info("llama-server started", "pid", cmd.Process.Pid, "url", s.url)
 	return nil
 }
@@ -165,11 +180,14 @@ func (s *supervisor) pid() int {
 	return s.cmd.Process.Pid
 }
 
-// stop terminates the child gracefully (SIGTERM, then SIGKILL after 5s).
+// stop terminates the child gracefully: terminate() (SIGTERM; a console
+// break on Windows, or nothing without a console), then Kill after 5s,
+// on every platform. Closing the guard last kills anything still in the
+// job on Windows and is a no-op elsewhere.
 func (s *supervisor) stop(ctx context.Context) {
 	s.mu.Lock()
 	s.stopped = true
-	cmd := s.cmd
+	cmd, guard := s.cmd, s.guard
 	s.mu.Unlock()
 	if cmd == nil || cmd.Process == nil {
 		return
@@ -183,6 +201,7 @@ func (s *supervisor) stop(ctx context.Context) {
 	case <-time.After(6 * time.Second):
 	}
 	killTimer.Stop()
+	_ = guard.Close()
 }
 
 // ephemeralPort asks the kernel for a free loopback port. Inherently a small

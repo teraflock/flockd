@@ -20,6 +20,10 @@ func TestMain(m *testing.M) {
 		runFakeLlamaChild(port)
 		return
 	}
+	if port := os.Getenv("FLOCKD_JOB_PARENT_PORT"); port != "" {
+		runJobParentHelper(port)
+		return
+	}
 	os.Exit(m.Run())
 }
 

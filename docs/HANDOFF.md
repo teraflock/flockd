@@ -70,9 +70,18 @@ proves the end-to-end standalone path.
 ## Stubbed (compiles, documented, returns useful errors)
 
 - **Windows**: SCM service manager (`ErrUnsupported` + manual `sc.exe`
-  instructions), process terminate (Kill, no console event), host memory
-  footprint (estimate stays; `nvidia-smi` VRAM sampling works when on
-  PATH). Idle source is real (`GetLastInputInfo`); power source is real
+  instructions), host memory footprint (estimate stays; `nvidia-smi` VRAM
+  sampling works when on PATH). Process control is real (flockd#31):
+  every llama-server joins a kill-on-close job object so a dead daemon
+  (crash, `taskkill /F`) takes the child with it; the child is created in
+  its own process group, with `CREATE_NO_WINDOW` when the daemon has no
+  console; `terminate` sends `CTRL_BREAK` when a console is shared, else
+  relies on the supervisor's 5 s grace + `TerminateProcess` — llama-server
+  only maps `CTRL_C` to SIGINT, so there is no signal-driven drain on
+  Windows; the drain happens before stop (governor yield grace). Only the
+  fake child from the test suite has run under it: a real
+  `llama-server.exe` needs the Windows runtime artifact (docs#8). Idle
+  source is real (`GetLastInputInfo`); power source is real
   (flockd#30: `GetSystemPowerStatus`, battery when the AC line is offline
   on a machine with a battery; temperature stays unknown, so
   `max_temp_celsius` is inert). Hardware detection is real (flockd#29):
@@ -126,9 +135,9 @@ proves the end-to-end standalone path.
    daemon-owned `<data_dir>/limits.toml` overlay (config.toml untouched).
 4. **Keychain**: move `node.key` and `local_api_token` to
    Keychain/DPAPI/secret-service (files are 0600 today, documented).
-5. **Windows**: SCM via `x/sys/windows/svc`, job-object child
-   management, GetProcessMemoryInfo footprint. Budget real time for this
-   (SPEC §13.7). (Idle source, hardware detection, battery: DONE.)
+5. **Windows**: SCM via `x/sys/windows/svc`, GetProcessMemoryInfo
+   footprint. Budget real time for this (SPEC §13.7). (Idle source,
+   hardware detection, battery, job-object child management: DONE.)
 6. **Governor extras**: foreground-GPU-usage signal, screen-lock signal
    (macOS `CGSession`, logind `LockedHint`).
 7. **VRAM on AMD**: NVIDIA is measured with `nvidia-smi` (see "Memory
