@@ -17,7 +17,7 @@ func TestOpenAILoadsCachedModelOnDemand(t *testing.T) {
 	srv, _ := newOpsServer(t)
 
 	resp := apiPost(t, srv, "/api/v1/models/cat-model/download", "")
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("download = %d, want 202", resp.StatusCode)
 	}
@@ -30,7 +30,7 @@ func TestOpenAILoadsCachedModelOnDemand(t *testing.T) {
 		if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
 			t.Fatal(err)
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		var ready, loaded bool
 		for _, m := range list.Models {
 			if m.Id == "cat-model" {
@@ -63,7 +63,7 @@ func TestOpenAILoadsCachedModelOnDemand(t *testing.T) {
 	}
 
 	resp = chat("cat-model")
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("chat against cached model = %d, want 200 (load on demand)", resp.StatusCode)
 	}
@@ -74,7 +74,7 @@ func TestOpenAILoadsCachedModelOnDemand(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	for _, m := range list.Models {
 		if m.Id == "cat-model" && !m.Loaded {
 			t.Fatal("model not loaded after the on-demand request")
@@ -82,7 +82,7 @@ func TestOpenAILoadsCachedModelOnDemand(t *testing.T) {
 	}
 
 	resp = chat("not-on-disk")
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("chat against unknown model = %d, want 404", resp.StatusCode)
 	}

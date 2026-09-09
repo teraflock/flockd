@@ -57,7 +57,7 @@ func (f *LoginFlow) Run(ctx context.Context) (*Result, string, error) {
 	sum := sha256.Sum256([]byte(verifier))
 	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
 
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	lis, err := (&net.ListenConfig{}).Listen(ctx, "tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, "", fmt.Errorf("enroll: loopback listener: %w", err)
 	}

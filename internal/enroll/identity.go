@@ -107,7 +107,7 @@ type Credentials struct {
 }
 
 // Enroll performs the Enroll RPC with a claim code and persists the result.
-func Enroll(ctx context.Context, client tunnelv1.TunnelServiceClient, id *Identity, claimCode string, cap *typesv1.CapabilityProfile, dataDir string) (*Credentials, error) {
+func Enroll(ctx context.Context, client tunnelv1.TunnelServiceClient, id *Identity, claimCode string, prof *typesv1.CapabilityProfile, dataDir string) (*Credentials, error) {
 	csr, err := id.CSR()
 	if err != nil {
 		return nil, err
@@ -116,7 +116,7 @@ func Enroll(ctx context.Context, client tunnelv1.TunnelServiceClient, id *Identi
 		ClaimCode:  claimCode,
 		Pubkey:     id.Pub,
 		CsrPem:     csr,
-		Capability: cap,
+		Capability: prof,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("enroll: rpc: %w", err)
@@ -142,11 +142,11 @@ func Enroll(ctx context.Context, client tunnelv1.TunnelServiceClient, id *Identi
 // TODO(rotation): the real coordinator will accept rotation without a claim
 // code, authenticated by the existing mTLS session; the fake accepts the
 // sentinel code below.
-func RotateIfNeeded(ctx context.Context, client tunnelv1.TunnelServiceClient, id *Identity, creds *Credentials, cap *typesv1.CapabilityProfile, dataDir string) (*Credentials, error) {
+func RotateIfNeeded(ctx context.Context, client tunnelv1.TunnelServiceClient, id *Identity, creds *Credentials, prof *typesv1.CapabilityProfile, dataDir string) (*Credentials, error) {
 	if time.Until(creds.CertExpiresAt) > 7*24*time.Hour {
 		return creds, nil
 	}
-	return Enroll(ctx, client, id, "rotate:"+creds.NodeID, cap, dataDir)
+	return Enroll(ctx, client, id, "rotate:"+creds.NodeID, prof, dataDir)
 }
 
 // SaveCredentials persists creds with 0600.

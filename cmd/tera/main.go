@@ -85,7 +85,7 @@ func cmdUp() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "up",
 		Short: "Install and start the flockd service (launchd/systemd)",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			bin, err := findFlockd()
 			if err != nil {
 				return fmt.Errorf("flockd binary not found (install it next to tera or on PATH): %w", err)
@@ -194,7 +194,7 @@ func waitForDaemon(ctx context.Context, base string) error {
 		}
 		resp, err := client.Do(req)
 		if err == nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			return nil
 		}
 		lastErr = err
@@ -239,7 +239,7 @@ func cmdDown() *cobra.Command {
 	return &cobra.Command{
 		Use:   "down",
 		Short: "Stop the flockd service",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := svc.NewManager().Stop(cmd.Context()); err != nil {
 				return err
 			}
@@ -253,7 +253,7 @@ func cmdStatus() *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
 		Short: "Show node status",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			c, err := newClient()
 			if err != nil {
 				return err
@@ -316,7 +316,7 @@ func cmdLogin() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "login",
 		Short: "Enroll this node via browser (PKCE loopback handoff)",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			// --claim-code skips the browser entirely: headless boxes, SSH
 			// sessions, and dev meshes have no browser to hand off to.
 			if claimCode == "" {
@@ -369,7 +369,7 @@ func cmdModels() *cobra.Command {
 		&cobra.Command{
 			Use:   "list",
 			Short: "List cached/loaded models",
-			RunE: func(cmd *cobra.Command, args []string) error {
+			RunE: func(cmd *cobra.Command, _ []string) error {
 				cl, err := newClient()
 				if err != nil {
 					return err
@@ -441,7 +441,7 @@ func cmdLimits() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "limits",
 		Short: "Show or set resource-governance limits",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			cl, err := newClient()
 			if err != nil {
 				return err
@@ -523,7 +523,7 @@ func cmdEarnings() *cobra.Command {
 	return &cobra.Command{
 		Use:   "earnings",
 		Short: "Show credits earned",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			cl, err := newClient()
 			if err != nil {
 				return err
@@ -556,7 +556,7 @@ func cmdRedeem() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "redeem",
 		Short: "Redeem earned credits (opens the console's redeem page)",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			fmt.Fprintln(cmd.OutOrStdout(), "Redeem earned credits at", redeemURL)
 			openOrPrint(cmd, redeemURL)
 			return nil
@@ -582,7 +582,7 @@ func cmdToken() *cobra.Command {
 	return &cobra.Command{
 		Use:   "token",
 		Short: "Print the local API bearer token (for the web dashboard)",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, _ []string) error {
 			dir := dataDir()
 			path := filepath.Join(dir, client.TokenFile)
 			raw, err := os.ReadFile(path)
@@ -603,7 +603,7 @@ func cmdVersion() *cobra.Command {
 	return &cobra.Command{
 		Use:   "version",
 		Short: "Print version",
-		Run: func(cmd *cobra.Command, args []string) {
+		Run: func(_ *cobra.Command, _ []string) {
 			fmt.Println("tera", version)
 		},
 	}
@@ -614,7 +614,7 @@ func cmdUninstall() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "uninstall",
 		Short: "Stop and remove the flockd service (one-command clean uninstall)",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := svc.NewManager().Uninstall(cmd.Context()); err != nil {
 				return err
 			}

@@ -22,6 +22,7 @@ import (
 	tunnelv1 "github.com/teraflock/proto/gen/go/flock/tunnel/v1"
 	typesv1 "github.com/teraflock/proto/gen/go/flock/types/v1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -113,7 +114,7 @@ func (c *Coordinator) PubKey() ed25519.PublicKey { return c.signPub }
 func (c *Coordinator) Dialer() tunnel.Dialer { return bufDialer{lis: c.lis} }
 
 // Addr is a placeholder address for logs/config plumbing.
-func (c *Coordinator) Addr() string { return "fakecoord:bufconn" }
+func (*Coordinator) Addr() string { return "fakecoord:bufconn" }
 
 // Allow registers a node ID as enrolled without running the Enroll RPC, for
 // tests that drive the session directly with a synthetic identity.
@@ -130,7 +131,7 @@ func (d bufDialer) Dial(_ context.Context, _ string) (*grpc.ClientConn, error) {
 		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
 			return d.lis.DialContext(ctx)
 		}),
-		grpc.WithInsecure(), //nolint:staticcheck // in-memory transport
+		grpc.WithTransportCredentials(insecure.NewCredentials()), // in-memory transport
 	)
 }
 

@@ -130,7 +130,7 @@ func TestYieldDrainsCleanlyWithoutCancel(t *testing.T) {
 	h.idle.Set(10 * time.Minute)
 	h.g.evaluate(context.Background())
 
-	reqCtx, release, err := h.g.Admit(context.Background(), "r1")
+	_, release, err := h.g.Admit(context.Background(), "r1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,11 +143,10 @@ func TestYieldDrainsCleanlyWithoutCancel(t *testing.T) {
 
 	// Request finishes inside the grace window: it must complete, not be
 	// cancelled (drain-before-cancel).
+	// release cancels its own context after unregistering, so reqCtx's
+	// state says nothing here; the point is drainOrCancel returned without
+	// force-cancel.
 	release()
-	if reqCtx.Err() == nil {
-		// release cancels its own context after unregistering — that's
-		// fine; the point is drainOrCancel returned without force-cancel.
-	}
 	eventually(t, func() bool { return h.g.Inflight() == 0 }, "inflight not drained")
 	// Advancing past grace must not panic or cancel anything new.
 	h.clk.Advance(5 * time.Second)

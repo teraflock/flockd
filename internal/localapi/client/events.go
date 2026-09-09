@@ -108,7 +108,7 @@ func (c *Client) openEvents(ctx context.Context, logs bool) (io.ReadCloser, erro
 	}
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return nil, c.Check(resp.StatusCode, raw)
 	}
 	return resp.Body, nil

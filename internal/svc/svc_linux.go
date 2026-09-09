@@ -13,13 +13,28 @@ import (
 
 const unitName = "flockd.service"
 
+// warn/info are the nil-safe Options.Warn/Info callers. They live here
+// because the systemd lingering flow is their only caller; on the other
+// platforms they would be dead code.
+func (o Options) warn(msg string) {
+	if o.Warn != nil {
+		o.Warn(msg)
+	}
+}
+
+func (o Options) info(msg string) {
+	if o.Info != nil {
+		o.Info(msg)
+	}
+}
+
 func newPlatformManager() Manager { return &systemdManager{} }
 
 // systemdManager manages a user-level systemd unit
 // (~/.config/systemd/user/flockd.service).
 type systemdManager struct{}
 
-func (m *systemdManager) unitPath() (string, error) {
+func (*systemdManager) unitPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("svc: home dir: %w", err)
@@ -133,14 +148,14 @@ func (m *systemdManager) Uninstall(ctx context.Context) error {
 	return nil
 }
 
-func (m *systemdManager) Start(ctx context.Context) error {
+func (*systemdManager) Start(ctx context.Context) error {
 	if out, err := exec.CommandContext(ctx, "systemctl", "--user", "enable", "--now", unitName).CombinedOutput(); err != nil {
 		return fmt.Errorf("svc: systemctl enable --now: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
 
-func (m *systemdManager) Stop(ctx context.Context) error {
+func (*systemdManager) Stop(ctx context.Context) error {
 	if out, err := exec.CommandContext(ctx, "systemctl", "--user", "disable", "--now", unitName).CombinedOutput(); err != nil {
 		return fmt.Errorf("svc: systemctl disable --now: %w (%s)", err, strings.TrimSpace(string(out)))
 	}

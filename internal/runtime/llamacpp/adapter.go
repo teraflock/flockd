@@ -221,7 +221,7 @@ func (i *instance) generate(ctx context.Context, req rt.CompletionRequest) (rt.T
 	}
 
 	genCtx, cancel := context.WithCancel(ctx)
-	resp, err := i.post(genCtx, path, body)
+	resp, err := i.postStream(genCtx, path, body)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -330,6 +330,16 @@ func (i *instance) embed(ctx context.Context, req rt.CompletionRequest) (rt.Toke
 	ch <- rt.Chunk{Done: true, Embeddings: vecs, Usage: &rt.Usage{PromptTokens: er.Usage.PromptTokens}}
 	close(ch)
 	return rt.NewChanStream(ch, nil), nil
+}
+
+// postStream is post for the one caller that hands the response to a
+// goroutine (generate's SSE reader closes the body when the stream ends).
+// bodyclose cannot follow a Close on another goroutine, so the hand-off
+// is declared here instead of exempting every post caller.
+//
+//bodyclose:handled
+func (i *instance) postStream(ctx context.Context, path string, body any) (*http.Response, error) {
+	return i.post(ctx, path, body)
 }
 
 func (i *instance) post(ctx context.Context, path string, body any) (*http.Response, error) {

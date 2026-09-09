@@ -55,7 +55,7 @@ func newOpsServerDeps(t *testing.T) (*httptest.Server, string, Deps) {
 	blob := []byte("tiny gguf artifact")
 	sum := sha256.Sum256(blob)
 
-	art := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	art := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write(blob)
 	}))
 	t.Cleanup(art.Close)
@@ -162,14 +162,14 @@ func TestCatalogDownloadLoadFlow(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&cat); err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if len(cat.Models) != 1 || cat.Models[0].ID != "cat-model" || cat.Models[0].Installed || cat.Models[0].MinRAMMB != 4096 {
 		t.Fatalf("catalog = %+v", cat)
 	}
 
 	// Trigger the download and wait for ready.
 	resp = apiPost(t, srv, "/api/v1/models/cat-model/download", "")
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("download = %d, want 202", resp.StatusCode)
 	}
@@ -182,7 +182,7 @@ func TestCatalogDownloadLoadFlow(t *testing.T) {
 		if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
 			t.Fatal(err)
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		var ready bool
 		for _, m := range list.Models {
 			if m.Id == "cat-model" && m.State == "ready" {
@@ -204,19 +204,19 @@ func TestCatalogDownloadLoadFlow(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("re-download = %d, want 200", resp.StatusCode)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	// Load, make default, unload.
 	resp = apiPost(t, srv, "/api/v1/models/cat-model/load", "")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("load = %d", resp.StatusCode)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	resp = apiPost(t, srv, "/api/v1/models/cat-model/default", "")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("default = %d", resp.StatusCode)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	resp = apiGet(t, srv, "/api/v1/status")
 	var st struct {
@@ -225,7 +225,7 @@ func TestCatalogDownloadLoadFlow(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if st.DefaultModel != "cat-model" {
 		t.Fatalf("default_model = %q", st.DefaultModel)
 	}
@@ -234,14 +234,14 @@ func TestCatalogDownloadLoadFlow(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("unload = %d", resp.StatusCode)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	// Unknown id 404s.
 	resp = apiPost(t, srv, "/api/v1/models/nope/download", "")
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("unknown download = %d, want 404", resp.StatusCode)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 }
 
 func TestLimitsPersistToOverlay(t *testing.T) {
@@ -254,7 +254,7 @@ func TestLimitsPersistToOverlay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusNotImplemented {
 		t.Fatalf("put limits without governor = %d", resp.StatusCode)
 	}
@@ -268,7 +268,7 @@ func TestLimitsPersistToOverlay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("put limits = %d", resp.StatusCode)
 	}
@@ -324,7 +324,7 @@ func TestEventsStreamRicherEvents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { resp.Body.Close() })
+	t.Cleanup(func() { _ = resp.Body.Close() })
 
 	events := make(chan [2]string, 16) // [event, data]
 	go func() {
@@ -415,14 +415,14 @@ func TestEnrollEndpoint(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if st.Enrolled || st.NodeID != "fingerprint-abc" {
 		t.Fatalf("pre-enroll status = %+v", st)
 	}
 
 	// Empty and malformed codes 400.
 	resp = apiPost(t, srv, "/api/v1/enroll", `{"claim_code":"  "}`)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("empty code = %d, want 400", resp.StatusCode)
 	}
@@ -432,11 +432,11 @@ func TestEnrollEndpoint(t *testing.T) {
 	if resp.StatusCode != http.StatusBadGateway {
 		t.Fatalf("bad code = %d, want 502", resp.StatusCode)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	// Busy 409.
 	resp = apiPost(t, srv, "/api/v1/enroll", `{"claim_code":"busy"}`)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("busy = %d, want 409", resp.StatusCode)
 	}
@@ -453,7 +453,7 @@ func TestEnrollEndpoint(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&ok); err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if !ok.OK || ok.NodeID != "node-assigned" || gotCode != "tf-claim-xyz" {
 		t.Fatalf("enroll response = %+v, gotCode = %q", ok, gotCode)
 	}
@@ -467,7 +467,7 @@ func TestEnrollEndpoint(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&st2); err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if !st2.Enrolled || st2.NodeID != "node-assigned" || st2.CertExpiresAt == nil || !st2.CertExpiresAt.Equal(certExp) {
 		t.Fatalf("post-enroll status = %+v", st2)
 	}

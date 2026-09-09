@@ -4,6 +4,7 @@
 package browser
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"runtime"
@@ -18,15 +19,19 @@ func Open(url string) error {
 }
 
 // command picks the per-OS launcher. Split out so the choice is testable
-// without spawning anything.
+// without spawning anything. The launcher is fire-and-forget by design
+// (Open returns before it exits), so it deliberately runs under a
+// background context rather than the caller's: a cancelled CLI context
+// must not kill a browser hand-off that is already in flight.
 func command(goos, url string) *exec.Cmd {
+	ctx := context.Background()
 	switch goos {
 	case "darwin":
-		return exec.Command("open", url)
+		return exec.CommandContext(ctx, "open", url)
 	case "windows":
-		return exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+		return exec.CommandContext(ctx, "rundll32", "url.dll,FileProtocolHandler", url)
 	default:
-		return exec.Command("xdg-open", url)
+		return exec.CommandContext(ctx, "xdg-open", url)
 	}
 }
 

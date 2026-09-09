@@ -31,18 +31,6 @@ type Options struct {
 	Info func(msg string)
 }
 
-func (o Options) warn(msg string) {
-	if o.Warn != nil {
-		o.Warn(msg)
-	}
-}
-
-func (o Options) info(msg string) {
-	if o.Info != nil {
-		o.Info(msg)
-	}
-}
-
 // Manager is the platform-specific service controller.
 type Manager interface {
 	// Install writes the service definition pointing at binPath with args.

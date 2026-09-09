@@ -68,7 +68,11 @@ func (s *supervisor) spawn() error {
 	if s.stopped {
 		return fmt.Errorf("llamacpp: supervisor stopped")
 	}
-	cmd := exec.Command(s.bin, s.args...) //nolint:gosec // pinned, SHA-verified binary
+	// The child's lifetime belongs to stop() (SIGTERM, grace, SIGKILL) and
+	// the supervise loop, not to any caller's context — a cancellable
+	// context here would SIGKILL llama-server the moment the request that
+	// happened to spawn it ended. Background is deliberate.
+	cmd := exec.CommandContext(context.Background(), s.bin, s.args...) //nolint:gosec // pinned, SHA-verified binary
 	cmd.Stdout = slogWriter{s.log, slog.LevelDebug}
 	cmd.Stderr = slogWriter{s.log, slog.LevelDebug}
 	if err := cmd.Start(); err != nil {
@@ -185,7 +189,7 @@ func (s *supervisor) stop(ctx context.Context) {
 // TOCTOU race, but standard practice for supervising servers that pick their
 // own listener from a --port flag.
 func ephemeralPort() (int, error) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	l, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		return 0, fmt.Errorf("llamacpp: reserve port: %w", err)
 	}

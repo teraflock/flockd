@@ -279,7 +279,7 @@ func TestAPIRequiresBearerToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated status = %d, want 401", resp.StatusCode)
 	}
@@ -303,7 +303,7 @@ func TestLimitsRoundTrip(t *testing.T) {
 	resp := apiGet(t, srv, "/api/v1/limits")
 	var lim gen.Limits
 	_ = json.NewDecoder(resp.Body).Decode(&lim)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if lim.ServePolicy != "always" {
 		t.Fatalf("limits = %+v", lim)
 	}
@@ -334,8 +334,8 @@ func TestEarningsEndpoint(t *testing.T) {
 	// Serve one request so earnings tick.
 	body := `{"messages":[{"role":"user","content":"hi"}],"max_tokens":16,"seed":1}`
 	r, _ := http.Post(srv.URL+"/v1/chat/completions", "application/json", strings.NewReader(body))
-	io.Copy(io.Discard, r.Body) //nolint:errcheck
-	r.Body.Close()
+	_, _ = io.Copy(io.Discard, r.Body)
+	_ = r.Body.Close()
 
 	resp := apiGet(t, srv, "/api/v1/earnings")
 	defer resp.Body.Close()
@@ -420,7 +420,7 @@ func TestBearerTokenToleratesSurroundingWhitespace(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
 			t.Errorf("Authorization=%q -> %d, want 200", header, resp.StatusCode)
 		}
@@ -445,7 +445,7 @@ func TestBearerTokenStillRejectsWrongToken(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if resp.StatusCode != http.StatusUnauthorized {
 			t.Errorf("Authorization=%q -> %d, want 401", header, resp.StatusCode)
 		}
@@ -464,7 +464,7 @@ func TestEventsAcceptsQueryToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("events?token= -> %d, want 200", resp.StatusCode)
 	}
@@ -476,7 +476,7 @@ func TestEventsAcceptsQueryToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp2.Body.Close()
+	_ = resp2.Body.Close()
 	if resp2.StatusCode != http.StatusUnauthorized {
 		t.Errorf("events?token=nope -> %d, want 401", resp2.StatusCode)
 	}
@@ -490,7 +490,7 @@ func TestQueryTokenRejectedOnNonSSERoutes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("status?token= -> %d, want 401 (query tokens are SSE-only)", resp.StatusCode)
 	}

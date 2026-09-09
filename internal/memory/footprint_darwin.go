@@ -24,9 +24,15 @@ import (
 
 //go:cgo_import_dynamic libc_proc_pid_rusage proc_pid_rusage "/usr/lib/libSystem.B.dylib"
 
+// Both names below are fixed by the runtime/x/sys linkname convention
+// (the .s trampolines and cgo_import_dynamic refer to them verbatim), so
+// revive's var-naming is switched off for exactly these two lines.
+//
+//revive:disable-next-line:var-naming
 var libc_proc_pid_rusage_trampoline_addr uintptr
 
 //go:linkname syscall_syscall syscall.syscall
+//revive:disable-next-line:var-naming
 func syscall_syscall(fn, a1, a2, a3 uintptr) (r1, r2, err uintptr)
 
 const rusageInfoV0 = 0

@@ -69,9 +69,9 @@ func TestEnrollAgainstFakeCoordinator(t *testing.T) {
 
 	dir := t.TempDir()
 	id, _ := LoadOrGenerateIdentity(dir)
-	cap := &typesv1.CapabilityProfile{Os: "darwin", Arch: "arm64"}
+	prof := &typesv1.CapabilityProfile{Os: "darwin", Arch: "arm64"}
 
-	creds, err := Enroll(context.Background(), client, id, "claim-123", cap, dir)
+	creds, err := Enroll(context.Background(), client, id, "claim-123", prof, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestLoginFlowCallback(t *testing.T) {
 				time.Sleep(20 * time.Millisecond)
 				resp, err := http.Get(redirect + "?claim_code=cc-42&state=" + state)
 				if err == nil {
-					resp.Body.Close()
+					_ = resp.Body.Close()
 				}
 			}()
 			return nil
@@ -147,7 +147,7 @@ func TestLoginFlowRejectsStateMismatch(t *testing.T) {
 				time.Sleep(20 * time.Millisecond)
 				resp, err := http.Get(redirect + "?claim_code=cc&state=wrong")
 				if err == nil {
-					resp.Body.Close()
+					_ = resp.Body.Close()
 				}
 			}()
 			return nil

@@ -129,7 +129,7 @@ func (s *Server) ListenAndServe(ctx context.Context, addr string) error {
 	if !isLoopback(addr) {
 		s.deps.Log.Warn("local API bound to a non-loopback address — the management API and OpenAI endpoints are now reachable from your network", "addr", addr)
 	}
-	lis, err := net.Listen("tcp", addr)
+	lis, err := (&net.ListenConfig{}).Listen(ctx, "tcp", addr)
 	if err != nil {
 		return fmt.Errorf("localapi: listen %s: %w", addr, err)
 	}

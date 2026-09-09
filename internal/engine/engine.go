@@ -63,10 +63,9 @@ type Engine struct {
 	stats *telemetry.Stats
 	touch func(modelID string) // models.Manager LRU recency hook, may be nil
 
-	mu          sync.RWMutex
-	models      map[string]*ModelEntry
-	defaultID   string
-	totalErrors int64
+	mu        sync.RWMutex
+	models    map[string]*ModelEntry
+	defaultID string
 }
 
 // New builds an Engine. admit may be nil (no gating), stats may be nil.
