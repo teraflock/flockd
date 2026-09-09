@@ -19,7 +19,7 @@ func newPlatformManager() Manager { return &launchdManager{} }
 // daemon serves loopback only).
 type launchdManager struct{}
 
-func (m *launchdManager) plistPath() (string, error) {
+func (*launchdManager) plistPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("svc: home dir: %w", err)
@@ -68,7 +68,7 @@ func renderPlist(binPath string, args []string, opts Options) string {
 `, launchdLabel, argsXML.String(), logXML)
 }
 
-func (m *launchdManager) Install(ctx context.Context, binPath string, args []string, opts Options) error {
+func (m *launchdManager) Install(_ context.Context, binPath string, args []string, opts Options) error {
 	path, err := m.plistPath()
 	if err != nil {
 		return err

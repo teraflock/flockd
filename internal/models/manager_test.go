@@ -297,7 +297,7 @@ func TestStatePersistsAcrossRestarts(t *testing.T) {
 func TestDownloadProgressAndDownloadingState(t *testing.T) {
 	blob := bytes.Repeat([]byte("x"), 64*1024)
 	gate := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		// First half, then hold until released — the test inspects state
 		// mid-download.
 		_, _ = w.Write(blob[:32*1024])
@@ -357,7 +357,7 @@ func TestDownloadProgressAndDownloadingState(t *testing.T) {
 }
 
 func TestFailedDownloadLeavesNoEntry(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "nope", http.StatusInternalServerError)
 	}))
 	defer srv.Close()

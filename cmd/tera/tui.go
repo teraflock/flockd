@@ -24,7 +24,7 @@ func cmdDashboard() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "dashboard",
 		Short: "Live node dashboard (TUI); --web opens the browser dashboard",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			if web {
 				fmt.Println("Opening", flagAPI, "…")
 				raw, err := os.ReadFile(filepath.Join(dataDir(), client.TokenFile))

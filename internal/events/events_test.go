@@ -19,7 +19,7 @@ func TestPublishSubscribe(t *testing.T) {
 	}
 }
 
-func TestSlowSubscriberDropsNotBlocks(t *testing.T) {
+func TestSlowSubscriberDropsNotBlocks(_ *testing.T) {
 	h := NewHub()
 	_, cancel := h.Subscribe() // never read
 	defer cancel()
@@ -28,7 +28,7 @@ func TestSlowSubscriberDropsNotBlocks(t *testing.T) {
 	}
 }
 
-func TestNilHubPublishIsSafe(t *testing.T) {
+func TestNilHubPublishIsSafe(_ *testing.T) {
 	var h *Hub
 	h.Publish("noop", nil)
 }

@@ -119,7 +119,7 @@ func updateToGen(r update.Result) *gen.Update {
 }
 
 // GetActivity implements gen.ServerInterface.
-func (s *Server) GetActivity(w http.ResponseWriter, r *http.Request) {
+func (s *Server) GetActivity(w http.ResponseWriter, _ *http.Request) {
 	rows := []gen.ActivityEvent{}
 	for _, e := range s.deps.Activity.List() {
 		row := gen.ActivityEvent{Time: e.Time, Kind: e.Kind, Actor: e.Actor, Message: e.Message}
@@ -157,20 +157,20 @@ func (s *Server) CheckUpdate(w http.ResponseWriter, r *http.Request) {
 }
 
 // GetStatus implements gen.ServerInterface.
-func (s *Server) GetStatus(w http.ResponseWriter, r *http.Request) {
+func (s *Server) GetStatus(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.status())
 }
 
 // GetHealth is the one unauthenticated route: liveness for `tera up`,
 // service managers, and the desktop app's daemon probe.
-func (s *Server) GetHealth(w http.ResponseWriter, r *http.Request) {
+func (s *Server) GetHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, gen.Health{Ok: true, Version: s.deps.Version})
 }
 
 // ---- models ----
 
 // ListModels implements gen.ServerInterface.
-func (s *Server) ListModels(w http.ResponseWriter, r *http.Request) {
+func (s *Server) ListModels(w http.ResponseWriter, _ *http.Request) {
 	loaded := map[string]bool{}
 	for _, m := range s.deps.Engine.Models() {
 		loaded[m.Spec.ID] = true
@@ -313,7 +313,7 @@ func (s *Server) DeleteModel(w http.ResponseWriter, r *http.Request, id gen.Mode
 // GetEarnings implements gen.ServerInterface. Standalone/demo accounting
 // until the ledger exists (Phase 2); numbers are honest simulations,
 // labelled as such.
-func (s *Server) GetEarnings(w http.ResponseWriter, r *http.Request) {
+func (s *Server) GetEarnings(w http.ResponseWriter, _ *http.Request) {
 	snap := s.deps.Engine.Stats().Snapshot()
 	credits := float64(snap.EarnedMicrocred) / 1e6
 	usd := credits * 0.000001 * 1e6 // 1 credit = $0.000001 peg (SPEC §4.5)
@@ -335,7 +335,7 @@ func (s *Server) GetEarnings(w http.ResponseWriter, r *http.Request) {
 // ---- limits ----
 
 // GetLimits implements gen.ServerInterface.
-func (s *Server) GetLimits(w http.ResponseWriter, r *http.Request) {
+func (s *Server) GetLimits(w http.ResponseWriter, _ *http.Request) {
 	g := s.deps.Governor
 	if g == nil {
 		writeOpenAIError(w, http.StatusNotImplemented, "invalid_request_error", "governor not enabled")
@@ -489,7 +489,7 @@ func windowsToStrings(ws []governor.Window) []string {
 // ---- logs ----
 
 // GetLogs implements gen.ServerInterface.
-func (s *Server) GetLogs(w http.ResponseWriter, r *http.Request, params gen.GetLogsParams) {
+func (s *Server) GetLogs(w http.ResponseWriter, _ *http.Request, params gen.GetLogsParams) {
 	n := 200
 	if params.N != nil {
 		n = *params.N

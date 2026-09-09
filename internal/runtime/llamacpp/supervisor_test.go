@@ -25,10 +25,10 @@ func TestMain(m *testing.M) {
 
 func runFakeLlamaChild(port string) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
-	mux.HandleFunc("/die", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/die", func(_ http.ResponseWriter, _ *http.Request) {
 		os.Exit(3)
 	})
 	l, err := net.Listen("tcp", "127.0.0.1:"+port)

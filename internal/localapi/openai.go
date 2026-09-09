@@ -137,7 +137,7 @@ func mapFinish(reason string) string {
 
 // ---- GET /v1/models ----
 
-func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleListModels(w http.ResponseWriter, _ *http.Request) {
 	type model struct {
 		ID      string `json:"id"`
 		Object  string `json:"object"`

@@ -70,7 +70,7 @@ func TestEvaluate(t *testing.T) {
 
 func TestCheckAnnouncesOncePerVersion(t *testing.T) {
 	body := `{"flockd":{"latest":"0.4.0","minimum":"0.3.0","url":"https://example/v0.4.0"},"desktop":{"latest":"1.0.0","url":"x"}}`
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(body))
 	}))
 	defer srv.Close()
@@ -143,7 +143,7 @@ func TestFeedUnavailableIsUnknownNotError(t *testing.T) {
 // feed's URL survives when the mesh sends none.
 func TestMeshChannelOverridesFeed(t *testing.T) {
 	body := `{"flockd":{"latest":"0.4.0","minimum":"0.3.0","url":"https://feed/v0.4.0"}}`
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(body))
 	}))
 	defer srv.Close()

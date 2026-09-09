@@ -108,7 +108,7 @@ func (s *Server) StartModelDownload(w http.ResponseWriter, r *http.Request, id g
 }
 
 // CancelModelDownload implements gen.ServerInterface.
-func (s *Server) CancelModelDownload(w http.ResponseWriter, r *http.Request, id gen.ModelID) {
+func (s *Server) CancelModelDownload(w http.ResponseWriter, _ *http.Request, id gen.ModelID) {
 	ops := s.modelOps(w)
 	if ops == nil {
 		return
@@ -152,7 +152,7 @@ func (s *Server) UnloadModel(w http.ResponseWriter, r *http.Request, id gen.Mode
 }
 
 // SetDefaultModel implements gen.ServerInterface.
-func (s *Server) SetDefaultModel(w http.ResponseWriter, r *http.Request, id gen.ModelID) {
+func (s *Server) SetDefaultModel(w http.ResponseWriter, _ *http.Request, id gen.ModelID) {
 	ops := s.modelOps(w)
 	if ops == nil {
 		return

@@ -77,7 +77,7 @@ func TestLoadCatalogFromPathAndURL(t *testing.T) {
 		t.Fatalf("path load: %v", err)
 	}
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(yamlCatalog))
 	}))
 	defer srv.Close()

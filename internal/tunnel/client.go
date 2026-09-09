@@ -387,7 +387,7 @@ func (c *Client) applyConfig(cu *tunnelv1.ConfigUpdate) {
 	}
 }
 
-func (c *Client) reject(ss *sessionStream, id, reason string) {
+func (*Client) reject(ss *sessionStream, id, reason string) {
 	_ = ss.send(&tunnelv1.NodeMessage{Msg: &tunnelv1.NodeMessage_DispatchAck{
 		DispatchAck: &tunnelv1.DispatchAck{RequestId: id, Accepted: false, RejectReason: reason},
 	}})
@@ -495,7 +495,7 @@ func (c *Client) runDispatch(ctx context.Context, ss *sessionStream, d *tunnelv1
 	}
 }
 
-func (c *Client) relayEmbedding(ss *sessionStream, id string, stream rt.TokenStream) {
+func (*Client) relayEmbedding(ss *sessionStream, id string, stream rt.TokenStream) {
 	res := &tunnelv1.EmbeddingResult{RequestId: id}
 	for {
 		chunk, err := stream.Recv()
@@ -516,7 +516,7 @@ func (c *Client) relayEmbedding(ss *sessionStream, id string, stream rt.TokenStr
 	_ = ss.send(&tunnelv1.NodeMessage{Msg: &tunnelv1.NodeMessage_EmbeddingResult{EmbeddingResult: res}})
 }
 
-func (c *Client) sendError(ss *sessionStream, d *tunnelv1.DispatchRequest, err error) {
+func (*Client) sendError(ss *sessionStream, d *tunnelv1.DispatchRequest, err error) {
 	finish := tunnelv1.TokenChunk{
 		RequestId:    d.GetRequestId(),
 		Done:         true,

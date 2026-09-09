@@ -523,7 +523,7 @@ func reportRuntimeBuild(hw *typesv1.CapabilityProfile, inst rt.Instance, log *sl
 // startTunnel runs the session client in the background. nodeID must be the
 // coordinator-assigned ID from enrollment — the session is rejected
 // otherwise.
-func startTunnel(ctx context.Context, cfg config.Config, dialer tunnel.Dialer, addr string, coordKey []byte, nodeID string, identity *enroll.Identity, hw *typesv1.CapabilityProfile, gov *governor.Governor, stats *telemetry.Stats, eng *engine.Engine, mgr *models.Manager, ops *modelops.Service, asg *assign.Service, upd *update.Checker, budget rt.ResourceBudget, log *slog.Logger) error {
+func startTunnel(ctx context.Context, cfg config.Config, dialer tunnel.Dialer, addr string, coordKey []byte, nodeID string, _ *enroll.Identity, hw *typesv1.CapabilityProfile, gov *governor.Governor, stats *telemetry.Stats, eng *engine.Engine, _ *models.Manager, ops *modelops.Service, asg *assign.Service, upd *update.Checker, _ rt.ResourceBudget, log *slog.Logger) error {
 	protoBudget := &typesv1.ResourceBudget{
 		MaxVramPercent:        uint32(cfg.Budget.MaxVRAMPercent),
 		MaxRamMb:              uint64(max(cfg.Budget.MaxRAMMB, 0)),

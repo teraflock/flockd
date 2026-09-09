@@ -18,7 +18,7 @@ import (
 func fakeLlamaServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"status":"ok","slots_idle":4,"slots_processing":1}`))
 	})
 	stream := func(w http.ResponseWriter, deltas []string, completionStyle bool) {
@@ -48,10 +48,10 @@ func fakeLlamaServer(t *testing.T) *httptest.Server {
 		}
 		stream(w, []string{"Hello", " from", " llama"}, false)
 	})
-	mux.HandleFunc("/v1/completions", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/completions", func(w http.ResponseWriter, _ *http.Request) {
 		stream(w, []string{"one", " two"}, true)
 	})
-	mux.HandleFunc("/v1/embeddings", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/embeddings", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"data":[{"embedding":[0.1,0.2]},{"embedding":[0.3,0.4]}],"usage":{"prompt_tokens":5}}`))
 	})
 	return httptest.NewServer(mux)
@@ -136,7 +136,7 @@ func TestAdapterEmbeddings(t *testing.T) {
 }
 
 func TestAdapterServerError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, `{"error":"model exploded"}`, http.StatusInternalServerError)
 	}))
 	defer srv.Close()
@@ -168,7 +168,7 @@ func TestAdapterHealth(t *testing.T) {
 // delta, so billing and canary diffs see everything the model produced.
 func TestAdapterRelaysReasoningContent(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		fl := w.(http.Flusher)
 		frames := []string{

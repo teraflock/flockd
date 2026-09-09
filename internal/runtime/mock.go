@@ -142,7 +142,7 @@ func (i *mockInstance) Complete(ctx context.Context, req CompletionRequest) (Tok
 	return NewChanStream(ch, cancel), nil
 }
 
-func (i *mockInstance) embed(req CompletionRequest) TokenStream {
+func (*mockInstance) embed(req CompletionRequest) TokenStream {
 	const dims = 64
 	vecs := make([][]float32, len(req.EmbeddingInput))
 	total := 0
@@ -236,4 +236,4 @@ func (w *tokenWindow) rate(now time.Time, window time.Duration) float64 {
 }
 
 // RuntimeBuildID implements BuildIdentified.
-func (m *mockInstance) RuntimeBuildID() string { return MockRuntimeBuildID }
+func (*mockInstance) RuntimeBuildID() string { return MockRuntimeBuildID }

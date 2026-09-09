@@ -27,7 +27,7 @@ func cmdLogs() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "logs",
 		Short: "Show recent daemon log lines (-f to follow)",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			cl, err := newClient()
 			if err != nil {
 				return err

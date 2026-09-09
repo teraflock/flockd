@@ -35,7 +35,7 @@ func fakeDaemon(t *testing.T, script string, ready *atomic.Bool) *httptest.Serve
 		}
 		<-r.Context().Done()
 	})
-	mux.HandleFunc("/api/v1/models", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/v1/models", func(w http.ResponseWriter, _ *http.Request) {
 		state := "downloading"
 		if ready.Load() {
 			state = "ready"

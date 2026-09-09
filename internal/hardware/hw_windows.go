@@ -14,7 +14,7 @@ import (
 // environment, GPUs left empty so the caller applies the CPU-only
 // fallback. RAM, CPU model and GPU/VRAM detection (WMI + NVML) are the
 // Windows epic's job — flockd#29.
-func detectPlatform(ctx context.Context, p *typesv1.CapabilityProfile) error {
+func detectPlatform(_ context.Context, p *typesv1.CapabilityProfile) error {
 	p.CpuModel = os.Getenv("PROCESSOR_IDENTIFIER")
 	return nil
 }

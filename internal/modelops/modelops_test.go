@@ -31,7 +31,7 @@ func shaOf(b []byte) string {
 // and an engine, all wired into a Service backed by the mock runtime.
 func harness(t *testing.T, id string, blob []byte) (*Service, *engine.Engine) {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write(blob)
 	}))
 	t.Cleanup(srv.Close)
