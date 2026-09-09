@@ -54,11 +54,16 @@ func main() {
 
 	root.AddCommand(
 		cmdUp(), cmdDown(), cmdStatus(), cmdLogin(), cmdModels(), cmdLimits(),
-		cmdEarnings(), cmdRedeem(), cmdDashboard(), cmdLogs(), cmdToken(), cmdVersion(), cmdUninstall(),
+		cmdEarnings(), cmdRedeem(), cmdDashboard(), cmdLogs(), cmdChat(), cmdToken(), cmdVersion(), cmdUninstall(),
 	)
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, styleWarn.Render("error:"), err)
+		// The client knows the fix for the errors it produces (daemon
+		// down, governor holding back, model not installed): say it.
+		if r := client.Remedy(err); r != "" && !strings.Contains(err.Error(), r) {
+			fmt.Fprintln(os.Stderr, styleDim.Render("  "+r))
+		}
 		os.Exit(1)
 	}
 }
