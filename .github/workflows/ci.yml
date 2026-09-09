@@ -22,11 +22,36 @@ jobs:
         with: { repository: teraflock/proto, path: proto }
       - uses: actions/setup-go@v7
         with: { go-version: "${{ env.GO_VERSION }}", cache-dependency-path: flockd/go.sum }
-      - name: Lint
+      # The lint tools aren't dependencies in go.sum, so setup-go's module
+      # cache above never covers them — cache the built binaries keyed on
+      # the versions pinned in the Makefile (bump the key when those move);
+      # `make lint-tools` itself skips reinstalling on a cache hit.
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/go/bin/revive
+            ~/go/bin/staticcheck
+            ~/go/bin/govulncheck
+            ~/go/bin/bodyclose
+            ~/go/bin/noctxcheck
+          key: lint-tools-${{ runner.os }}-${{ hashFiles('flockd/Makefile', 'flockd/tools/noctxcheck/go.sum') }}
+      - name: Install lint tools
         working-directory: flockd
-        run: |
-          go install github.com/mgechev/revive@v1.15.0
-          $(go env GOPATH)/bin/revive -formatter friendly ./...
+        run: make lint-tools
+      # One step per checker so a red job names the tool that raised it.
+      # Every step fails on any finding (revive.toml sets errorCode = 1).
+      - name: revive (revive.toml)
+        working-directory: flockd
+        run: make lint-revive
+      - name: staticcheck
+        working-directory: flockd
+        run: make lint-staticcheck
+      - name: bodyclose + noctx
+        working-directory: flockd
+        run: make lint-http
+      - name: govulncheck
+        working-directory: flockd
+        run: make lint-vuln
 
   test:
     needs: lint

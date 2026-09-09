@@ -20,10 +20,11 @@ test:
 test-race:
     go test -race ./internal/governor/ ./internal/tunnel/... ./internal/runtime/... ./internal/localapi/
 
-# Lint (installs revive on first use — same tool CI runs)
+# Lint: the policy (revive.toml + staticcheck, bodyclose/noctx, govulncheck)
+# lives in the Makefile, which is what CI runs step by step — see
+# `make lint-revive|lint-staticcheck|lint-http|lint-vuln` for one tool.
 lint:
-    go install github.com/mgechev/revive@v1.15.0
-    $(go env GOPATH)/bin/revive -formatter friendly ./...
+    make lint
 
 vet:
     go vet ./...

@@ -252,7 +252,9 @@ it when you touch `web/src`.
 `make build|test|lint|smoke` is the canonical interface (`make build`
 regenerates the management API from `api/openapi.yaml` first — never edit
 `internal/localapi/gen/` by hand); a `justfile` mirrors the same verbs.
-`make lint` installs and runs revive (same tool CI enforces).
+`make lint` installs and runs the lint policy CI gates on: revive with the
+strict `revive.toml` (a verbatim copy of control-plane's canonical one —
+change it there first), staticcheck, bodyclose + noctx, and govulncheck.
 
 ## Roadmap
 

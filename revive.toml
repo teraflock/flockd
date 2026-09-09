@@ -1,0 +1,82 @@
+# Teraflock lint policy — strict revive configuration.
+#
+# Canonical copy: github.com/teraflock/control-plane/revive.toml. flockd
+# carries a verbatim copy (teraflock/flockd#15); change it here first and
+# copy it over, so both Go repos lint to the same bar.
+#
+# Every enabled rule is severity "error" and errorCode = 1, so any finding
+# fails `make lint` and the CI lint job (revive's defaults are warning-only
+# and exit 0). Only rules listed here run: a config file replaces revive's
+# default rule set rather than extending it.
+#
+# What revive does NOT cover runs as separate lint steps (see the
+# repo's Makefile/justfile `lint-*` targets): staticcheck, govulncheck,
+# bodyclose, noctx, and — control-plane only — the SPEC §A5.2
+# balance-write grep that replaced golangci-lint's forbidigo rule.
+
+ignoreGeneratedHeader = false
+severity = "error"
+confidence = 0.8
+errorCode = 1
+warningCode = 1
+
+# --- Real-bug rules (the teraflock/control-plane#9 minimum set) ---------
+
+[rule.unhandled-error]
+  # Writers whose error is documented as always nil or has nowhere to go:
+  # console printing and in-memory buffers. hash.Hash writes are NOT
+  # listed — revive reports them as io.Writer.Write (the promoted method),
+  # and allowing that would silence every real writer — so hash writes
+  # are spelled `_, _ = h.Write(...)` in code instead.
+  arguments = [
+    "fmt\\.Print.*",
+    "fmt\\.Fprint.*",
+    "bytes\\.Buffer\\.Write.*",
+    "strings\\.Builder\\.Write.*",
+  ]
+[rule.error-return]
+[rule.error-strings]
+[rule.error-naming]
+[rule.errorf]
+[rule.context-as-argument]
+[rule.context-keys-type]
+[rule.defer]
+[rule.bare-return]
+[rule.unused-parameter]
+[rule.unused-receiver]
+[rule.empty-block]
+[rule.unexported-return]
+[rule.superfluous-else]
+[rule.if-return]
+[rule.redefines-builtin-id]
+[rule.unreachable-code]
+[rule.unnecessary-stmt]
+
+# --- More real-bug rules revive ships that cost nothing to keep on -------
+
+[rule.atomic]
+[rule.constant-logical-expr]
+[rule.datarace]
+[rule.identical-branches]
+[rule.modifies-value-receiver]
+[rule.range-val-address]
+[rule.range-val-in-closure]
+[rule.string-of-int]
+[rule.unconditional-recursion]
+[rule.waitgroup-by-value]
+
+# --- Cheap hygiene rules from revive's default set -----------------------
+
+[rule.blank-imports]
+[rule.dot-imports]
+[rule.increment-decrement]
+[rule.indent-error-flow]
+[rule.range]
+[rule.receiver-naming]
+[rule.time-naming]
+[rule.var-declaration]
+[rule.var-naming]
+
+# Deliberately NOT enabled:
+#   exported, package-comments — doc-comment style, not bugs; ~150 baseline
+#     findings that would be comment churn, not fixes. Revisit separately.
