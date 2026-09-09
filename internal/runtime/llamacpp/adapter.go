@@ -42,21 +42,26 @@ var gpuAccels = map[string]bool{"metal": true, "cuda12": true, "rocm": true, "vu
 // count is approximated at 64 until GGUF block_count parsing lands
 // (TODO(gguf)), which errs toward offloading slightly less than possible
 // rather than blowing the operator's budget.
-func (a *Adapter) gpuLayers(modelPath string, res rt.ResourceBudget) int {
+func (a *Adapter) gpuLayers(m rt.ModelSpec, res rt.ResourceBudget) int {
 	if !gpuAccels[a.Accel] {
 		return 0
 	}
 	if res.MaxVRAMPercent <= 0 || a.VRAMMB == 0 {
 		return 999
 	}
-	fi, err := os.Stat(modelPath)
-	if err != nil {
-		return 999
+	// The whole artifact: a sharded model's Path is only its first part.
+	size := m.SizeBytes
+	if size == 0 {
+		fi, err := os.Stat(m.Path)
+		if err != nil {
+			return 999
+		}
+		size = fi.Size()
 	}
 	budgetMB := float64(a.VRAMMB) * float64(res.MaxVRAMPercent) / 100
 	// Weights + KV cache + compute buffers: ~1.15x file size is a safe
 	// working floor for quantized GGUFs at moderate context.
-	needMB := float64(fi.Size()) / (1 << 20) * 1.15
+	needMB := float64(size) / (1 << 20) * 1.15
 	if needMB <= budgetMB {
 		return 999
 	}
@@ -76,7 +81,8 @@ func (a *Adapter) logger() *slog.Logger {
 
 // Load fetches/verifies the pinned llama-server build, launches it on an
 // ephemeral loopback port with the model, health-gates it and returns the
-// serving Instance.
+// serving Instance. A sharded model is passed as its first part
+// (<name>-00001-of-0000N.gguf): llama-server opens the siblings itself.
 func (a *Adapter) Load(ctx context.Context, m rt.ModelSpec, res rt.ResourceBudget) (rt.Instance, error) {
 	bin, buildID, err := a.Fetcher.Ensure(ctx, a.Accel)
 	if err != nil {
@@ -87,6 +93,24 @@ func (a *Adapter) Load(ctx context.Context, m rt.ModelSpec, res rt.ResourceBudge
 		return nil, err
 	}
 
+	args := a.serverArgs(m, res, port)
+
+	url := fmt.Sprintf("http://127.0.0.1:%d", port)
+	sup := newSupervisor(bin, args, url, a.logger().With("model", m.ID, "runtime_build", buildID))
+	if err := sup.start(ctx); err != nil {
+		return nil, err
+	}
+	return &instance{
+		spec:    m,
+		buildID: buildID,
+		sup:     sup,
+		baseURL: url,
+		client:  &http.Client{}, // no timeout: streams are long-lived; ctx governs
+	}, nil
+}
+
+// serverArgs is llama-server's command line for a model.
+func (a *Adapter) serverArgs(m rt.ModelSpec, res rt.ResourceBudget, port int) []string {
 	ctxLen := memory.ResolveContext(a.ContextLength, m.ContextLength, a.MaxContext)
 	args := []string{
 		"-m", m.Path,
@@ -112,8 +136,13 @@ func (a *Adapter) Load(ctx context.Context, m rt.ModelSpec, res rt.ResourceBudge
 	if m.Embeddings {
 		args = append(args, "--embeddings")
 	}
+	if m.MmprojPath != "" {
+		// Vision-language models ship their projector as a sidecar; without
+		// it llama-server serves the text weights only.
+		args = append(args, "--mmproj", m.MmprojPath)
+	}
 	if gpuAccels[a.Accel] {
-		ngl := a.gpuLayers(m.Path, res)
+		ngl := a.gpuLayers(m, res)
 		args = append(args, "--n-gpu-layers", strconv.Itoa(ngl))
 		if ngl < 999 {
 			a.logger().Warn("model exceeds VRAM budget: partial GPU offload",
@@ -121,18 +150,7 @@ func (a *Adapter) Load(ctx context.Context, m rt.ModelSpec, res rt.ResourceBudge
 		}
 	}
 
-	url := fmt.Sprintf("http://127.0.0.1:%d", port)
-	sup := newSupervisor(bin, args, url, a.logger().With("model", m.ID, "runtime_build", buildID))
-	if err := sup.start(ctx); err != nil {
-		return nil, err
-	}
-	return &instance{
-		spec:    m,
-		buildID: buildID,
-		sup:     sup,
-		baseURL: url,
-		client:  &http.Client{}, // no timeout: streams are long-lived; ctx governs
-	}, nil
+	return args
 }
 
 type instance struct {

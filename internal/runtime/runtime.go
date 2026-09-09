@@ -16,9 +16,15 @@ type ModelSpec struct {
 	Family        string
 	Quant         string
 	SHA256        string
-	Path          string // local GGUF path
+	Path          string // local GGUF path (part 1 of a sharded model)
 	ContextLength int
 	Embeddings    bool // model is served for /v1/embeddings
+	// MmprojPath is the vision projector sidecar passed to the runtime
+	// (llama-server --mmproj); "" when the model has none.
+	MmprojPath string
+	// SizeBytes is what the artifact occupies on disk across all of its
+	// files; 0 = unknown (the runtime stats Path instead).
+	SizeBytes int64
 }
 
 // ResourceBudget is the operator-configured ceiling passed to Load.

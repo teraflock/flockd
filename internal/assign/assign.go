@@ -378,6 +378,10 @@ func (s *Service) process(ctx context.Context, id string) {
 		switch {
 		case errors.Is(err, models.ErrOverBudget):
 			s.conclude(id, StateDeclined, "does not fit in max_disk_mb")
+		case errors.Is(err, models.ErrNoArtifact):
+			// The catalog names nothing to fetch (a spec shape this daemon
+			// cannot read): a clear reason, so the coordinator backs off.
+			s.conclude(id, StateFailed, models.ErrNoArtifact.Error())
 		case errors.Is(err, modelops.ErrOverMemory):
 			// On disk, not in memory: a warm candidate, not a refusal.
 			s.mu.Lock()
@@ -427,11 +431,14 @@ func (s *Service) fetchFailed(id string, err error) {
 	if !s.stillActive(id) {
 		return // evicted mid-download; already reported
 	}
-	if errors.Is(err, models.ErrOverBudget) {
+	switch {
+	case errors.Is(err, models.ErrOverBudget):
 		s.conclude(id, StateDeclined, "does not fit in max_disk_mb")
-		return
+	case errors.Is(err, models.ErrNoArtifact):
+		s.conclude(id, StateFailed, models.ErrNoArtifact.Error())
+	default:
+		s.conclude(id, StateFailed, err.Error())
 	}
-	s.conclude(id, StateFailed, err.Error())
 }
 
 // conclude records a terminal failure/refusal, reports it once, and keeps

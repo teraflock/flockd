@@ -289,10 +289,11 @@ func (s *Service) LoadInstanceOrigin(ctx context.Context, id, origin string) (rt
 		return nil, fmt.Errorf("%w: %q", ErrUnknownModel, id)
 	}
 	pspec := entry.Spec()
-	path, err := s.Mgr.EnsureOrigin(ctx, pspec, origin)
+	art, err := s.Mgr.EnsureArtifact(ctx, pspec, origin)
 	if err != nil {
 		return nil, err
 	}
+	path := art.Path
 	// The store's origin is the truth for admission ordering: a
 	// coordinator re-send for a model the operator installed must not turn
 	// it into a mesh-placed one that admission unloads first. (Empty for
@@ -306,17 +307,23 @@ func (s *Service) LoadInstanceOrigin(ctx context.Context, id, origin string) (rt
 		Quant:         pspec.GetQuant(),
 		SHA256:        pspec.GetSha256(),
 		Path:          path,
+		MmprojPath:    art.MmprojPath,
+		SizeBytes:     art.SizeBytes,
 		ContextLength: int(pspec.GetContextLength()),
 		Embeddings:    pspec.GetEmbeddings(),
 	}
 
-	// Footprint estimate: file size (stat, not the catalog — a local
-	// artifact may differ) at the context the runtime will actually use.
-	var fileBytes int64
-	if fi, err := os.Stat(path); err == nil {
-		fileBytes = fi.Size()
-	} else {
-		fileBytes = int64(pspec.GetSizeBytes())
+	// Footprint estimate: on-disk size (the store's, then a stat — not
+	// the catalog: a local artifact may differ) at the context the runtime
+	// will actually use. For a sharded model the store's figure is the
+	// whole set; a stat of Path would see only part 1.
+	fileBytes := art.SizeBytes
+	if fileBytes == 0 {
+		if fi, err := os.Stat(path); err == nil {
+			fileBytes = fi.Size()
+		} else {
+			fileBytes = int64(pspec.GetSizeBytes())
+		}
 	}
 	ctxLen := memory.ResolveContext(s.ContextLength, spec.ContextLength, s.MaxContext)
 	estimate := memory.EstimateMB(fileBytes, int64(pspec.GetMinRamMb()), ctxLen)
