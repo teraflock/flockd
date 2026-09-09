@@ -1,0 +1,13 @@
+#
+#	List of PCI ID's (trimmed fixture: only the entries the tests need)
+#
+1002  Advanced Micro Devices, Inc. [AMD/ATI]
+	15bf  Phoenix1
+	740f  Aldebaran/MI200 [Instinct MI210]
+	744c  Navi 31 [Radeon RX 7900 XT/7900 XTX/7900M]
+		1002 0e3b  Radeon RX 7900 XTX
+		1da2 471e  PULSE RX 7900 XTX
+	747e  Navi 32 [Radeon RX 7700 XT / 7800 XT]
+		1002 0e3c  Radeon RX 7800 XT
+10de  NVIDIA Corporation
+	2684  AD102 [GeForce RTX 4090]

@@ -16,6 +16,17 @@ import (
 // Version is stamped by the linker (goreleaser) and reported in the profile.
 var Version = "dev"
 
+// Accelerator backend names as they appear in GpuInfo.Accel and the
+// runtime artifact manifest (teraflock/runtimes manifests/schema.json).
+const (
+	accelMetal   = "metal"
+	accelCUDA12  = "cuda12"
+	accelROCm    = "rocm"
+	accelVulkan  = "vulkan"
+	accelCPUAVX2 = "cpu-avx2"
+	accelCPU     = "cpu"
+)
+
 // Detect probes the local machine. Failures of individual probes degrade
 // gracefully (e.g. no GPU -> CPU-only profile) rather than failing detection.
 func Detect(ctx context.Context, dataDir string) (*typesv1.CapabilityProfile, error) {
@@ -47,9 +58,18 @@ func Detect(ctx context.Context, dataDir string) (*typesv1.CapabilityProfile, er
 
 func cpuAccel() string {
 	if runtime.GOARCH == "amd64" {
-		return "cpu-avx2"
+		return accelCPUAVX2
 	}
-	return "cpu"
+	return accelCPU
+}
+
+func firstNonEmpty(ss ...string) string {
+	for _, s := range ss {
+		if s != "" {
+			return s
+		}
+	}
+	return ""
 }
 
 // DiskFreeBytes reports free space for unprivileged writes on the volume

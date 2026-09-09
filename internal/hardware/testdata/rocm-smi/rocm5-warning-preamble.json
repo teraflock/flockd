@@ -1,0 +1,2 @@
+WARNING: Unable to detect ROCm version. Falling back to legacy path.
+{"card0": {"Card series": "Navi 31 [Radeon RX 7900 XT/7900 XTX]", "Card model": "0x744c", "Card vendor": "Advanced Micro Devices, Inc. [AMD/ATI]", "Card SKU": "D70301", "VRAM Total Memory (B)": "25753026560", "VRAM Total Used Memory (B)": "2113929216"}, "system": {"Driver version": "6.3.6"}}

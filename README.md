@@ -219,6 +219,29 @@ these are hard rules, enforced by the governor and its test suite:
 | you set the schedule | `serve = scheduled` + windows like `22:00-08:00` |
 | clean exit | `tera uninstall --purge` removes everything |
 
+## Hardware support
+
+Detection runs once at boot (`internal/hardware`) and picks the
+accelerator the runtime artifact is fetched for. Nothing here needs cgo or
+a vendor SDK: the daemon reads sysfs / shells out to the vendor tool.
+
+| platform | GPU detection | accel |
+|---|---|---|
+| macOS (Apple Silicon) | `system_profiler`; unified memory counts as VRAM | `metal` |
+| macOS (Intel + discrete) | `system_profiler` | `metal` |
+| Linux, NVIDIA | `nvidia-smi` CSV | `cuda12` |
+| Linux, AMD | sysfs (`/sys/class/drm/card*/device`, amdgpu driver) for id/VRAM, `pci.ids` for the retail name, `rocm-smi` (optional) to enrich | `rocm` |
+| Linux, no usable GPU | — | `cpu-avx2` (amd64) / `cpu` |
+| Windows, NVIDIA | `nvidia-smi` CSV | `cuda12` |
+| Windows, other adapters | `Win32_VideoController` (listed; no VRAM/accel until a Windows Vulkan lane exists) | `cpu-avx2` |
+
+AMD notes: a mixed NVIDIA+AMD box serves on CUDA (NVIDIA is probed first);
+APUs whose VRAM carveout is under 2 GB are logged at debug and the node is
+placed as CPU-only; an AMD card with no `amdgpu` driver bound is logged
+and skipped. Whether a matching runtime build is published is a separate
+question (`tera up` preflight says so before installing the service);
+ROCm/Vulkan lanes are tracked in [teraflock/runtimes](https://github.com/teraflock/runtimes).
+
 ## Architecture
 
 ```

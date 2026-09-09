@@ -6,9 +6,12 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	typesv1 "github.com/teraflock/proto/gen/go/flock/types/v1"
 	"golang.org/x/sys/unix"
@@ -18,13 +21,60 @@ func detectPlatform(ctx context.Context, p *typesv1.CapabilityProfile) error {
 	p.RamTotalMb = readMemTotalMB("/proc/meminfo")
 	p.CpuModel = readCPUModel("/proc/cpuinfo")
 
-	if gpus := detectNvidia(ctx, "nvidia-smi"); len(gpus) > 0 {
-		p.Gpus = gpus
+	// NVIDIA first, AMD only when nvidia-smi found nothing (flockd#20).
+	// CPU-only fallback is applied by the caller when no GPUs are found.
+	p.Gpus = pickLinuxGPUs(detectNvidia(ctx, "nvidia-smi"), func() []*typesv1.GpuInfo {
+		return detectAMD(ctx, "/")
+	})
+	return nil
+}
+
+// rocmSMITimeout bounds the one rocm-smi call at detection; a wedged ROCm
+// stack must not stall boot (sysfs already gave us the GPU).
+const rocmSMITimeout = 5 * time.Second
+
+// rocmSMIArgs query product names, VRAM totals, bus ids and the driver
+// version in one call. Every flag has existed since ROCm 3.x.
+var rocmSMIArgs = []string{"--showproductname", "--showmeminfo", "vram", "--showbus", "--showdriverversion", "--json"}
+
+// detectAMD reads the amdgpu sysfs tree under root and enriches it with
+// rocm-smi when that is on PATH. See amd.go for the parsers.
+func detectAMD(ctx context.Context, root string) []*typesv1.GpuInfo {
+	sys := amdSysfsGPUs(root)
+	if unbound := amdUnboundPCI(root, sys); len(unbound) > 0 {
+		slog.Default().Info("amd display device without amdgpu driver bound; not usable for inference",
+			"pci", strings.Join(unbound, ","))
+	}
+	if len(sys) == 0 {
 		return nil
 	}
-	// TODO(rocm): parse rocm-smi / /sys/class/drm for AMD GPUs. CPU-only
-	// fallback is applied by the caller when no GPUs are found.
-	return nil
+	var smi rocmSMIInfo
+	if out, err := runRocmSMI(ctx); err == nil {
+		if parsed, perr := parseRocmSMI(out); perr == nil {
+			smi = parsed
+		} else {
+			slog.Default().Debug("rocm-smi output not parsed; using sysfs only", "err", perr)
+		}
+	}
+	return buildAMDGPUs(root, sys, smi, kernelRelease())
+}
+
+func runRocmSMI(ctx context.Context) ([]byte, error) {
+	path, err := exec.LookPath("rocm-smi")
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, rocmSMITimeout)
+	defer cancel()
+	return exec.CommandContext(ctx, path, rocmSMIArgs...).Output()
+}
+
+func kernelRelease() string {
+	var u unix.Utsname
+	if err := unix.Uname(&u); err != nil {
+		return ""
+	}
+	return unix.ByteSliceToString(u.Release[:])
 }
 
 func readMemTotalMB(path string) uint64 {
