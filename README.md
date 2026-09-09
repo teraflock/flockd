@@ -129,6 +129,22 @@ tera models load <id>           # load / unload / default — the daemon does th
 scripts/smoke.sh      # the whole Phase 0 exit criterion as a script
 ```
 
+## Use it from your agent tooling
+
+`tera mcp` is a local [MCP](https://modelcontextprotocol.io) server over
+stdio: Claude Code, Claude Desktop and Cursor can chat with the models on
+this node and manage them, through the same loopback API and token as the
+CLI. No port is opened; the client spawns `tera` as you.
+
+```sh
+claude mcp add --scope user teraflock -- tera mcp   # Claude Code
+tera mcp --describe                                 # the 6 tools + 3 resources
+```
+
+Config for Claude Desktop and Cursor, the macOS PATH gotcha, and
+troubleshooting: [docs/mcp.md](docs/mcp.md). Tools that speak the OpenAI
+API instead need only `OPENAI_BASE_URL=http://127.0.0.1:7777/v1` (above).
+
 ## Joining the mesh
 
 The hosted mesh is live: a node dials out to `tunnel.teraflock.ai:443` over

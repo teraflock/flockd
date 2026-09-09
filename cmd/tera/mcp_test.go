@@ -252,3 +252,27 @@ func TestMCPDescribeListsTheSurface(t *testing.T) {
 		}
 	}
 }
+
+// docs/mcp.md quotes `tera mcp --describe`; the quote must match what the
+// server actually says (flockd#35).
+func TestMCPDocsQuoteDescribeVerbatim(t *testing.T) {
+	doc, err := os.ReadFile("../../docs/mcp.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := clienttest.New(t, clienttest.Options{})
+	var out bytes.Buffer
+	if err := describeMCP(&out, newMCPServer(chatClient(t, d), "test")); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(doc), out.String()) {
+		t.Fatalf("docs/mcp.md does not contain the current `tera mcp --describe` output verbatim; paste this in:\n%s", out.String())
+	}
+	readme, err := os.ReadFile("../../README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(readme), "docs/mcp.md") || !strings.Contains(string(readme), "tera mcp") {
+		t.Fatal("README should point at docs/mcp.md next to the OpenAI endpoint section")
+	}
+}
