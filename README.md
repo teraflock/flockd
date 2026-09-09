@@ -109,7 +109,8 @@ kind = "llamacpp"
 llama_server_path = "/opt/homebrew/bin/llama-server"
 
 [models]
-manifest_path = "/path/to/catalog.yaml"   # teraflock/models format
+manifest_path = "/path/to/catalog.yaml"   # teraflock/models format; artifact_url
+                                          # may be a local file:///... (C:/... on Windows)
 default = "llama-3.1-8b-instruct-q4_k_m"
 ```
 

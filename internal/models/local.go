@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -12,32 +13,100 @@ import (
 )
 
 // LocalArtifactPath reports whether an artifact_url points at a file already
-// on this machine, and returns its filesystem path. Both `file:///abs/path`
-// and a bare absolute path are accepted — operators writing a local catalog
-// by hand reach for the latter.
+// on this machine, and returns its filesystem path. Accepted forms:
+//
+//	file:///models/a.gguf      /models/a.gguf      ~/models/a.gguf     (everywhere)
+//	file:///C:/models/a.gguf   C:\models\a.gguf    C:/models/a.gguf    (Windows)
+//	file://C:\models\a.gguf    \\nas\share\a.gguf  file://nas/share/a.gguf
+//
+// Operators writing a local catalog by hand reach for the bare path. On
+// Windows a rooted POSIX path (/models/a.gguf) is accepted too and, as
+// with any Windows API, resolves against the current drive; a catalog
+// written on one platform is usable on the other. Percent-escapes in a
+// file:// URL are decoded (file:///models/my%20model.gguf).
 //
 // This is how a node serves an existing GGUF collection (LM Studio, ollama,
 // hand-built quants) without re-downloading gigabytes it already has.
 func LocalArtifactPath(artifactURL string) (string, bool) {
-	if artifactURL == "" {
+	p, ok := localArtifactSlashPath(artifactURL, runtime.GOOS == "windows")
+	if !ok {
 		return "", false
 	}
-	if strings.HasPrefix(artifactURL, "file://") {
-		u, err := url.Parse(artifactURL)
-		if err != nil {
-			return "", false
-		}
-		p := u.Path
-		if p == "" {
-			return "", false
-		}
-		// file://~/x is not a real URL but people write it anyway.
-		return expandHome(p), true
+	return filepath.Clean(filepath.FromSlash(expandHome(p))), true
+}
+
+// LocalArtifactURL is the inverse: the file:// URL for a filesystem path,
+// in the form every platform's LocalArtifactPath accepts (file:///C:/x on
+// Windows, file:///x elsewhere, file://nas/share/x for a UNC path). Build
+// artifact_url values with this rather than "file://" + path: that yields
+// file://C:\x on Windows, which LocalArtifactPath tolerates but nothing
+// else does.
+func LocalArtifactURL(path string) string {
+	p := filepath.ToSlash(path)
+	if host, rest, ok := strings.Cut(strings.TrimPrefix(p, "//"), "/"); ok && strings.HasPrefix(p, "//") {
+		return (&url.URL{Scheme: "file", Host: host, Path: "/" + rest}).String()
 	}
-	if filepath.IsAbs(artifactURL) || strings.HasPrefix(artifactURL, "~/") {
-		return expandHome(artifactURL), true
+	return (&url.URL{Scheme: "file", Path: "/" + strings.TrimPrefix(p, "/")}).String()
+}
+
+// localArtifactSlashPath is the platform-independent core: it returns the
+// path in slash form with the drive letter or UNC host kept ("C:/x",
+// "//nas/share/x"), so the Windows rules are testable on every OS. The
+// windows flag says whether backslashes are separators and drive letters
+// and UNC hosts are meaningful.
+func localArtifactSlashPath(s string, windows bool) (string, bool) {
+	if s == "" {
+		return "", false
+	}
+	if windows {
+		// Backslashes are path separators, not URL characters: file://C:\x
+		// is what "file://" + filepath.Join(...) produces there.
+		s = strings.ReplaceAll(s, `\`, "/")
+	}
+	if len(s) >= len("file://") && strings.EqualFold(s[:len("file://")], "file://") {
+		return fileURLPath(s[len("file://"):], windows)
+	}
+	if strings.HasPrefix(s, "/") || strings.HasPrefix(s, "~/") || (windows && isDrivePath(s)) {
+		return s, true
 	}
 	return "", false
+}
+
+// fileURLPath resolves what follows "file://": an optional authority and a
+// path. RFC 8089 gives file:///p and file://localhost/p; Windows adds
+// file:///C:/p (leading slash before the drive), the sloppy file://C:/p,
+// and file://host/share/p for a UNC path. file://~/p is not a URL at all
+// but people write it, so it means ~/p.
+func fileURLPath(rest string, windows bool) (string, bool) {
+	authority, path := rest, ""
+	if i := strings.IndexByte(rest, '/'); i >= 0 {
+		authority, path = rest[:i], rest[i:]
+	}
+	if dec, err := url.PathUnescape(path); err == nil {
+		path = dec
+	}
+	switch {
+	case authority == "" || strings.EqualFold(authority, "localhost"):
+		if windows && isDrivePath(strings.TrimPrefix(path, "/")) {
+			path = strings.TrimPrefix(path, "/")
+		}
+		return path, path != ""
+	case authority == "~":
+		return "~" + path, path != ""
+	case windows && isDrivePath(authority+path):
+		return authority + path, true
+	case windows && path != "":
+		return "//" + authority + path, true
+	}
+	// A file on some other host is not a local artifact.
+	return "", false
+}
+
+// isDrivePath reports whether p starts with a drive letter and a separator
+// ("C:/x" in slash form). "C:x" is drive-relative and not accepted.
+func isDrivePath(p string) bool {
+	return len(p) >= 3 && p[1] == ':' && p[2] == '/' &&
+		(('a' <= p[0] && p[0] <= 'z') || ('A' <= p[0] && p[0] <= 'Z'))
 }
 
 func expandHome(p string) string {

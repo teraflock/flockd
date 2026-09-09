@@ -78,6 +78,13 @@ max_concurrent   = 2    # parallel slots
 [models]
 manifest_path = ""              # local catalog file (teraflock/models YAML/JSON)
 manifest_url  = ""              # or a catalog URL; one of the two is required for llamacpp
+                                # A catalog entry's artifact_url may point at a file
+                                # already on this machine, served in place (never
+                                # copied or evicted): file:///models/a.gguf, a bare
+                                # /models/a.gguf, or ~/models/a.gguf. Windows also
+                                # takes file:///C:/models/a.gguf, C:\models\a.gguf,
+                                # and \\nas\share\a.gguf; a rooted /models/a.gguf
+                                # there resolves against the current drive.
 default       = "mock-8b-instruct"  # model served at startup
 max_disk_mb   = 61440           # model-cache budget; LRU eviction below it
 pin           = []              # model ids exempt from eviction (yours or the mesh's)
