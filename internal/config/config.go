@@ -35,6 +35,10 @@ type Config struct {
 type Log struct {
 	Level  string `koanf:"level"`  // debug|info|warn|error
 	Format string `koanf:"format"` // text|json
+	// File, when set, receives a copy of every record (appended, never
+	// rotated) in addition to stderr. The Windows logon task sets it via
+	// --log-file: a task has no console, so it is the daemon's only sink.
+	File string `koanf:"file"`
 }
 
 type LocalAPI struct {

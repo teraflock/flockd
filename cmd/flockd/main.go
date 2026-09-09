@@ -10,6 +10,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -63,6 +64,7 @@ func run() error {
 		listen      = flag.String("listen", "", "local API listen address (overrides config)")
 		dataDir     = flag.String("data-dir", "", "data directory (overrides config)")
 		logLevel    = flag.String("log-level", "", "debug|info|warn|error (overrides config)")
+		logFile     = flag.String("log-file", "", "also append logs to this file (overrides config; the Windows logon task's only sink)")
 		showVersion = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Parse()
@@ -88,6 +90,9 @@ func run() error {
 	if *logLevel != "" {
 		cfg.Log.Level = *logLevel
 	}
+	if *logFile != "" {
+		cfg.Log.File = *logFile
+	}
 	if *standalone {
 		cfg.Tunnel.Standalone = true
 	}
@@ -95,7 +100,21 @@ func run() error {
 		return err
 	}
 
-	log, ring := logging.New(cfg.Log.Level, cfg.Log.Format)
+	var sink io.Writer = os.Stderr
+	if cfg.Log.File != "" {
+		if err := os.MkdirAll(filepath.Dir(cfg.Log.File), 0o700); err != nil {
+			return fmt.Errorf("create log dir: %w", err)
+		}
+		f, err := os.OpenFile(cfg.Log.File, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if err != nil {
+			return fmt.Errorf("open log file: %w", err)
+		}
+		defer f.Close()
+		// File first: a service without a console has an invalid stderr
+		// and MultiWriter stops at the first failed writer.
+		sink = io.MultiWriter(f, os.Stderr)
+	}
+	log, ring := logging.NewTo(sink, cfg.Log.Level, cfg.Log.Format)
 	slog.SetDefault(log)
 	hardware.Version = version
 

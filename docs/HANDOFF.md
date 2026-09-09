@@ -69,9 +69,20 @@ proves the end-to-end standalone path.
 
 ## Stubbed (compiles, documented, returns useful errors)
 
-- **Windows**: SCM service manager (`ErrUnsupported` + manual `sc.exe`
-  instructions), host memory footprint (estimate stays; `nvidia-smi` VRAM
-  sampling works when on PATH). Process control is real (flockd#31):
+- **Windows**: host memory footprint (estimate stays; `nvidia-smi` VRAM
+  sampling works when on PATH). Service management is real (flockd#28):
+  a per-user **Task Scheduler logon task** named `flockd` (not an SCM
+  service — session 0 would blind the per-session `GetLastInputInfo`
+  idle source; an SCM "headless server" mode is a later issue), rendered
+  as task XML and registered with `schtasks /Create /XML`, no UAC;
+  `RestartOnFailure` 5 × 1 min is the restart-storm cap; `tera down`
+  ends + disables it, `tera up` re-enables + runs it; Status via
+  PowerShell `Get-ScheduledTask` (locale-invariant enum). The task passes
+  `--log-file <data_dir>\flockd.log` (new flag / `log.file`, appended,
+  not rotated) and `tera up` tails that file on a failed start. Verified
+  on the `windows-latest` runner with a batch-file stand-in for
+  flockd.exe; a real `tera up` with the daemon still needs a Windows box
+  plus the Windows runtime artifact. Process control is real (flockd#31):
   every llama-server joins a kill-on-close job object so a dead daemon
   (crash, `taskkill /F`) takes the child with it; the child is created in
   its own process group, with `CREATE_NO_WINDOW` when the daemon has no
@@ -135,9 +146,11 @@ proves the end-to-end standalone path.
    daemon-owned `<data_dir>/limits.toml` overlay (config.toml untouched).
 4. **Keychain**: move `node.key` and `local_api_token` to
    Keychain/DPAPI/secret-service (files are 0600 today, documented).
-5. **Windows**: SCM via `x/sys/windows/svc`, GetProcessMemoryInfo
-   footprint. Budget real time for this (SPEC §13.7). (Idle source,
-   hardware detection, battery, job-object child management: DONE.)
+5. **Windows**: GetProcessMemoryInfo footprint (flockd#16); an SCM
+   session-0 mode for headless servers needs a session-aware idle source
+   first. (Idle source, hardware detection, battery, job-object child
+   management, logon-task service management: DONE — end-to-end on a real
+   Windows box is still pending the Windows runtime artifact.)
 6. **Governor extras**: foreground-GPU-usage signal, screen-lock signal
    (macOS `CGSession`, logind `LockedHint`).
 7. **VRAM on AMD**: NVIDIA is measured with `nvidia-smi` (see "Memory

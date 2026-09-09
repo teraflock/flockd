@@ -48,7 +48,7 @@ cgo (SPEC §A1.3).
 | `internal/enroll` | Ed25519 identity (0600, never leaves the device), CSR, Enroll RPC, credential storage, mTLS client config, PKCE-style loopback login flow, cert rotation (last 7 days of the 30-day cert, via the `rotate:` Enroll sentinel). |
 | `internal/localapi` | Loopback HTTP: OpenAI-compatible `/v1/*`, management `/api/v1/*` (bearer token), SSE `/api/v1/events`, embedded web dashboard. |
 | `internal/telemetry` | Rolling tok/s window, request counters, heartbeat assembly. |
-| `internal/svc` | launchd (macOS, real), systemd user unit (Linux, real), Windows SCM (stub with instructions). |
+| `internal/svc` | launchd LaunchAgent (macOS), systemd user unit (Linux), Task Scheduler logon task (Windows, `schtasks /Create /XML`; per-user so the per-session idle source works). |
 | `web/` | Vite+React+TS+Tailwind dashboard, TanStack Query polling `/api/v1`; `dist/` committed and embedded via `go:embed`. |
 
 ## Key seams

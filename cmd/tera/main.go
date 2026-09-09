@@ -72,7 +72,7 @@ func main() {
 func findFlockd() (string, error) {
 	self, err := os.Executable()
 	if err == nil {
-		cand := filepath.Join(filepath.Dir(self), "flockd")
+		cand := filepath.Join(filepath.Dir(self), "flockd"+exeSuffix())
 		if _, err := os.Stat(cand); err == nil {
 			return cand, nil
 		}
@@ -80,11 +80,20 @@ func findFlockd() (string, error) {
 	return exec.LookPath("flockd")
 }
 
+// exeSuffix is the binary suffix for a sibling lookup (LookPath handles
+// PATHEXT on its own).
+func exeSuffix() string {
+	if runtime.GOOS == "windows" {
+		return ".exe"
+	}
+	return ""
+}
+
 func cmdUp() *cobra.Command {
 	var standalone bool
 	c := &cobra.Command{
 		Use:   "up",
-		Short: "Install and start the flockd service (launchd/systemd)",
+		Short: "Install and start the flockd service (launchd / systemd --user / Windows logon task)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			bin, err := findFlockd()
 			if err != nil {
@@ -207,9 +216,10 @@ func waitForDaemon(ctx context.Context, base string) error {
 }
 
 // tailFlockdLogs returns the last ~20 lines of daemon output for the
-// current platform: journalctl on Linux, the launchd LogPath on macOS.
-// Best-effort — an empty return means "we couldn't get anything," not an
-// error to surface to the user.
+// current platform: journalctl on Linux, the LogPath the service was
+// pointed at on macOS (launchd StandardOutPath) and Windows (the logon
+// task passes it as flockd --log-file). Best-effort — an empty return
+// means "we couldn't get anything," not an error to surface to the user.
 func tailFlockdLogs(ctx context.Context, logPath string) string {
 	if runtime.GOOS == "linux" {
 		out, err := exec.CommandContext(ctx,

@@ -8,7 +8,7 @@
    section separator: `FLOCKD_LOCAL_API__LISTEN=127.0.0.1:8080` sets
    `local_api.listen`
 4. a handful of CLI flags (`--standalone`, `--runtime`, `--listen`,
-   `--data-dir`, `--log-level`) override everything for convenience
+   `--data-dir`, `--log-level`, `--log-file`) override everything for convenience
 
 Every knob, with defaults:
 
@@ -19,6 +19,9 @@ data_dir = "~/.teraflock"
 [log]
 level  = "info"   # debug | info | warn | error
 format = "text"   # text | json
+file   = ""       # also append every record to this file (never rotated).
+                  # The Windows logon task sets it (--log-file) because a
+                  # task has no console; launchd/systemd capture stderr.
 
 [local_api]
 # Loopback only by default. Changing this exposes the management API and

@@ -38,11 +38,15 @@ We publish a Homebrew **cask**, which Homebrew supports only on macOS — on
 Linux use `install.sh`, or the `.deb` / `.rpm` on the release.
 
 Windows: grab the zip from the [latest release](https://github.com/teraflock/flockd/releases/latest)
-(`winget install Teraflock.tera` coming later). Hardware detection is real
-on Windows — RAM, CPU name, NVIDIA GPUs with VRAM via `nvidia-smi`
-(`cuda12`), other adapters listed on the CPU lane — but `tera up` and a
-Windows llama-server build are still in progress
-([epic](https://github.com/teraflock/docs/issues/9)).
+(`winget install Teraflock.tera` coming later). On Windows `tera up`
+registers a per-user Task Scheduler logon task named `flockd` (no admin
+prompt; logs go to `%USERPROFILE%\.teraflock\flockd.log`), hardware
+detection is real — RAM, CPU name, NVIDIA GPUs with VRAM via `nvidia-smi`
+(`cuda12`), other adapters listed on the CPU lane — and the battery guard
+works; a Windows llama-server build is still in progress
+([epic](https://github.com/teraflock/docs/issues/9)), so until then set
+`runtime.llama_server_path` to a local build or use `--standalone` with
+the mock runtime.
 
 Beta note: binaries are checksummed but not yet code-signed/notarized.
 Joining the mesh needs an invite from [teraflock.ai](https://teraflock.ai) —
@@ -169,7 +173,7 @@ invite link open:
 ```sh
 tera login                     # browser handoff: claims this node to your account
 tera login --claim-code CODE   # headless boxes: paste the one-shot claim code instead
-tera up                        # install + start the service (launchd / systemd --user)
+tera up                        # install + start the service (launchd / systemd --user / Windows logon task)
 tera dashboard                 # watch it serve
 ```
 

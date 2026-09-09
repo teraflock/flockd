@@ -6,6 +6,7 @@ package logging
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"strings"
@@ -128,6 +129,12 @@ func (h *ringHandler) WithGroup(name string) slog.Handler {
 
 // New builds the daemon logger: level/format from config, teed into a Ring.
 func New(level, format string) (*slog.Logger, *Ring) {
+	return NewTo(os.Stderr, level, format)
+}
+
+// NewTo is New with an explicit sink (a file alongside stderr for a
+// service that has no console — see config.Log.File).
+func NewTo(w io.Writer, level, format string) (*slog.Logger, *Ring) {
 	var lvl slog.Level
 	switch strings.ToLower(level) {
 	case "debug":
@@ -142,9 +149,9 @@ func New(level, format string) (*slog.Logger, *Ring) {
 	opts := &slog.HandlerOptions{Level: lvl}
 	var inner slog.Handler
 	if strings.ToLower(format) == "json" {
-		inner = slog.NewJSONHandler(os.Stderr, opts)
+		inner = slog.NewJSONHandler(w, opts)
 	} else {
-		inner = slog.NewTextHandler(os.Stderr, opts)
+		inner = slog.NewTextHandler(w, opts)
 	}
 	ring := NewRing(1024)
 	return slog.New(&ringHandler{ring: ring, inner: inner}), ring

@@ -1,6 +1,6 @@
-// Package svc installs and controls flockd as an OS service: launchd
-// (macOS), systemd (Linux) and Windows SCM (stub). `tera up|down|uninstall`
-// drive this.
+// Package svc installs and controls flockd as a per-user OS service:
+// launchd LaunchAgent (macOS), systemd --user unit (Linux) and a Task
+// Scheduler logon task (Windows). `tera up|down|uninstall` drive this.
 package svc
 
 import (
@@ -21,8 +21,8 @@ const (
 // Options tune the installed service definition.
 type Options struct {
 	// LogPath receives the daemon's stdout+stderr where the platform has no
-	// native log sink (launchd). systemd ignores it — journalctl already
-	// captures the unit's output.
+	// native log sink (launchd; on Windows it becomes flockd --log-file).
+	// systemd ignores it — journalctl already captures the unit's output.
 	LogPath string
 	// Notice receives non-fatal, operator-facing notes from Install
 	// (e.g. Linux lingering). Warn is for things the operator should act
