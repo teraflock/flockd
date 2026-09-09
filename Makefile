@@ -41,16 +41,22 @@ run: gen
 # teraflock/flockd#15). CI caches $(GOBIN) keyed on this file, so bump both
 # together. lint-tools only installs what is missing — safe to call every
 # time without paying a reinstall — which also means a stale local binary
-# is kept: `rm $(GOBIN)/<tool>` to pick up a bump. staticcheck and the
-# noctxcheck wrapper need a Go 1.26 toolchain to build; with the default
-# GOTOOLCHAIN=auto the go command fetches one, the repo itself stays on
-# the go.mod toolchain.
+# is kept: `rm $(GOBIN)/<tool>` to pick up a bump.
+#
+# The tools are built with LINT_TOOLCHAIN (control-plane's go.mod pin),
+# not the repo's own 1.25 toolchain: staticcheck, govulncheck and the
+# x/tools + x/sys that bodyclose resolves at install time all need Go 1.26,
+# and CI's setup-go exports GOTOOLCHAIN=local, which would refuse the
+# switch. The checkers themselves still run under the go.mod toolchain,
+# so govulncheck scans the stdlib the release binaries ship with.
 GOBIN               := $(shell go env GOPATH)/bin
+LINT_TOOLCHAIN      := go1.26.8
 REVIVE_VERSION      := v1.15.0
 STATICCHECK_VERSION := v0.8.1
 GOVULNCHECK_VERSION := v1.8.0
 BODYCLOSE_VERSION   := v0.0.0-20260723120731-857993a2939c
 
+lint-tools: export GOTOOLCHAIN = $(LINT_TOOLCHAIN)
 lint-tools:
 	test -x "$(GOBIN)/revive"      || go install github.com/mgechev/revive@$(REVIVE_VERSION)
 	test -x "$(GOBIN)/staticcheck" || go install honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION)

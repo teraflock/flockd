@@ -35,13 +35,11 @@ jobs:
             ~/go/bin/bodyclose
             ~/go/bin/noctxcheck
           key: lint-tools-${{ runner.os }}-${{ hashFiles('flockd/Makefile', 'flockd/tools/noctxcheck/go.sum') }}
-      # setup-go exports GOTOOLCHAIN=local; staticcheck and the noctxcheck
-      # wrapper need Go 1.26 to build, so let the go command fetch it for
-      # this one step. The checkers then run under the go.mod toolchain,
-      # so govulncheck scans the stdlib the release binaries ship with.
+      # Builds the tools under the Makefile's LINT_TOOLCHAIN (Go 1.26)
+      # regardless of setup-go's GOTOOLCHAIN=local; the checkers below
+      # then run under the go.mod toolchain.
       - name: Install lint tools
         working-directory: flockd
-        env: { GOTOOLCHAIN: auto }
         run: make lint-tools
       # One step per checker so a red job names the tool that raised it.
       # Every step fails on any finding (revive.toml sets errorCode = 1).
