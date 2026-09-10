@@ -40,6 +40,17 @@ llama_server_path = ""
 # by teraflock/runtimes (manifests/schema.json is the source of truth).
 # Defaults to the hosted manifest; llama_server_path overrides fetching.
 artifact_manifest_url = "https://teraflock-downloads.s3.amazonaws.com/runtimes/llamacpp/manifest.json"
+# Public key (ECDSA P-256, cosign.pub format) that runtime manifests and
+# tarballs are cosign-signed with: an inline "-----BEGIN PUBLIC KEY-----"
+# PEM or the path to a PEM file. Overrides the key built into the daemon;
+# only for self-hosted coordinators / development catalogs signed with
+# their own key. Never taken from the manifest or the artifact host.
+artifact_signing_key = ""
+# Refuse runtime manifests and artifacts that carry no cosign signature
+# (and refuse to run without a pinned key). Off in this release: signatures
+# are verified whenever a manifest advertises one, unsigned builds warn.
+# The default flips to true once every published build is signed.
+require_signature = false
 # Synthetic generation speed for kind=mock (tests, demos).
 mock_tokens_per_sec = 120
 # --ctx-size override passed to llama-server (0 = model default, capped by

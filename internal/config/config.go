@@ -71,6 +71,38 @@ type Runtime struct {
 	// reserves ~14 GB, at 16384 about 1.8 GB. Per-request context is
 	// MaxContext / budget.max_concurrent.
 	MaxContext int `koanf:"max_context"`
+	// ArtifactSigningKey overrides the daemon's built-in pin for the key
+	// that runtime manifests and tarballs are cosign-signed with
+	// (internal/runtime/llamacpp/trust.go): either an inline PEM public
+	// key ("-----BEGIN PUBLIC KEY-----", ECDSA P-256) or the path to a PEM
+	// file. For self-hosted coordinators and development catalogs signed
+	// with their own key. Never taken from the manifest or artifact host.
+	ArtifactSigningKey string `koanf:"artifact_signing_key"`
+	// RequireSignature refuses runtime manifests and artifacts that carry
+	// no cosign signature, refuses cached extracts that were trusted by
+	// sha256 alone, and refuses to run without a pinned signing key.
+	// Default false in this release (flockd#25 stage 1: verify whenever a
+	// signature is advertised); flips to true once every published
+	// manifest is signed and the daemon embeds the Teraflock key.
+	RequireSignature bool `koanf:"require_signature"`
+}
+
+// ArtifactSigningKeyPEM resolves Runtime.ArtifactSigningKey to PEM bytes:
+// an inline PEM is returned as-is, anything else is read as a file path.
+// nil when unset (the daemon then relies on its embedded pin, if any).
+func (r Runtime) ArtifactSigningKeyPEM() ([]byte, error) {
+	key := strings.TrimSpace(r.ArtifactSigningKey)
+	if key == "" {
+		return nil, nil
+	}
+	if strings.HasPrefix(key, "-----BEGIN") {
+		return []byte(key + "\n"), nil
+	}
+	b, err := os.ReadFile(key)
+	if err != nil {
+		return nil, fmt.Errorf("config: runtime.artifact_signing_key: %w", err)
+	}
+	return b, nil
 }
 
 type Governor struct {

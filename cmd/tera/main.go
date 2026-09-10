@@ -170,9 +170,15 @@ func preflightRuntime(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("preflight: hardware detect: %w", err)
 	}
+	signingKey, err := cfg.Runtime.ArtifactSigningKeyPEM()
+	if err != nil {
+		return fmt.Errorf("preflight: %w", err)
+	}
 	f := &llamacpp.Fetcher{
-		ManifestURL: cfg.Runtime.ArtifactManifestURL,
-		BinaryPath:  cfg.Runtime.LlamaServerPath,
+		ManifestURL:      cfg.Runtime.ArtifactManifestURL,
+		BinaryPath:       cfg.Runtime.LlamaServerPath,
+		SigningKeyPEM:    signingKey,
+		RequireSignature: cfg.Runtime.RequireSignature,
 	}
 	if err := f.Preflight(preCtx, hardware.AccelPreference(hw)...); err != nil {
 		return fmt.Errorf("%w\n\n"+
@@ -180,6 +186,8 @@ func preflightRuntime(ctx context.Context) error {
 			"  · set runtime.kind = \"mock\" in ~/.teraflock/config.toml for a\n"+
 			"    quick smoke test (deterministic tokens, no artifacts needed)\n"+
 			"  · set runtime.llama_server_path to a locally built llama-server\n"+
+			"  · set runtime.require_signature = false to run unsigned runtime\n"+
+			"    builds (not recommended)\n"+
 			"  · wait for a matching build to publish in the runtime catalog", err)
 	}
 	return nil

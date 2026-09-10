@@ -220,11 +220,26 @@ func run() error {
 	// /api/v1/status (nil for the mock runtime).
 	var runtimeAccel func() string
 	if cfg.Runtime.Kind == "llamacpp" {
+		// Resolve the runtime signing key pin up front so a bad
+		// runtime.artifact_signing_key refuses boot with a clear message
+		// instead of failing at the first artifact fetch.
+		signingKey, err := cfg.Runtime.ArtifactSigningKeyPEM()
+		if err != nil {
+			return err
+		}
+		if signingKey != nil {
+			if _, err := llamacpp.ParseVerifier(signingKey); err != nil {
+				return fmt.Errorf("runtime.artifact_signing_key: %w", err)
+			}
+		}
 		adapter := &llamacpp.Adapter{
 			Fetcher: &llamacpp.Fetcher{
-				ManifestURL: cfg.Runtime.ArtifactManifestURL,
-				BinaryPath:  cfg.Runtime.LlamaServerPath,
-				CacheDir:    filepath.Join(cfg.DataDir, "runtimes"),
+				ManifestURL:      cfg.Runtime.ArtifactManifestURL,
+				BinaryPath:       cfg.Runtime.LlamaServerPath,
+				CacheDir:         filepath.Join(cfg.DataDir, "runtimes"),
+				SigningKeyPEM:    signingKey,
+				RequireSignature: cfg.Runtime.RequireSignature,
+				Log:              log,
 			},
 			Accels:        hardware.AccelPreference(hw),
 			VRAMMB:        hardware.BestVRAMMB(hw),

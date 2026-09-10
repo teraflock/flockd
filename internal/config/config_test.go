@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -118,5 +119,61 @@ func TestLimitsOverlayRoundTrip(t *testing.T) {
 	}
 	if cfg.Models.MaxDiskMB != 12345 || cfg.Models.RetentionDays != 14 || cfg.Models.IdleUnloadS != 600 || cfg.Budget.MaxRAMMB != 8192 {
 		t.Fatalf("overlay model/budget limits not applied: %+v %+v", cfg.Models, cfg.Budget)
+	}
+}
+
+func TestRuntimeSigningKeys(t *testing.T) {
+	dir := t.TempDir()
+	keyFile := filepath.Join(dir, "runtime-signing.pub")
+	const pemKey = "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE\n-----END PUBLIC KEY-----\n"
+	if err := os.WriteFile(keyFile, []byte(pemKey), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Defaults: no pin override, signatures not (yet) required.
+	def := Default()
+	if def.Runtime.ArtifactSigningKey != "" || def.Runtime.RequireSignature {
+		t.Fatalf("defaults: key=%q require=%v", def.Runtime.ArtifactSigningKey, def.Runtime.RequireSignature)
+	}
+	if b, err := def.Runtime.ArtifactSigningKeyPEM(); err != nil || b != nil {
+		t.Fatalf("unset key resolves to (%q, %v), want (nil, nil)", b, err)
+	}
+
+	// TOML: path form.
+	path := filepath.Join(dir, "config.toml")
+	body := fmt.Sprintf("[runtime]\nartifact_signing_key = %q\nrequire_signature = true\n", keyFile)
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Runtime.RequireSignature {
+		t.Error("require_signature not loaded")
+	}
+	if b, err := cfg.Runtime.ArtifactSigningKeyPEM(); err != nil || string(b) != pemKey {
+		t.Errorf("path form resolved to (%q, %v)", b, err)
+	}
+
+	// Env: inline PEM form (double-underscore section separator), and it
+	// overrides the file.
+	t.Setenv("FLOCKD_RUNTIME__ARTIFACT_SIGNING_KEY", pemKey)
+	t.Setenv("FLOCKD_RUNTIME__REQUIRE_SIGNATURE", "false")
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Runtime.RequireSignature {
+		t.Error("env must override require_signature")
+	}
+	if b, err := cfg.Runtime.ArtifactSigningKeyPEM(); err != nil || !strings.HasPrefix(string(b), "-----BEGIN PUBLIC KEY-----") || !strings.HasSuffix(string(b), "-----END PUBLIC KEY-----\n") {
+		t.Errorf("inline form resolved to (%q, %v)", b, err)
+	}
+
+	// A missing file is a load-time error, not a silent "no pin".
+	cfg.Runtime.ArtifactSigningKey = filepath.Join(dir, "missing.pub")
+	if _, err := cfg.Runtime.ArtifactSigningKeyPEM(); err == nil || !strings.Contains(err.Error(), "artifact_signing_key") {
+		t.Errorf("missing key file: want error naming the key, got %v", err)
 	}
 }

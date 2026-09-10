@@ -4,18 +4,22 @@ package llamacpp
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -37,11 +41,35 @@ type Artifact struct {
 	URL    string `json:"url"`
 	SHA256 string `json:"sha256"` // of the tarball
 	Size   int64  `json:"size_bytes"`
-	// TODO(cosign): verify cosign_signature_url once the signing identity
-	// exists (runtimes README step 3). SHA-256 pinning is enforced today.
+	// CosignSignatureURL is the detached `cosign sign-blob` signature over
+	// the tarball: a bare base64 DER ECDSA signature over its SHA-256
+	// (.sig) or a Sigstore bundle carrying the same (.sigstore.json); see
+	// trust.go. Verified against the pinned key before anything is
+	// unpacked; optional until every published manifest carries one
+	// (runtime.require_signature).
+	CosignSignatureURL string `json:"cosign_signature_url"`
+	// CosignCertificateURL is modelled because the runtimes schema defines
+	// it, but unused: key-mode signatures have no certificate, and a
+	// certificate served by the artifact host proves nothing on its own.
+	// Only a keyless (Fulcio) custody decision would make it load-bearing;
+	// see trust.go.
+	CosignCertificateURL string `json:"cosign_certificate_url"`
 }
 
-// Fetcher downloads, SHA-verifies and unpacks the pinned llama-server build.
+// Trust stamps (.tarball.verified): the policy under which an extracted
+// build was trusted. A cached extract is reused only when its stamp
+// satisfies the current policy, so a build unpacked under sha256-only
+// is re-fetched and signature-verified once require_signature flips.
+const (
+	trustSHA256Only = "sha256-only"
+	trustCosign     = "cosign"
+
+	stampSHA256   = ".tarball.sha256"
+	stampVerified = ".tarball.verified"
+)
+
+// Fetcher downloads, SHA-verifies, signature-verifies and unpacks the
+// pinned llama-server build.
 type Fetcher struct {
 	// ManifestURL points at the ArtifactManifest JSON. Required unless
 	// BinaryPath overrides fetching entirely.
@@ -51,6 +79,24 @@ type Fetcher struct {
 	BinaryPath string
 	CacheDir   string // e.g. <data_dir>/runtimes
 	HTTPClient *http.Client
+
+	// SigningKeyPEM is the resolved public key (PKIX PEM) that artifact and
+	// manifest signatures are verified against (config
+	// runtime.artifact_signing_key). nil falls back to the daemon's
+	// embedded pin (trust.go); when that is empty too there is no verifier
+	// and signatures cannot be checked.
+	SigningKeyPEM []byte
+	// RequireSignature refuses manifests and artifacts that advertise no
+	// cosign signature, refuses cached extracts trusted by sha256 only, and
+	// refuses to run at all without a pinned key (config
+	// runtime.require_signature).
+	RequireSignature bool
+	// Log receives the one-time trust warnings and the "runtime signature
+	// verified" line; nil uses slog.Default().
+	Log *slog.Logger
+
+	warnUnsignedOnce   sync.Once
+	warnNoVerifierOnce sync.Once
 }
 
 // Preflight checks that a runtime binary is *resolvable* for this
@@ -59,7 +105,7 @@ type Fetcher struct {
 // would crash-loop on first start when the pinned catalog has no build
 // for this machine. Returns nil when either f.BinaryPath is present on
 // disk or f.ManifestURL advertises a matching artifact (cpu fallback
-// included, same rule as Ensure).
+// included, same rule as Ensure) that satisfies the signature policy.
 func (f *Fetcher) Preflight(ctx context.Context, accels ...string) error {
 	if f.BinaryPath != "" {
 		if _, err := os.Stat(f.BinaryPath); err != nil {
@@ -74,11 +120,16 @@ func (f *Fetcher) Preflight(ctx context.Context, accels ...string) error {
 	if err != nil {
 		return err
 	}
-	_, err = man.pick(runtime.GOOS, runtime.GOARCH, accels...)
-	return err
+	art, err := man.pick(runtime.GOOS, runtime.GOARCH, accels...)
+	if err != nil {
+		return err
+	}
+	return f.checkAdvertisedSignature(art)
 }
 
 var errNoRuntimeConfigured = fmt.Errorf("llamacpp: no runtime binary available: set runtime.llama_server_path to an existing llama-server binary or runtime.artifact_manifest_url to a pinned build manifest")
+
+var errNoSigningKey = errors.New("llamacpp: runtime.require_signature is true but no runtime signing key is pinned: set runtime.artifact_signing_key to the publisher's public key (PEM), or use a daemon release that embeds the Teraflock key (SPEC §A3 Key custody, teraflock/docs#34)")
 
 // Selection is the llama-server build Ensure resolved for this node.
 type Selection struct {
@@ -123,6 +174,9 @@ func (f *Fetcher) EnsureSelection(ctx context.Context, accels ...string) (Select
 	if err != nil {
 		return Selection{}, err
 	}
+	if err := f.checkAdvertisedSignature(art); err != nil {
+		return Selection{}, err
+	}
 	sel := Selection{
 		BuildID: man.RuntimeBuildID,
 		Accel:   art.Accel,
@@ -132,17 +186,67 @@ func (f *Fetcher) EnsureSelection(ctx context.Context, accels ...string) (Select
 	dir := filepath.Join(f.CacheDir, man.RuntimeBuildID)
 	sel.Path = filepath.Join(dir, binaryName())
 	// The stored SHA is of the tarball, not the binary, so reuse is gated
-	// on a stamp written after a verified extract.
-	if sha, err := os.ReadFile(filepath.Join(dir, ".tarball.sha256")); err == nil &&
+	// on a stamp written after a verified extract — and on that extract
+	// having been trusted under a policy at least as strict as today's.
+	if sha, err := os.ReadFile(filepath.Join(dir, stampSHA256)); err == nil &&
 		strings.TrimSpace(string(sha)) == art.SHA256 {
 		if _, err := os.Stat(sel.Path); err == nil {
-			return sel, nil
+			trust := readTrustStamp(dir)
+			if !f.RequireSignature || trust == trustCosign {
+				return sel, nil
+			}
+			f.log().Info("cached runtime was trusted by sha256 only; re-fetching to verify its signature",
+				"runtime_build_id", man.RuntimeBuildID, "cached_trust", trust)
 		}
 	}
-	if err := f.fetchAndUnpack(ctx, art, dir); err != nil {
+	if err := f.fetchAndUnpack(ctx, art, dir, man.RuntimeBuildID); err != nil {
 		return Selection{}, err
 	}
 	return sel, nil
+}
+
+// readTrustStamp reports the policy an extract in dir was trusted under.
+// Extracts from before the stamp existed count as sha256-only.
+func readTrustStamp(dir string) string {
+	b, err := os.ReadFile(filepath.Join(dir, stampVerified))
+	if err != nil {
+		return trustSHA256Only
+	}
+	if s := strings.TrimSpace(string(b)); s == trustCosign {
+		return trustCosign
+	}
+	return trustSHA256Only
+}
+
+// checkAdvertisedSignature enforces the require_signature half of the
+// policy that needs no network: a manifest that advertises no signature
+// for the chosen build is refused outright. Shared by Preflight (so
+// `tera up` reports it before installing a unit) and EnsureSelection.
+func (f *Fetcher) checkAdvertisedSignature(a Artifact) error {
+	if f.RequireSignature && a.CosignSignatureURL == "" {
+		return fmt.Errorf("llamacpp: manifest advertises no cosign signature for %s/%s %s (%s); refusing (runtime.require_signature=true)", a.OS, a.Arch, a.Accel, a.URL)
+	}
+	return nil
+}
+
+// verifier resolves the pinned key: the config override first, then the
+// embedded release pin. (nil, nil) means no key is pinned at all.
+func (f *Fetcher) verifier() (*Verifier, error) {
+	pemBytes := f.SigningKeyPEM
+	if len(pemBytes) == 0 && embeddedRuntimeSigningKeyPEM != "" {
+		pemBytes = []byte(embeddedRuntimeSigningKeyPEM)
+	}
+	if len(pemBytes) == 0 {
+		return nil, nil
+	}
+	return ParseVerifier(pemBytes)
+}
+
+func (f *Fetcher) log() *slog.Logger {
+	if f.Log != nil {
+		return f.Log
+	}
+	return slog.Default()
 }
 
 func (f *Fetcher) client() *http.Client {
@@ -152,7 +256,21 @@ func (f *Fetcher) client() *http.Client {
 	return &http.Client{Timeout: 10 * time.Minute}
 }
 
+// fetchManifest downloads and decodes the manifest. When a key is pinned
+// it also fetches `<manifest-url>.sig` and verifies the manifest body
+// against it, so a swapped manifest cannot point at an attacker's tarball
+// no matter what that tarball's own signature says. 404 and 403 (S3's
+// answer for a missing key) mean "unsigned manifest": fatal under
+// RequireSignature, tolerated otherwise.
 func (f *Fetcher) fetchManifest(ctx context.Context) (*ArtifactManifest, error) {
+	v, err := f.verifier()
+	if err != nil {
+		return nil, err
+	}
+	if v == nil && f.RequireSignature {
+		return nil, errNoSigningKey
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.ManifestURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("llamacpp: manifest request: %w", err)
@@ -165,14 +283,107 @@ func (f *Fetcher) fetchManifest(ctx context.Context) (*ArtifactManifest, error) 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("llamacpp: fetch manifest: unexpected status %s", resp.Status)
 	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("llamacpp: read manifest: %w", err)
+	}
+
+	if v != nil {
+		sig, present, err := f.fetchSignature(ctx, f.ManifestURL+".sig", true)
+		if err != nil {
+			return nil, fmt.Errorf("llamacpp: manifest signature: %w", err)
+		}
+		switch {
+		case present:
+			digest := sha256.Sum256(body)
+			if err := v.Verify(digest[:], sig); err != nil {
+				return nil, fmt.Errorf("llamacpp: manifest signature invalid: %w (refusing to run unverified runtime)", err)
+			}
+			f.log().Debug("runtime manifest signature verified", "url", f.ManifestURL)
+		case f.RequireSignature:
+			return nil, fmt.Errorf("llamacpp: manifest at %s has no signature (%s.sig missing); refusing (runtime.require_signature=true)", f.ManifestURL, f.ManifestURL)
+		default:
+			f.log().Debug("runtime manifest is unsigned; trusting its artifact sha256 pins only", "url", f.ManifestURL)
+		}
+	}
+
 	var m ArtifactManifest
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&m); err != nil {
+	if err := json.NewDecoder(bytes.NewReader(body)).Decode(&m); err != nil {
 		return nil, fmt.Errorf("llamacpp: decode manifest: %w", err)
 	}
 	if m.RuntimeBuildID == "" || len(m.Artifacts) == 0 {
 		return nil, fmt.Errorf("llamacpp: manifest at %s has no runtime_build_id/artifacts (wrong URL or format?)", f.ManifestURL)
 	}
 	return &m, nil
+}
+
+// fetchSignature GETs a detached .sig (bounded read). With optional set,
+// 404/403 report (nil, false, nil) instead of an error; any other
+// non-200 status is an error either way.
+func (f *Fetcher) fetchSignature(ctx context.Context, url string, optional bool) (sig []byte, present bool, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, false, fmt.Errorf("request %s: %w", url, err)
+	}
+	resp, err := f.client().Do(req)
+	if err != nil {
+		return nil, false, fmt.Errorf("fetch %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+	if optional && (resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusForbidden) {
+		return nil, false, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, false, fmt.Errorf("fetch %s: unexpected status %s", url, resp.Status)
+	}
+	sig, err = io.ReadAll(io.LimitReader(resp.Body, maxSignatureBytes+1))
+	if err != nil {
+		return nil, false, fmt.Errorf("read %s: %w", url, err)
+	}
+	if len(sig) > maxSignatureBytes {
+		return nil, false, fmt.Errorf("%s is larger than %d bytes, not a signature", url, maxSignatureBytes)
+	}
+	return sig, true, nil
+}
+
+// verifyArtifactSignature applies the artifact half of the trust policy
+// to a tarball whose sha256 already matched the manifest, and returns the
+// trust stamp to record for the extract. digest is that sha256 — the
+// exact bytes cosign sign-blob signed.
+func (f *Fetcher) verifyArtifactSignature(ctx context.Context, a Artifact, digest []byte, buildID string) (string, error) {
+	v, err := f.verifier()
+	if err != nil {
+		return "", err
+	}
+	if a.CosignSignatureURL == "" {
+		if f.RequireSignature {
+			return "", f.checkAdvertisedSignature(a)
+		}
+		f.warnUnsignedOnce.Do(func() {
+			f.log().Warn("runtime artifact advertises no cosign signature; trusting sha256 only (set runtime.require_signature=true to refuse unsigned builds)",
+				"runtime_build_id", buildID, "url", a.URL)
+		})
+		return trustSHA256Only, nil
+	}
+	if v == nil {
+		if f.RequireSignature {
+			return "", errNoSigningKey
+		}
+		f.warnNoVerifierOnce.Do(func() {
+			f.log().Warn("runtime artifact is signed but no verifier is pinned (docs#34); trusting sha256 only",
+				"runtime_build_id", buildID, "signature_url", a.CosignSignatureURL)
+		})
+		return trustSHA256Only, nil
+	}
+	sig, _, err := f.fetchSignature(ctx, a.CosignSignatureURL, false)
+	if err != nil {
+		return "", fmt.Errorf("llamacpp: artifact signature invalid: %w (refusing to run unverified runtime)", err)
+	}
+	if err := v.Verify(digest, sig); err != nil {
+		return "", fmt.Errorf("llamacpp: artifact signature invalid: %w (refusing to run unverified runtime)", err)
+	}
+	f.log().Info("runtime signature verified", "runtime_build_id", buildID, "accel", a.Accel)
+	return trustCosign, nil
 }
 
 // pick walks the accelerator chain in order and returns the first
@@ -219,15 +430,21 @@ func pickReason(goos, goarch string, accels []string, chosen string) string {
 	return fmt.Sprintf("no %s artifact for %s/%s", strings.Join(skipped, "/"), goos, goarch)
 }
 
-// fetchAndUnpack downloads the tarball, verifies its SHA-256, and extracts
+// fetchAndUnpack downloads the tarball, verifies its SHA-256, verifies its
+// cosign signature per the trust policy, and only then extracts
 // llama-server (plus LICENSE/BUILDINFO) into dir. The tarball layout is
 // llama-server-<tag>-<os>-<arch>-<accel>/{llama-server,LICENSE.llama.cpp,BUILDINFO};
 // entries are extracted by basename to fixed paths, so hostile archive
 // paths cannot escape dir.
-func (f *Fetcher) fetchAndUnpack(ctx context.Context, a Artifact, dir string) error {
+func (f *Fetcher) fetchAndUnpack(ctx context.Context, a Artifact, dir, buildID string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("llamacpp: mkdir: %w", err)
 	}
+	// A previous extract's trust stamp must not outlive it: drop it before
+	// anything in dir changes so an interrupted re-fetch counts as
+	// sha256-only at most.
+	_ = os.Remove(filepath.Join(dir, stampVerified))
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.URL, nil)
 	if err != nil {
 		return fmt.Errorf("llamacpp: artifact request: %w", err)
@@ -258,18 +475,31 @@ func (f *Fetcher) fetchAndUnpack(ctx context.Context, a Artifact, dir string) er
 	if closeErr != nil {
 		return fmt.Errorf("llamacpp: close artifact: %w", closeErr)
 	}
-	got := hex.EncodeToString(h.Sum(nil))
+	digest := h.Sum(nil)
+	got := hex.EncodeToString(digest)
 	if got != a.SHA256 {
 		_ = os.Remove(tarball)
 		return fmt.Errorf("llamacpp: artifact sha256 mismatch: got %s want %s (refusing to run unverified runtime)", got, a.SHA256)
+	}
+	// The signature covers the tarball digest, so it is checked here —
+	// after the hash matched the manifest and before a single byte is
+	// unpacked.
+	trust, err := f.verifyArtifactSignature(ctx, a, digest, buildID)
+	if err != nil {
+		_ = os.Remove(tarball)
+		return err
 	}
 	if err := extractRuntime(tarball, dir); err != nil {
 		_ = os.Remove(tarball)
 		return err
 	}
 	_ = os.Remove(tarball)
-	// Stamp last: its presence means "verified tarball, complete extract".
-	if err := os.WriteFile(filepath.Join(dir, ".tarball.sha256"), []byte(a.SHA256+"\n"), 0o644); err != nil {
+	// Stamps last: the sha256 stamp's presence means "verified tarball,
+	// complete extract"; the trust stamp records under which policy.
+	if err := os.WriteFile(filepath.Join(dir, stampVerified), []byte(trust+"\n"), 0o644); err != nil {
+		return fmt.Errorf("llamacpp: write trust stamp: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, stampSHA256), []byte(a.SHA256+"\n"), 0o644); err != nil {
 		return fmt.Errorf("llamacpp: write verify stamp: %w", err)
 	}
 	return nil
