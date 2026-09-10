@@ -21,7 +21,9 @@ import (
 //  2. open <login_url>?redirect_uri=http://127.0.0.1:<port>/callback&code_challenge=...
 //  3. the web page (after auth) redirects to the loopback with
 //     ?claim_code=...&state=...
-//  4. daemon uses the claim code in the Enroll RPC.
+//  4. daemon sends the claim code and the verifier in the Enroll RPC; the
+//     coordinator refuses the code unless SHA256(verifier) matches the
+//     challenge the claim page stored with it (control-plane#6).
 type LoginFlow struct {
 	// LoginURL is the browser page (config enroll.login_url).
 	LoginURL string
@@ -32,6 +34,9 @@ type LoginFlow struct {
 // Result of a completed login flow.
 type Result struct {
 	ClaimCode string
+	// Verifier is the PKCE code_verifier whose S256 hash the claim page
+	// received; it must reach the coordinator with the claim code.
+	Verifier string
 }
 
 // randB64 returns n random bytes, base64url without padding.
@@ -118,11 +123,7 @@ func (f *LoginFlow) Run(ctx context.Context) (*Result, string, error) {
 		if cb.err != nil {
 			return nil, openURL, cb.err
 		}
-		// The verifier would be sent alongside the claim code at enrollment
-		// so the control plane can bind challenge->verifier. The fake
-		// coordinator accepts any code; wiring verifier passthrough is part
-		// of the Phase 1 control-plane work.
-		return &Result{ClaimCode: cb.code}, openURL, nil
+		return &Result{ClaimCode: cb.code, Verifier: verifier}, openURL, nil
 	case <-ctx.Done():
 		return nil, openURL, fmt.Errorf("enroll: login cancelled: %w", ctx.Err())
 	}

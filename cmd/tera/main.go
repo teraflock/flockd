@@ -325,7 +325,7 @@ func cmdStatus() *cobra.Command {
 }
 
 func cmdLogin() *cobra.Command {
-	var loginURL, claimCode string
+	var loginURL, claimCode, verifier string
 	c := &cobra.Command{
 		Use:   "login",
 		Short: "Enroll this node via browser (PKCE loopback handoff)",
@@ -344,11 +344,16 @@ func cmdLogin() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				claimCode = res.ClaimCode
+				claimCode, verifier = res.ClaimCode, res.Verifier
 			}
-			// The daemon consumes this on its next start (`tera`/`flockd` are
-			// separate processes, so the data dir is the handoff).
+			// The daemon consumes these on its next start (`tera`/`flockd` are
+			// separate processes, so the data dir is the handoff). The
+			// verifier is what makes a browser-flow code redeemable by this
+			// machine only; --claim-code writes none (and clears a stale one).
 			if err := enroll.SaveClaimCode(dataDir(), claimCode); err != nil {
+				return err
+			}
+			if err := enroll.SaveClaimVerifier(dataDir(), verifier); err != nil {
 				return err
 			}
 			fmt.Println(styleOK.Render("✓"), "claim code stored")

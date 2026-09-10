@@ -2,6 +2,8 @@ package enroll
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"net/http"
 	"net/url"
 	"os"
@@ -71,7 +73,7 @@ func TestEnrollAgainstFakeCoordinator(t *testing.T) {
 	id, _ := LoadOrGenerateIdentity(dir)
 	prof := &typesv1.CapabilityProfile{Os: "darwin", Arch: "arm64"}
 
-	creds, err := Enroll(context.Background(), client, id, "claim-123", prof, dir)
+	creds, err := Enroll(context.Background(), client, id, "claim-123", "verifier-xyz", prof, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,6 +82,9 @@ func TestEnrollAgainstFakeCoordinator(t *testing.T) {
 	}
 	if string(creds.CoordinatorPubKey) != string(coord.PubKey()) {
 		t.Fatal("coordinator pubkey not pinned")
+	}
+	if got := coord.LastEnrollVerifier(); got != "verifier-xyz" {
+		t.Errorf("coordinator saw pkce_verifier %q, want verifier-xyz", got)
 	}
 
 	// Round-trip through disk.
@@ -102,6 +107,7 @@ func TestEnrollAgainstFakeCoordinator(t *testing.T) {
 }
 
 func TestLoginFlowCallback(t *testing.T) {
+	var challenge string
 	f := &LoginFlow{
 		LoginURL: "https://teraflock.dev/claim",
 		OpenBrowser: func(u string) error {
@@ -114,6 +120,7 @@ func TestLoginFlowCallback(t *testing.T) {
 				if parsed.Query().Get("code_challenge_method") != "S256" {
 					t.Error("missing S256 challenge method")
 				}
+				challenge = parsed.Query().Get("code_challenge")
 				time.Sleep(20 * time.Millisecond)
 				resp, err := http.Get(redirect + "?claim_code=cc-42&state=" + state)
 				if err == nil {
@@ -131,6 +138,12 @@ func TestLoginFlowCallback(t *testing.T) {
 	}
 	if res.ClaimCode != "cc-42" {
 		t.Errorf("claim code = %q", res.ClaimCode)
+	}
+	// The verifier the daemon keeps must be the preimage of the challenge
+	// the page saw — that is the whole proof of possession.
+	sum := sha256.Sum256([]byte(res.Verifier))
+	if res.Verifier == "" || base64.RawURLEncoding.EncodeToString(sum[:]) != challenge {
+		t.Errorf("verifier %q does not hash to the challenge %q", res.Verifier, challenge)
 	}
 	if openURL == "" {
 		t.Error("open URL empty")

@@ -301,7 +301,12 @@ FLOCKD_TUNNEL__COORDINATOR_ADDR=coordinator:9090 flockd
 ```
 
 - `enroll.{Save,Read,Clear}ClaimCode` own the `<data_dir>/claim_code`
-  handoff between the `tera` and `flockd` processes.
+  handoff between the `tera` and `flockd` processes. The browser flow's
+  PKCE verifier rides beside it in `<data_dir>/claim_verifier`
+  (`enroll.{Save,Read}ClaimVerifier`) and goes out as
+  `EnrollRequest.pkce_verifier`; the coordinator refuses a browser-flow
+  code without the matching one (control-plane#6). A separate file so
+  daemons that predate it still parse the code.
 - `ensureEnrolled` (cmd/flockd) exchanges the code for credentials over a
   server-authenticated bootstrap dial, persists them, and clears the spent
   code. A failed enrollment keeps the code (an unreachable coordinator must

@@ -107,16 +107,20 @@ type Credentials struct {
 }
 
 // Enroll performs the Enroll RPC with a claim code and persists the result.
-func Enroll(ctx context.Context, client tunnelv1.TunnelServiceClient, id *Identity, claimCode string, prof *typesv1.CapabilityProfile, dataDir string) (*Credentials, error) {
+// verifier is the PKCE code_verifier from the browser flow ("" for codes
+// obtained any other way); the coordinator checks it against the challenge
+// bound to the code (control-plane#6).
+func Enroll(ctx context.Context, client tunnelv1.TunnelServiceClient, id *Identity, claimCode, verifier string, prof *typesv1.CapabilityProfile, dataDir string) (*Credentials, error) {
 	csr, err := id.CSR()
 	if err != nil {
 		return nil, err
 	}
 	resp, err := client.Enroll(ctx, &tunnelv1.EnrollRequest{
-		ClaimCode:  claimCode,
-		Pubkey:     id.Pub,
-		CsrPem:     csr,
-		Capability: prof,
+		ClaimCode:    claimCode,
+		Pubkey:       id.Pub,
+		CsrPem:       csr,
+		Capability:   prof,
+		PkceVerifier: verifier,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("enroll: rpc: %w", err)
@@ -146,7 +150,7 @@ func RotateIfNeeded(ctx context.Context, client tunnelv1.TunnelServiceClient, id
 	if time.Until(creds.CertExpiresAt) > 7*24*time.Hour {
 		return creds, nil
 	}
-	return Enroll(ctx, client, id, "rotate:"+creds.NodeID, prof, dataDir)
+	return Enroll(ctx, client, id, "rotate:"+creds.NodeID, "", prof, dataDir)
 }
 
 // SaveCredentials persists creds with 0600.

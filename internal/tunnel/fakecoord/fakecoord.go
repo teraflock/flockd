@@ -51,8 +51,11 @@ type Coordinator struct {
 	pending     map[string]chan *tunnelv1.TokenChunk
 	pendingEmb  map[string]chan *tunnelv1.EmbeddingResult
 	pendingCh   map[string]chan *tunnelv1.ChallengeResponse
-	acks        map[string]chan *tunnelv1.DispatchAck
-	sessionUp   chan struct{}
+	// lastVerifier is the pkce_verifier of the most recent Enroll, so tests
+	// can check the daemon forwards it (the fake does not validate it).
+	lastVerifier string
+	acks         map[string]chan *tunnelv1.DispatchAck
+	sessionUp    chan struct{}
 }
 
 type session struct {
@@ -156,6 +159,7 @@ func (c *Coordinator) Enroll(_ context.Context, req *tunnelv1.EnrollRequest) (*t
 
 	c.mu.Lock()
 	c.enrolled[nodeID] = true
+	c.lastVerifier = req.GetPkceVerifier()
 	c.mu.Unlock()
 
 	return &tunnelv1.EnrollResponse{
@@ -165,6 +169,14 @@ func (c *Coordinator) Enroll(_ context.Context, req *tunnelv1.EnrollRequest) (*t
 		CoordinatorPubkey: c.signPub,
 		CertExpiresAt:     timestamppb.New(expires),
 	}, nil
+}
+
+// LastEnrollVerifier returns the pkce_verifier carried by the most recent
+// Enroll request ("" if none).
+func (c *Coordinator) LastEnrollVerifier() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lastVerifier
 }
 
 // Session implements the persistent bidi tunnel.

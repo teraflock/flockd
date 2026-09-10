@@ -38,11 +38,41 @@ func TestClaimCodeRoundTrip(t *testing.T) {
 		}
 	}
 
+	// The browser flow's verifier rides beside the code and is cleared with it.
+	if v, err := ReadClaimVerifier(dir); err != nil || v != "" {
+		t.Fatalf("ReadClaimVerifier before save = %q, %v", v, err)
+	}
+	if err := SaveClaimVerifier(dir, "v-secret\n"); err != nil {
+		t.Fatal(err)
+	}
+	if v, err := ReadClaimVerifier(dir); err != nil || v != "v-secret" {
+		t.Fatalf("ReadClaimVerifier = %q, %v", v, err)
+	}
+	if runtime.GOOS != "windows" {
+		if fi, err := os.Stat(ClaimVerifierPath(dir)); err != nil || fi.Mode().Perm() != 0o600 {
+			t.Errorf("verifier perms = %v, %v; want 600", fi, err)
+		}
+	}
+	// --claim-code after an abandoned browser flow: no verifier, and the
+	// stale one must go so the daemon does not send the wrong proof.
+	if err := SaveClaimVerifier(dir, ""); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := ReadClaimVerifier(dir); v != "" {
+		t.Errorf("stale verifier survived an empty save: %q", v)
+	}
+	if err := SaveClaimVerifier(dir, "v-again"); err != nil {
+		t.Fatal(err)
+	}
+
 	if err := ClearClaimCode(dir); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ReadClaimCode(dir); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("ReadClaimCode after clear = %v, want os.ErrNotExist", err)
+	}
+	if v, err := ReadClaimVerifier(dir); err != nil || v != "" {
+		t.Errorf("verifier survived ClearClaimCode: %q, %v", v, err)
 	}
 	// Clearing an already-clear code is not an error — the daemon calls it
 	// unconditionally after a successful enrollment.

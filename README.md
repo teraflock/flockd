@@ -184,8 +184,9 @@ needs a password (polkit), `tera up` still succeeds and prints the hint —
 run `sudo loginctl enable-linger $USER` once. `tera down` never disables
 lingering.
 
-`tera login` stores the claim code; on first start the daemon exchanges it
-for a 30-day client certificate from the mesh CA (rotated automatically in
+`tera login` stores the claim code (plus, for the browser flow, the PKCE
+verifier that makes the code redeemable from this machine only); on first
+start the daemon exchanges it for a 30-day client certificate from the mesh CA (rotated automatically in
 its last 7 days) and then holds one outbound session to the coordinator.
 The defaults already point at the hosted coordinator, the published
 runtime manifest and the model catalog, so a fresh install needs no config

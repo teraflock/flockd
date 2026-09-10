@@ -407,7 +407,9 @@ func run() error {
 			defer conn.Close()
 			ectx, cancel := context.WithTimeout(rctx, 30*time.Second)
 			defer cancel()
-			creds, err := enroll.Enroll(ectx, tunnelv1.NewTunnelServiceClient(conn), identity, code, hw, cfg.DataDir)
+			// Codes pasted into the API (desktop app, `--claim-code`) come
+			// from the claim page, which binds no PKCE challenge to them.
+			creds, err := enroll.Enroll(ectx, tunnelv1.NewTunnelServiceClient(conn), identity, code, "", hw, cfg.DataDir)
 			if err != nil {
 				return err
 			}
@@ -645,7 +647,7 @@ func standaloneEnroll(ctx context.Context, cfg config.Config, dialer tunnel.Dial
 		return nil, err
 	}
 	defer conn.Close()
-	creds, err := enroll.Enroll(ctx, tunnelv1.NewTunnelServiceClient(conn), identity, "standalone",
+	creds, err := enroll.Enroll(ctx, tunnelv1.NewTunnelServiceClient(conn), identity, "standalone", "",
 		hw, filepath.Join(cfg.DataDir, "standalone"))
 	if err != nil {
 		return nil, fmt.Errorf("standalone enrollment: %w", err)
@@ -673,6 +675,12 @@ func ensureEnrolled(ctx context.Context, cfg config.Config, identity *enroll.Ide
 	if err != nil {
 		return nil, err
 	}
+	// `tera login`'s browser flow leaves the PKCE verifier beside the code;
+	// the coordinator refuses a browser-flow code without it.
+	verifier, err := enroll.ReadClaimVerifier(cfg.DataDir)
+	if err != nil {
+		return nil, err
+	}
 
 	// Bootstrap dial: the node has no client cert yet, so this leg is
 	// server-authenticated only. The credentials it returns (CA + pinned
@@ -686,7 +694,7 @@ func ensureEnrolled(ctx context.Context, cfg config.Config, identity *enroll.Ide
 
 	enrollCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	creds, err := enroll.Enroll(enrollCtx, tunnelv1.NewTunnelServiceClient(conn), identity, code, hw, cfg.DataDir)
+	creds, err := enroll.Enroll(enrollCtx, tunnelv1.NewTunnelServiceClient(conn), identity, code, verifier, hw, cfg.DataDir)
 	if err != nil {
 		// Keep the claim code: a coordinator that is merely unreachable
 		// should not cost the operator their code. A rejected code is
