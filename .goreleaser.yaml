@@ -133,21 +133,27 @@ homebrew_casks:
     directory: Casks
     homepage: https://teraflock.ai
     description: Teraflock node daemon + CLI — earn credits serving LLM inference on idle hardware
-    # Until Developer ID signing + notarization land (SPEC §A3), Gatekeeper
-    # quarantines anything downloaded by the cask and macOS reports the
-    # binaries as "damaged". Strip the xattr at install time so the beta is
-    # usable; this hook goes away when the binaries are properly notarized.
+    # Quarantine workaround, present ONLY in releases whose darwin binaries
+    # were not Developer ID signed + notarized (teraflock/flockd#27).
+    # scripts/release/preflight.sh exports TERAFLOCK_MACOS_SIGNED=true when
+    # the Apple secrets exist, and sign-macos.sh then fails the job rather
+    # than let an unsigned binary through, so a cask generated without this
+    # hook always points at notarized binaries. Unsigned (beta) binaries
+    # would otherwise be reported as "damaged" by Gatekeeper; the hook
+    # strips the xattr at install time and says so. Delete the whole block
+    # once every release is notarized (issue #27 has the diff).
     hooks:
       post:
-        install: |
+        install: |-
+          {{- if ne (envOrDefault "TERAFLOCK_MACOS_SIGNED" "") "true" }}
           if OS.mac?
+            opoo "tera #{version} is a beta build that is not yet notarized; stripping the quarantine flag so it runs."
             system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/tera"]
             system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/flockd"]
           end
+          {{- end -}}
     caveats: |
-      Binaries are not yet notarized (beta); the cask strips the macOS
-      quarantine flag on install. To join the mesh you need an invite from
-      teraflock.ai — then:
+      To join the mesh you need an invite from teraflock.ai — then:
         tera login      # opens the claim page in your browser
         tera up         # installs and starts the background service
         tera dashboard  # watch it earn
