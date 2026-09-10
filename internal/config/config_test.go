@@ -1,7 +1,13 @@
 package config
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
@@ -175,5 +181,101 @@ func TestRuntimeSigningKeys(t *testing.T) {
 	cfg.Runtime.ArtifactSigningKey = filepath.Join(dir, "missing.pub")
 	if _, err := cfg.Runtime.ArtifactSigningKeyPEM(); err == nil || !strings.Contains(err.Error(), "artifact_signing_key") {
 		t.Errorf("missing key file: want error naming the key, got %v", err)
+	}
+}
+
+// testCAPEM is a self-signed CA certificate for the tunnel.ca_cert tests.
+func testCAPEM(t *testing.T) []byte {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "test mesh CA"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, pub, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
+func TestTunnelCACert(t *testing.T) {
+	caPEM := testCAPEM(t)
+	dir := t.TempDir()
+	caPath := filepath.Join(dir, "mesh-ca.pem")
+	if err := os.WriteFile(caPath, caPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c := Default()
+	if got, err := c.Tunnel.CACertPEM(); err != nil || got != nil {
+		t.Fatalf("unset: %q, %v; want nil, nil", got, err)
+	}
+	// A file path resolves to the file's contents.
+	c.Tunnel.CACert = caPath
+	if got, err := c.Tunnel.CACertPEM(); err != nil || string(got) != string(caPEM) {
+		t.Fatalf("path: %q, %v", got, err)
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("validate with a CA file: %v", err)
+	}
+	// Inline PEM is used as-is.
+	c.Tunnel.CACert = "\n" + string(caPEM) + "\n"
+	if got, err := c.Tunnel.CACertPEM(); err != nil || string(got) != strings.TrimSpace(string(caPEM)) {
+		t.Fatalf("inline: %q, %v", got, err)
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("validate with inline CA: %v", err)
+	}
+	// A pinned CA that cannot be used fails validation rather than being
+	// ignored — the setting exists for a coordinator system roots reject.
+	c.Tunnel.CACert = filepath.Join(dir, "missing.pem")
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "tunnel.ca_cert") {
+		t.Fatalf("missing file: %v", err)
+	}
+	garbage := filepath.Join(dir, "garbage.pem")
+	if err := os.WriteFile(garbage, []byte("not a certificate\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c.Tunnel.CACert = garbage
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "tunnel.ca_cert") {
+		t.Fatalf("garbage file: %v", err)
+	}
+	c.Tunnel.CACert = "-----BEGIN CERTIFICATE-----\nbm9wZQ==\n-----END CERTIFICATE-----\n"
+	if err := c.Validate(); err == nil {
+		t.Fatal("inline garbage accepted")
+	}
+
+	// Round trip through the file and the environment.
+	cfgPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(cfgPath, []byte("[tunnel]\nca_cert = \""+filepath.ToSlash(caPath)+"\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.ToSlash(cfg.Tunnel.CACert) != filepath.ToSlash(caPath) {
+		t.Errorf("ca_cert from toml = %q, want %q", cfg.Tunnel.CACert, caPath)
+	}
+	t.Setenv("FLOCKD_TUNNEL__CA_CERT", string(caPEM))
+	cfg, err = Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Tunnel.CACert != string(caPEM) {
+		t.Errorf("env did not override ca_cert: %q", cfg.Tunnel.CACert)
+	}
+	t.Setenv("FLOCKD_TUNNEL__CA_CERT", filepath.Join(dir, "missing.pem"))
+	if _, err := Load(cfgPath); err == nil {
+		t.Fatal("Load accepted an unreadable tunnel.ca_cert")
 	}
 }

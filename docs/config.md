@@ -145,6 +145,12 @@ heartbeat_interval   = "5s"     # coordinator may override via HelloAck
 reconnect_min        = "1s"     # jittered exponential backoff bounds
 reconnect_max        = "2m"
 insecure_skip_verify = false    # dev only: skip coordinator TLS verification
+ca_cert              = ""       # extra root for the coordinator's server cert:
+                                # a PEM file path or inline PEM. Only for a
+                                # self-hosted / staging coordinator whose cert
+                                # is issued by its mesh CA (or a private CA);
+                                # system roots stay trusted alongside it, and
+                                # tunnel.teraflock.ai needs nothing here.
 insecure             = false    # dev only: plaintext gRPC to the coordinator
                                 # (the `just run-coordinator` dev listener is
                                 # plaintext until mTLS termination lands)

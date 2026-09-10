@@ -57,6 +57,10 @@ func (s *Server) status() gen.Status {
 			t := ms.CertExpiresAt
 			resp.CertExpiresAt = &t
 		}
+		if ms.RotationError != "" {
+			e := ms.RotationError
+			resp.CertRotationError = &e
+		}
 	}
 	if g := s.deps.Governor; g != nil {
 		resp.State = g.State().String()

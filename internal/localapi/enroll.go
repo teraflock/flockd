@@ -21,6 +21,10 @@ type MeshStatus struct {
 	Enrolled      bool
 	NodeID        string
 	CertExpiresAt time.Time
+	// RotationError is why the last due client-cert rotation failed; ""
+	// when rotation is not due or succeeded. The node keeps serving on
+	// the current cert and drops off the mesh when it expires.
+	RotationError string
 }
 
 // EnrollNode implements gen.ServerInterface: submit a claim code to the

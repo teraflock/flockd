@@ -360,6 +360,7 @@ func run() error {
 		}
 		mesh.stop = cancel
 		mesh.creds = creds
+		mesh.rotationErr = nil
 		return nil
 	}
 
@@ -380,7 +381,7 @@ func run() error {
 		nodeID = creds.NodeID
 		log.Info("standalone mode: in-process fake coordinator running", "node_id", nodeID, "hint", "OPENAI_BASE_URL=http://"+cfg.LocalAPI.Listen+"/v1")
 	} else {
-		creds, err := ensureEnrolled(ctx, cfg, identity, hw, log)
+		creds, rotationErr, err := ensureEnrolled(ctx, cfg, identity, hw, log)
 		if err != nil {
 			return err
 		}
@@ -388,6 +389,7 @@ func run() error {
 		case creds != nil:
 			mesh.mu.Lock()
 			err := connectLocked(creds)
+			mesh.rotationErr = rotationErr
 			mesh.mu.Unlock()
 			if err != nil {
 				return err
@@ -415,7 +417,11 @@ func run() error {
 				mesh.mu.Unlock()
 			}()
 
-			conn, err := bootstrapDialer(cfg).Dial(rctx, cfg.Tunnel.CoordinatorAddr)
+			bd, err := bootstrapDialer(cfg, nil)
+			if err != nil {
+				return err
+			}
+			conn, err := bd.Dial(rctx, cfg.Tunnel.CoordinatorAddr)
 			if err != nil {
 				return fmt.Errorf("enrollment dial %s: %w", cfg.Tunnel.CoordinatorAddr, err)
 			}
@@ -468,11 +474,15 @@ func run() error {
 			mesh.mu.Lock()
 			defer mesh.mu.Unlock()
 			if mesh.creds != nil {
-				return localapi.MeshStatus{
+				ms := localapi.MeshStatus{
 					Enrolled:      true,
 					NodeID:        mesh.creds.NodeID,
 					CertExpiresAt: mesh.creds.CertExpiresAt,
 				}
+				if mesh.rotationErr != nil {
+					ms.RotationError = mesh.rotationErr.Error()
+				}
+				return ms
 			}
 			return localapi.MeshStatus{NodeID: nodeID}
 		},
@@ -507,6 +517,10 @@ type meshRunner struct {
 	creds     *enroll.Credentials
 	stop      context.CancelFunc
 	enrolling bool
+	// rotationErr is why the last due cert rotation did not happen
+	// (surfaced in /api/v1/status as cert_rotation_error); nil once a
+	// rotation or re-enrollment lands fresh credentials.
+	rotationErr error
 }
 
 // loadDefaultModel makes one model servable at startup. Further models
@@ -671,50 +685,57 @@ func standaloneEnroll(ctx context.Context, cfg config.Config, dialer tunnel.Dial
 }
 
 // ensureEnrolled returns the node's mesh credentials, performing enrollment
-// first when `tera login` has left a claim code behind. It returns (nil, nil)
-// when the node has neither credentials nor a pending claim code — that is
-// the ordinary "serving locally only" state, not an error.
-func ensureEnrolled(ctx context.Context, cfg config.Config, identity *enroll.Identity, hw *typesv1.CapabilityProfile, log *slog.Logger) (*enroll.Credentials, error) {
+// first when `tera login` has left a claim code behind. It returns nil
+// credentials and no error when the node has neither credentials nor a
+// pending claim code — that is the ordinary "serving locally only" state.
+// rotationErr is why a due cert rotation did not happen (the returned
+// credentials are then the current, expiring ones); it is not fatal.
+func ensureEnrolled(ctx context.Context, cfg config.Config, identity *enroll.Identity, hw *typesv1.CapabilityProfile, log *slog.Logger) (creds *enroll.Credentials, rotationErr error, err error) {
 	if enroll.Enrolled(cfg.DataDir) {
 		creds, err := enroll.LoadCredentials(cfg.DataDir)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		return rotateIfNeeded(ctx, cfg, identity, creds, hw, log)
+		creds, rotationErr := rotateIfNeeded(ctx, cfg, identity, creds, hw, log)
+		return creds, rotationErr, nil
 	}
 
 	code, err := enroll.ReadClaimCode(cfg.DataDir)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// `tera login`'s browser flow leaves the PKCE verifier beside the code;
 	// the coordinator refuses a browser-flow code without it.
 	verifier, err := enroll.ReadClaimVerifier(cfg.DataDir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Bootstrap dial: the node has no client cert yet, so this leg is
 	// server-authenticated only. The credentials it returns (CA + pinned
 	// coordinator key) are what make every later connection mTLS.
 	log.Info("claim code found: enrolling with coordinator", "coordinator", cfg.Tunnel.CoordinatorAddr)
-	conn, err := bootstrapDialer(cfg).Dial(ctx, cfg.Tunnel.CoordinatorAddr)
+	bd, err := bootstrapDialer(cfg, nil)
 	if err != nil {
-		return nil, fmt.Errorf("enrollment dial %s: %w", cfg.Tunnel.CoordinatorAddr, err)
+		return nil, nil, err
+	}
+	conn, err := bd.Dial(ctx, cfg.Tunnel.CoordinatorAddr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("enrollment dial %s: %w", cfg.Tunnel.CoordinatorAddr, err)
 	}
 	defer conn.Close()
 
 	enrollCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	creds, err := enroll.Enroll(enrollCtx, tunnelv1.NewTunnelServiceClient(conn), identity, code, verifier, hw, cfg.DataDir)
+	creds, err = enroll.Enroll(enrollCtx, tunnelv1.NewTunnelServiceClient(conn), identity, code, verifier, hw, cfg.DataDir)
 	if err != nil {
 		// Keep the claim code: a coordinator that is merely unreachable
 		// should not cost the operator their code. A rejected code is
 		// reported plainly so they know to get a fresh one.
-		return nil, fmt.Errorf("enrollment failed (claim code kept at %s): %w", enroll.ClaimCodePath(cfg.DataDir), err)
+		return nil, nil, fmt.Errorf("enrollment failed (claim code kept at %s): %w", enroll.ClaimCodePath(cfg.DataDir), err)
 	}
 	// Claim codes are one-shot at the coordinator; a spent one would only
 	// produce confusing failures on later restarts.
@@ -722,7 +743,7 @@ func ensureEnrolled(ctx context.Context, cfg config.Config, identity *enroll.Ide
 		log.Warn("could not remove spent claim code", "err", err)
 	}
 	log.Info("enrolled with mesh", "node_id", creds.NodeID, "cert_expires", creds.CertExpiresAt.Format(time.RFC3339))
-	return creds, nil
+	return creds, nil, nil
 }
 
 // rotateIfNeeded refreshes the client certificate when it is near expiry
@@ -730,47 +751,98 @@ func ensureEnrolled(ctx context.Context, cfg config.Config, identity *enroll.Ide
 // Enroll RPC over the bootstrap (server-auth) dial — possession of the node
 // key is the credential, not a claim code — so a failure here must never
 // take the node down: it keeps serving on the old cert and retries on the
-// next restart.
+// next restart. That failure is returned (with the current credentials) so
+// it shows in status rather than only in the log: unattended, it ends with
+// the node dropping off the mesh when the cert expires.
 func rotateIfNeeded(ctx context.Context, cfg config.Config, identity *enroll.Identity, creds *enroll.Credentials, hw *typesv1.CapabilityProfile, log *slog.Logger) (*enroll.Credentials, error) {
 	if time.Until(creds.CertExpiresAt) > 7*24*time.Hour {
 		return creds, nil
 	}
 	log.Info("client cert near expiry: rotating", "expires", creds.CertExpiresAt.Format(time.RFC3339))
-	conn, err := bootstrapDialer(cfg).Dial(ctx, cfg.Tunnel.CoordinatorAddr)
+	fail := func(stage string, err error) (*enroll.Credentials, error) {
+		err = fmt.Errorf("cert rotation %s: %w", stage, err)
+		log.Error("cert rotation failed; keeping the current cert — the node leaves the mesh when it expires unless rotation succeeds at a later restart or the node is re-enrolled",
+			"err", err, "expires", creds.CertExpiresAt.Format(time.RFC3339),
+			"hours_left", int(time.Until(creds.CertExpiresAt).Hours()),
+			"hint", "a self-hosted coordinator with a mesh-CA cert needs tunnel.ca_cert")
+		return creds, err
+	}
+	// The mesh CA from enrollment is trusted for this dial: a self-hosted
+	// coordinator serves a mesh-CA-issued cert, which system roots alone
+	// would reject and silently leave the node to expire (flockd#4).
+	bd, err := bootstrapDialer(cfg, creds)
 	if err != nil {
-		log.Warn("cert rotation dial failed; keeping current cert", "err", err)
-		return creds, nil
+		return fail("dialer", err)
+	}
+	conn, err := bd.Dial(ctx, cfg.Tunnel.CoordinatorAddr)
+	if err != nil {
+		return fail("dial", err)
 	}
 	defer conn.Close()
 	rotateCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	fresh, err := enroll.RotateIfNeeded(rotateCtx, tunnelv1.NewTunnelServiceClient(conn), identity, creds, hw, cfg.DataDir)
 	if err != nil {
-		log.Warn("cert rotation failed; keeping current cert", "err", err)
-		return creds, nil
+		return fail("rpc", err)
 	}
+	log.Info("client cert rotated", "expires", fresh.CertExpiresAt.Format(time.RFC3339))
 	return fresh, nil
 }
 
-// bootstrapDialer dials the coordinator before the node holds a client cert
-// (enrollment only). Plaintext in dev, server-authenticated TLS otherwise.
-func bootstrapDialer(cfg config.Config) tunnel.Dialer {
+// bootstrapDialer dials the coordinator server-authenticated only: for
+// enrollment, when the node holds no client cert yet (creds nil), and for
+// cert rotation, which rides the Enroll RPC with the node key as the
+// credential (creds set). Plaintext in dev; otherwise TLS against
+// bootstrapTLSConfig's roots.
+func bootstrapDialer(cfg config.Config, creds *enroll.Credentials) (tunnel.Dialer, error) {
 	if cfg.Tunnel.Insecure {
-		return tunnel.InsecureDialer{}
+		return tunnel.InsecureDialer{}, nil
 	}
-	return &tunnel.TLSDialer{TLS: &tls.Config{
+	tlsCfg, err := bootstrapTLSConfig(cfg, creds)
+	if err != nil {
+		return nil, err
+	}
+	return &tunnel.TLSDialer{TLS: tlsCfg}, nil
+}
+
+// bootstrapTLSConfig verifies the coordinator against the system roots
+// plus tunnel.ca_cert when the operator pinned one and, when creds are in
+// hand (rotation), the mesh CA the node enrolled with — so a self-hosted
+// coordinator presenting a mesh-CA-issued cert can be enrolled with given
+// the pinned CA, and rotated against even without it. A genuinely
+// untrusted cert still fails: nothing here skips verification.
+func bootstrapTLSConfig(cfg config.Config, creds *enroll.Credentials) (*tls.Config, error) {
+	pinned, err := cfg.Tunnel.CACertPEM()
+	if err != nil {
+		return nil, err
+	}
+	var meshCA []byte
+	if creds != nil {
+		meshCA = creds.CACertPEM
+	}
+	roots, err := enroll.RootPool(pinned, meshCA)
+	if err != nil {
+		return nil, fmt.Errorf("%w (tunnel.ca_cert, or the coordinator CA from enrollment)", err)
+	}
+	return &tls.Config{
 		MinVersion:         tls.VersionTLS13,
+		RootCAs:            roots,
 		InsecureSkipVerify: cfg.Tunnel.InsecureSkipVerify, //nolint:gosec // dev flag, documented
-	}}
+	}, nil
 }
 
 // meshDialer builds the session dialer from enrollment credentials: mTLS
-// with the coordinator CA pinned as the only root.
+// with the coordinator CA (and tunnel.ca_cert, if set) trusted alongside
+// the system roots.
 func meshDialer(cfg config.Config, identity *enroll.Identity, creds *enroll.Credentials) (tunnel.Dialer, error) {
 	if cfg.Tunnel.Insecure {
 		return tunnel.InsecureDialer{}, nil
 	}
-	tlsCfg, err := enroll.ClientTLSConfig(identity, creds, cfg.Tunnel.InsecureSkipVerify)
+	pinned, err := cfg.Tunnel.CACertPEM()
+	if err != nil {
+		return nil, err
+	}
+	tlsCfg, err := enroll.ClientTLSConfig(identity, creds, pinned, cfg.Tunnel.InsecureSkipVerify)
 	if err != nil {
 		return nil, err
 	}

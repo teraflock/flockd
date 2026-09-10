@@ -278,7 +278,10 @@ type Stats struct {
 type Status struct {
 	// CertExpiresAt Client-certificate expiry; present when enrolled.
 	CertExpiresAt *time.Time `json:"cert_expires_at,omitempty"`
-	DefaultModel  string     `json:"default_model"`
+
+	// CertRotationError Why the last due client-certificate rotation failed; absent when rotation is not due or succeeded. The node keeps serving on the current certificate and leaves the mesh when it expires unless a later restart rotates it or the node is re-enrolled.
+	CertRotationError *string `json:"cert_rotation_error,omitempty"`
+	DefaultModel      string  `json:"default_model"`
 
 	// Disk Model store usage. `models_bytes` counts complete artifacts, `partial_bytes` counts resumable `.partial` downloads, `budget_bytes` is `models.max_disk_mb` (0 = unlimited), `free_bytes` is free space on the volume holding the model directory.
 	Disk     Disk      `json:"disk"`

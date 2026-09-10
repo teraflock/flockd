@@ -4,6 +4,7 @@
 package config
 
 import (
+	"crypto/x509"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -178,6 +179,15 @@ type Tunnel struct {
 	ReconnectMax time.Duration `koanf:"reconnect_max"`
 	// InsecureSkipVerify disables server cert verification (dev only).
 	InsecureSkipVerify bool `koanf:"insecure_skip_verify"`
+	// CACert pins an extra root for the coordinator's server certificate:
+	// the path of a PEM file, or the PEM itself. Only a self-hosted or
+	// staging coordinator whose certificate is issued by its own mesh CA
+	// (or a private CA) needs it — tunnel.teraflock.ai presents a public
+	// certificate. It applies to every dial (enrollment, cert rotation,
+	// the mTLS session) alongside the system roots, which stay trusted;
+	// it is never a substitute for insecure_skip_verify's blanket skip.
+	// (teraflock/flockd#4)
+	CACert string `koanf:"ca_cert"`
 	// Insecure dials the coordinator over plaintext gRPC instead of TLS.
 	// The dev coordinator (`just run-coordinator`) serves plaintext until
 	// mTLS termination lands; never enable this against a real deployment.
@@ -379,5 +389,33 @@ func (c Config) Validate() error {
 	if c.Models.IdleUnloadS < 0 || c.Models.RetentionDays < 0 {
 		return fmt.Errorf("config: models.idle_unload_s and models.retention_days must be >= 0 (0 = never)")
 	}
+	// A pinned CA that cannot be read or parsed fails startup rather than
+	// the first dial: the whole point of the setting is a coordinator that
+	// system roots reject, so a silently ignored value would reproduce
+	// exactly the failure it exists to fix.
+	pem, err := c.Tunnel.CACertPEM()
+	if err != nil {
+		return err
+	}
+	if len(pem) > 0 && !x509.NewCertPool().AppendCertsFromPEM(pem) {
+		return fmt.Errorf("config: tunnel.ca_cert holds no CERTIFICATE block")
+	}
 	return nil
+}
+
+// CACertPEM resolves Tunnel.CACert: nil when unset, the value itself when
+// it is inline PEM, otherwise the contents of the file it names.
+func (t Tunnel) CACertPEM() ([]byte, error) {
+	v := strings.TrimSpace(t.CACert)
+	if v == "" {
+		return nil, nil
+	}
+	if strings.HasPrefix(v, "-----BEGIN") {
+		return []byte(v), nil
+	}
+	b, err := os.ReadFile(v)
+	if err != nil {
+		return nil, fmt.Errorf("config: tunnel.ca_cert: %w", err)
+	}
+	return b, nil
 }

@@ -544,6 +544,13 @@ components:
           type: string
           format: date-time
           description: Client-certificate expiry; present when enrolled.
+        cert_rotation_error:
+          type: string
+          description: >
+            Why the last due client-certificate rotation failed; absent when
+            rotation is not due or succeeded. The node keeps serving on the
+            current certificate and leaves the mesh when it expires unless a
+            later restart rotates it or the node is re-enrolled.
         state:
           type: string
           description: serving | yielded | paused-battery | paused-thermal | outside-schedule
