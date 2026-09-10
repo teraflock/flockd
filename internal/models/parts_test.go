@@ -303,7 +303,7 @@ func TestEnsureRejectsSpecWithoutArtifact(t *testing.T) {
 
 func TestURLBasename(t *testing.T) {
 	good := map[string]string{
-		"https://hf.co/x/resolve/main/m-00001-of-00003.gguf": "m-00001-of-00003.gguf",
+		"https://hf.co/x/resolve/main/m-00001-of-00003.gguf":           "m-00001-of-00003.gguf",
 		"https://hf.co/x/resolve/main/mmproj%20F16.gguf?download=true": "mmproj F16.gguf",
 	}
 	for in, want := range good {
