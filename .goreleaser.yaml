@@ -1,5 +1,18 @@
-# GoReleaser config (SPEC §A3). Run in CI on tag; signing steps carry
-# TODO(keys) markers until release keys/certs exist.
+# GoReleaser config (SPEC §A3). Run in CI on tag (ci.yml `release` job).
+#
+# Signing (teraflock/flockd#26) is wired end to end and keyed on secrets and
+# variables, so the same config produces an unsigned snapshot on a laptop and
+# a signed, notarized release the moment the keys exist:
+#   macOS    universal_binaries post hook -> scripts/release/sign-macos.sh
+#            (Developer ID + hardened runtime + notarization via rcodesign)
+#   Windows  builds post hook -> scripts/release/sign-windows.sh
+#            (Authenticode via Azure Trusted Signing, jsign)
+#   cosign   signs: -> scripts/release/cosign-sign.sh over checksums.txt
+#            (COSIGN_MODE=keyless|kms, docs#34)
+# The policy (SIGNING_REQUIRED, which secrets each leg needs, "present
+# secrets are always used, failures are always fatal") lives in
+# scripts/release/lib.sh. `goreleaser release --snapshot --skip=publish,sign`
+# needs none of it.
 version: 2
 
 project_name: flockd
@@ -20,6 +33,11 @@ builds:
         goarch: arm64
     ldflags:
       - -s -w -X main.version={{.Version}}
+    hooks:
+      post:
+        # Authenticode; a no-op for non-.exe targets and without Azure secrets.
+        - cmd: scripts/release/sign-windows.sh {{ .Path }}
+          output: true
   - id: tera
     main: ./cmd/tera
     binary: tera
@@ -31,16 +49,31 @@ builds:
         goarch: arm64
     ldflags:
       - -s -w -X main.version={{.Version}}
+    hooks:
+      post:
+        # Authenticode; a no-op for non-.exe targets and without Azure secrets.
+        - cmd: scripts/release/sign-windows.sh {{ .Path }}
+          output: true
 
+# The darwin archives ship only the lipo'd binaries (replace: true), so
+# these are the Mach-Os that get signed and notarized.
 universal_binaries:
   - id: flockd-universal
     ids: [flockd]
     name_template: flockd
     replace: true
+    hooks:
+      post:
+        - cmd: scripts/release/sign-macos.sh {{ .Path }}
+          output: true
   - id: tera-universal
     ids: [tera]
     name_template: tera
     replace: true
+    hooks:
+      post:
+        - cmd: scripts/release/sign-macos.sh {{ .Path }}
+          output: true
 
 archives:
   - id: default
@@ -68,16 +101,17 @@ nfpms:
 checksum:
   name_template: checksums.txt
 
-# TODO(keys): enable once the cosign release key exists (offline/HSM — this
-# is the most sensitive key in the company, SPEC §6 / §A3).
-# signs:
-#   - cmd: cosign
-#     artifacts: checksum
-#     args: ["sign-blob", "--key", "env://COSIGN_KEY", "--output-signature", "${signature}", "${artifact}"]
-#
-# TODO(keys): macOS Developer ID signing + notarization (notarytool) hooks,
-# and Windows Authenticode (Azure Trusted Signing) — required before public
-# distribution; unsigned daemons are dead on arrival (SPEC §A3).
+# One Sigstore bundle over checksums.txt covers every archive and package.
+# COSIGN_MODE=keyless|kms selects the custody shape (docs#34); when it is
+# unset the release job passes --skip=sign, so this block never runs with
+# nothing to sign. cosign v3 emits bundles, not detached .sig files.
+signs:
+  - id: cosign
+    cmd: scripts/release/cosign-sign.sh
+    artifacts: checksum
+    signature: "${artifact}.sigstore.json"
+    args: ["${artifact}", "${signature}"]
+    output: true
 
 # Homebrew distribution is a cask, not a formula: goreleaser hard-deprecated
 # `brews` in v2.16, and Homebrew's own guidance is that pre-built binaries
@@ -133,9 +167,40 @@ winget:
 
 release:
   draft: false
+  # Templated on the same variables the signing legs use, so the notes say
+  # exactly what this release's artifacts carry.
   footer: |
     ---
-    Install: see README. Verify checksums with `sha256sum -c checksums.txt`.
+    **Install:** see the README. **Checksums:** `sha256sum -c --ignore-missing checksums.txt`
+
+    {{ $mode := envOrDefault "COSIGN_MODE" "" -}}
+    {{ if eq $mode "keyless" -}}
+    **cosign:** `checksums.txt.sigstore.json` is a keyless Sigstore bundle over `checksums.txt`:
+    ```
+    cosign verify-blob --bundle checksums.txt.sigstore.json \
+      --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+      --certificate-identity-regexp '^https://github.com/teraflock/flockd/' checksums.txt
+    ```
+    {{- else if eq $mode "kms" -}}
+    **cosign:** `checksums.txt.sigstore.json` is a Sigstore bundle over `checksums.txt` signed with the Teraflock release key (public key in the README):
+    ```
+    cosign verify-blob --bundle checksums.txt.sigstore.json --key teraflock-release.pub checksums.txt
+    ```
+    {{- else -}}
+    **cosign:** this release carries no cosign signature yet.
+    {{- end }}
+
+    {{ if eq (envOrDefault "TERAFLOCK_MACOS_SIGNED" "") "true" -}}
+    **macOS:** `flockd` and `tera` are Developer ID signed and notarized: `codesign -dv --verbose=2 tera` shows `Authority=Developer ID Application`, `spctl -a -vv -t install tera` reports `accepted`.
+    {{- else -}}
+    **macOS:** `flockd` and `tera` are **not yet notarized** (beta): the brew cask strips the quarantine flag; a direct download needs `xattr -d com.apple.quarantine flockd tera`.
+    {{- end }}
+
+    {{ if eq (envOrDefault "TERAFLOCK_WINDOWS_SIGNED" "") "true" -}}
+    **Windows:** `flockd.exe` and `tera.exe` are Authenticode signed: `Get-AuthenticodeSignature tera.exe` reports `Valid`.
+    {{- else -}}
+    **Windows:** `flockd.exe` and `tera.exe` are **not yet Authenticode signed**: expect a SmartScreen prompt.
+    {{- end }}
 
 snapshot:
   version_template: "{{ incpatch .Version }}-dev"

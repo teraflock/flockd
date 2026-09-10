@@ -308,6 +308,32 @@ regenerates the management API from `api/openapi.yaml` first — never edit
 strict `revive.toml` (a verbatim copy of control-plane's canonical one —
 change it there first), staticcheck, bodyclose + noctx, and govulncheck.
 
+### Release signing
+
+Tags are released by the `release` job in `.github/workflows/ci.yml`
+(goreleaser). Three signing legs are wired and each keys on its own
+secrets, so a tag publishes unsigned until the keys exist and signed the
+moment they do — no config change in this repo:
+
+| leg | tool (runs on the Linux job) | needs |
+|---|---|---|
+| macOS Developer ID + notarization of `flockd`/`tera` | `rcodesign` | `APPLE_CERTIFICATE` (base64 .p12), `APPLE_CERTIFICATE_PASSWORD`, `APPLE_API_KEY_ID`, `APPLE_API_ISSUER`, `APPLE_API_KEY` (base64 .p8) |
+| Windows Authenticode on `flockd.exe`/`tera.exe` | `jsign` + Azure Trusted Signing | secrets `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`; variables `AZURE_SIGNING_ENDPOINT`, `AZURE_SIGNING_ACCOUNT`, `AZURE_SIGNING_PROFILE` |
+| cosign bundle over `checksums.txt` | `cosign` | variable `COSIGN_MODE=keyless` or `COSIGN_MODE=kms` + `COSIGN_KMS_KEY` (+ `AWS_ROLE_TO_ASSUME`) |
+
+The `SIGNING_REQUIRED` variable turns "skip when missing" into "fail when
+missing": `true` requires every leg, `macos,cosign` a subset. Secrets that
+are present are always used, and a signing or notarization failure always
+fails the job, so a published release is never half-signed; the release
+notes state what was signed and how to verify it. Policy and scripts:
+`scripts/release/` (`lib.sh` is the contract). Contributors without keys
+build the same way as before:
+
+```sh
+goreleaser check
+goreleaser release --snapshot --skip=publish,sign
+```
+
 ## Roadmap
 
 - [x] **Phase 0 — single-node vertical slice.** Hardware detection,

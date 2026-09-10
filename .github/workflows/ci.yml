@@ -150,13 +150,38 @@ jobs:
           fi
 
   release:
-    # Tag builds produce (unsigned, draft) release artifacts.
-    # TODO(keys): cosign + notarization + Authenticode before public release.
+    # Tag builds publish release artifacts. The three signing legs (macOS
+    # Developer ID + notarization, Windows Authenticode, cosign bundle over
+    # checksums.txt) each run when their secrets/variables exist and are
+    # enforced by the SIGNING_REQUIRED variable; present secrets are always
+    # used and a signing failure always fails the job (flockd#26; policy in
+    # scripts/release/lib.sh). One Linux runner does all of it: rcodesign
+    # notarizes from Linux, jsign talks to Azure Trusted Signing from Linux.
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [test, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write # cosign keyless (Fulcio) and the AWS OIDC role for COSIGN_MODE=kms
+    env:
+      # Repository/org VARIABLES (not secrets): the switches Anderson flips.
+      SIGNING_REQUIRED: ${{ vars.SIGNING_REQUIRED }}
+      COSIGN_MODE: ${{ vars.COSIGN_MODE }}
+      COSIGN_KMS_KEY: ${{ vars.COSIGN_KMS_KEY }}
+      AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+      AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+      AZURE_SIGNING_PROFILE: ${{ vars.AZURE_SIGNING_PROFILE }}
+      # Org SECRETS from docs#35 (Apple) and docs#37 (Azure). Same names as
+      # the desktop repo's release workflow; keep them identical.
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
     steps:
       - uses: actions/checkout@v7
         with: { path: flockd, fetch-depth: 0 }
@@ -164,12 +189,27 @@ jobs:
         with: { repository: teraflock/proto, path: proto }
       - uses: actions/setup-go@v7
         with: { go-version: "${{ env.GO_VERSION }}", cache-dependency-path: flockd/go.sum }
+      - name: Signing preflight (fails early when SIGNING_REQUIRED cannot be met)
+        working-directory: flockd
+        run: scripts/release/preflight.sh
+      - name: Release tooling (rcodesign, jsign; pinned, sha256-verified)
+        working-directory: flockd
+        run: scripts/release/install-tools.sh
+      - uses: sigstore/cosign-installer@v3
+        if: env.COSIGN_MODE != ''
+      - name: AWS credentials for the KMS signing key (COSIGN_MODE=kms)
+        if: env.COSIGN_MODE == 'kms' && vars.AWS_ROLE_TO_ASSUME != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
       - uses: goreleaser/goreleaser-action@v6
         with:
           workdir: flockd
-          args: release --clean
+          # GORELEASER_SIGN_ARGS is "--skip=sign" when COSIGN_MODE is unset.
+          args: release --clean ${{ env.GORELEASER_SIGN_ARGS }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # TAP_GITHUB_TOKEN is a PAT with write access to teraflock/homebrew-tap;
-          # goreleaser uses it only for the formula push (see .goreleaser.yaml brews.token).
+          # goreleaser uses it only for the cask push (see .goreleaser.yaml homebrew_casks.repository.token).
           TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
