@@ -308,6 +308,12 @@ func TestReconnectAfterKick(t *testing.T) {
 	if !h.coord.WaitForSession(10 * time.Second) {
 		t.Fatal("client never reconnected")
 	}
+	// The coordinator sees the new stream before the client has finished
+	// its side of the handshake and bumped the counter; give it a moment.
+	deadline := time.Now().Add(5 * time.Second)
+	for h.client.Sessions() < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
 	if h.client.Sessions() < 2 {
 		t.Fatalf("sessions = %d, want >= 2", h.client.Sessions())
 	}

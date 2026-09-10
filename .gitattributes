@@ -1,0 +1,3 @@
+# Test fixtures are byte-exact inputs (signed digests, captured tool output);
+# never let a Windows checkout rewrite their line endings.
+**/testdata/** -text
