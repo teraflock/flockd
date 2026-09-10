@@ -1,0 +1,2 @@
+WARNING: Unable to detect ROCm version. Falling back to legacy path.
+{"card0": {"VRAM Total Memory (B)": "25753026560", "VRAM Total Used Memory (B)": "2113929216"}, "system": {"Driver version": "6.3.6"}}

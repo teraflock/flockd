@@ -170,17 +170,19 @@ login_url = "https://teraflock.ai/claim"   # browser page opened by `tera login`
   adopted like a single file, once every file verifies. A spec that names
   neither an artifact nor parts fails with `no artifact in spec`.
 - **Memory measurement** is the runtime child's physical footprint
-  (`proc_pid_rusage` on macOS, `/proc/<pid>/smaps_rollup` Pss on Linux),
-  not RSS — mmap'd weights shared with the page cache are not double
-  counted. Before the first sample a load is charged its estimate:
+  (`proc_pid_rusage` on macOS, `/proc/<pid>/smaps_rollup` Pss on Linux,
+  `GetProcessMemoryInfo` — the larger of PrivateUsage and WorkingSetSize —
+  on Windows), not RSS — mmap'd weights shared with the page cache are not
+  double counted. Before the first sample a load is charged its estimate:
   `file_bytes × 1.15 + ctx × file_bytes/65536 + 256 MB` (ctx is the total
   `--ctx-size`, which llama-server splits across its slots, so the KV term
   is counted once regardless of `max_concurrent`), or the catalog's
-  `min_ram_mb` if larger. On a discrete NVIDIA GPU with `nvidia-smi` on
-  PATH the card's used memory is sampled every housekeeping tick (30 s,
-  3 s timeout) and replaces the estimates for admission and the heartbeat's
-  `vram_used_mb`; AMD (`rocm-smi`) is not measured yet and Windows host
-  footprints stay estimates.
+  `min_ram_mb` if larger. On a discrete GPU the card's used memory is
+  sampled every housekeeping tick (30 s, 3 s timeout) and replaces the
+  estimates for admission and the heartbeat's `vram_used_mb`: NVIDIA via
+  `nvidia-smi` (Linux and Windows), AMD via the amdgpu driver's sysfs
+  `mem_info_vram_used` or, failing that, `rocm-smi --showmeminfo vram`
+  (Linux; AMD on Windows keeps the estimate).
 - **Secrets on disk** (`node.key`, `local_api_token`, `node_creds.pem`) are
   written 0600 under `data_dir`. Migration to OS keychain / DPAPI / secret
   service is a documented TODO (SPEC §A1.2).

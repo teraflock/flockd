@@ -1,6 +1,5 @@
-//go:build !darwin && !linux
+//go:build !darwin && !linux && !windows
 
 package memory
 
-// TODO(windows): GetProcessMemoryInfo PrivateUsage via x/sys/windows.
 func processFootprintBytes(int) (uint64, error) { return 0, ErrUnsupported }

@@ -50,14 +50,22 @@ func TestVRAMSamplerVendorGating(t *testing.T) {
 	before := calls
 	s.Sample(context.Background())
 	if calls != before {
-		t.Fatal("sampler kept calling nvidia-smi after ErrNoGPUTool")
+		t.Fatal("sampler kept querying after ErrNoGPUTool")
 	}
 
-	// Unified memory and CPU-only nodes never exec anything.
+	// AMD is measured through its own source (sysfs / rocm-smi).
+	amd := NewVRAMSampler(&typesv1.CapabilityProfile{RamTotalMb: 16384, Gpus: []*typesv1.GpuInfo{{Vendor: "amd", VramMb: 16384}}}, quiet)
+	amd.Query = func(context.Context) (int64, error) { return 321, nil }
+	if mb, ok := amd.Sample(context.Background()); !ok || mb != 321 {
+		t.Fatalf("amd sample = %d, %v", mb, ok)
+	}
+
+	// Unified memory, CPU-only and unmeasured-vendor nodes never exec
+	// anything.
 	for _, hw := range []*typesv1.CapabilityProfile{
 		{RamTotalMb: 65536, Gpus: []*typesv1.GpuInfo{{Vendor: "apple", VramMb: 65536, UnifiedMemory: true}}},
 		{RamTotalMb: 16384, Gpus: []*typesv1.GpuInfo{{Vendor: "none"}}},
-		{RamTotalMb: 16384, Gpus: []*typesv1.GpuInfo{{Vendor: "amd", VramMb: 16384}}}, // TODO(rocm-smi)
+		{RamTotalMb: 16384, Gpus: []*typesv1.GpuInfo{{Vendor: "intel", VramMb: 8192}}},
 	} {
 		s := NewVRAMSampler(hw, quiet)
 		s.Query = func(context.Context) (int64, error) { t.Fatal("query called"); return 0, nil }
@@ -71,5 +79,15 @@ func TestNvidiaVRAMUsedMBWithoutTool(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	if _, err := NvidiaVRAMUsedMB(context.Background()); !errors.Is(err, ErrNoGPUTool) {
 		t.Fatalf("err = %v, want ErrNoGPUTool", err)
+	}
+}
+
+func TestVRAMSamplerDefaultQueryFollowsVendor(t *testing.T) {
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	for vendor, want := range map[string]bool{"nvidia": true, "amd": true, "intel": false, "none": false} {
+		s := NewVRAMSampler(&typesv1.CapabilityProfile{RamTotalMb: 16384, Gpus: []*typesv1.GpuInfo{{Vendor: vendor, VramMb: 8192}}}, quiet)
+		if got := s.Query != nil; got != want {
+			t.Errorf("%s: default query set = %v, want %v", vendor, got, want)
+		}
 	}
 }

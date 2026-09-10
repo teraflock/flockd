@@ -1,0 +1,1 @@
+rocm-smi: error: unrecognized arguments: --json

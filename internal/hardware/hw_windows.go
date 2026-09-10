@@ -30,7 +30,8 @@ import (
 //     PowerShell/CIM, so the admin console can see the card. AdapterRAM
 //     is a 32-bit field (caps at 4 GB) and unreliable for discrete cards,
 //     so those report VramMb 0 and no accel: they stay on the CPU lane
-//     until a Windows vulkan lane exists. AMD VRAM sampling is flockd#16.
+//     until a Windows vulkan lane exists. AMD VRAM is not sampled on
+//     Windows either (no rocm-smi / sysfs there; flockd#16 covers Linux).
 var (
 	kernel32                 = windows.NewLazySystemDLL("kernel32.dll")
 	procGlobalMemoryStatusEx = kernel32.NewProc("GlobalMemoryStatusEx")

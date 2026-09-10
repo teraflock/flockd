@@ -50,8 +50,9 @@ type MemorySnapshot struct {
 	// platform supports it, else the estimate) — the heartbeat's
 	// ram_used_mb. Equal to UsedMB on unified memory.
 	HostMB int64
-	// VRAMMB is the last nvidia-smi sample (discrete GPUs); VRAMMeasured
-	// is false when no sample exists and callers fall back to UsedMB.
+	// VRAMMB is the last card sample (nvidia-smi, or amdgpu sysfs /
+	// rocm-smi; discrete GPUs); VRAMMeasured is false when no sample
+	// exists and callers fall back to UsedMB.
 	VRAMMB       int64
 	VRAMMeasured bool
 	// Models is the per-model footprint (measured when available, else the
@@ -102,8 +103,8 @@ func (s *Service) Memory() MemorySnapshot {
 // footprintLocked is a loaded model's current charge against the budget:
 // the measured footprint once one exists, else the pre-load estimate. On
 // discrete GPUs the host-side measurement misses VRAM, so the per-model
-// figure stays the estimate; the card-wide nvidia-smi sample replaces the
-// sum in usedLocked instead.
+// figure stays the estimate; the card-wide VRAM sample replaces the sum
+// in usedLocked instead.
 func (s *Service) footprintLocked(id string) int64 {
 	li, ok := s.loads[id]
 	if !ok {
@@ -240,10 +241,11 @@ func (s *Service) admit(ctx context.Context, id string, estimateMB int64) error 
 }
 
 // Measure samples every loaded runtime's footprint and replaces the
-// estimates. Cheap on macOS/Linux (one syscall / one procfs read per
-// process, inside Instance.Health). On a discrete GPU it also takes one
-// nvidia-smi sample of used VRAM (≤ 1 call per housekeeping tick, 3 s
-// timeout; a failure keeps the previous figure or the estimates).
+// estimates. Cheap on macOS/Linux/Windows (one syscall / one procfs read
+// per process, inside Instance.Health). On a discrete GPU it also takes
+// one sample of used VRAM (nvidia-smi, or amdgpu sysfs / rocm-smi; ≤ 1
+// call per housekeeping tick, 3 s timeout; a failure keeps the previous
+// figure or the estimates).
 func (s *Service) Measure(ctx context.Context) {
 	for _, m := range s.Eng.Models() {
 		hctx, cancel := context.WithTimeout(ctx, 3*time.Second)

@@ -15,17 +15,22 @@ import (
 )
 
 // Discrete GPUs keep the weights in VRAM, which the host-side footprint
-// (proc_pid_rusage / smaps_rollup) cannot see. On NVIDIA cards nvidia-smi
-// reports the card's used memory, so the daemon samples it — at most once
-// per housekeeping tick, with a short timeout — and charges admission and
-// the heartbeat's vram_used_mb with the measurement instead of the
-// pre-load estimate. The figure is card-wide (compositor, other apps,
-// every llama-server on the box), which is the conservative side for
-// admission. AMD (rocm-smi) is a TODO; Windows host footprints stay
-// estimates, but nvidia-smi works there too when it is on PATH.
+// (proc_pid_rusage / smaps_rollup / GetProcessMemoryInfo) cannot see. The
+// daemon therefore samples the card's used memory — at most once per
+// housekeeping tick, with a short timeout — and charges admission and the
+// heartbeat's vram_used_mb with the measurement instead of the pre-load
+// estimate. The figure is card-wide (compositor, other apps, every
+// llama-server on the box), which is the conservative side for admission.
+//
+//   - NVIDIA: nvidia-smi --query-gpu=memory.used (Linux and Windows).
+//   - AMD: sysfs mem_info_vram_used, else rocm-smi --showmeminfo vram
+//     (Linux only; see vram_amd.go).
+//
+// Other vendors keep their estimates.
 
-// ErrNoGPUTool means no VRAM query tool (nvidia-smi) is on PATH.
-var ErrNoGPUTool = errors.New("memory: no VRAM query tool on PATH")
+// ErrNoGPUTool means no VRAM source for this node's GPU vendor is
+// available (nvidia-smi / rocm-smi not on PATH, no amdgpu sysfs).
+var ErrNoGPUTool = errors.New("memory: no VRAM query tool available")
 
 // nvidiaSMITimeout bounds one nvidia-smi call: a wedged driver must not
 // stall housekeeping.
@@ -76,13 +81,27 @@ func parseNvidiaSMIMemoryUsed(out string) (int64, error) {
 	return total, nil
 }
 
+// vramQuery is the used-VRAM source for a discrete GPU vendor, or nil when
+// the vendor is not measured.
+func vramQuery(vendor string) func(context.Context) (int64, error) {
+	switch vendor {
+	case "nvidia":
+		return NvidiaVRAMUsedMB
+	case "amd":
+		return AMDVRAMUsedMB
+	}
+	return nil
+}
+
 // VRAMSampler measures used VRAM on nodes where that is possible: a
-// discrete NVIDIA GPU with nvidia-smi on PATH. Elsewhere Sample reports
-// no measurement (once-logged) and callers keep their estimates.
+// discrete NVIDIA or AMD GPU with its query source available. Elsewhere
+// Sample reports no measurement (once-logged) and callers keep their
+// estimates.
 type VRAMSampler struct {
 	hw  *typesv1.CapabilityProfile
 	log *slog.Logger
-	// Query runs the tool (NvidiaVRAMUsedMB); tests substitute it.
+	// Query runs the vendor's source (NvidiaVRAMUsedMB / AMDVRAMUsedMB);
+	// tests substitute it.
 	Query func(context.Context) (int64, error)
 
 	mu       sync.Mutex
@@ -92,7 +111,9 @@ type VRAMSampler struct {
 
 // NewVRAMSampler builds a sampler for the node's hardware.
 func NewVRAMSampler(hw *typesv1.CapabilityProfile, log *slog.Logger) *VRAMSampler {
-	return &VRAMSampler{hw: hw, log: log, Query: NvidiaVRAMUsedMB}
+	s := &VRAMSampler{hw: hw, log: log}
+	s.Query = vramQuery(s.Vendor())
+	return s
 }
 
 // Vendor is the discrete GPU vendor a sampler would measure ("nvidia",
@@ -118,14 +139,12 @@ func (s *VRAMSampler) Sample(ctx context.Context) (mb int64, ok bool) {
 	if s.disabled {
 		return 0, false
 	}
-	switch v := s.Vendor(); v {
-	case "nvidia":
-	case "":
+	v := s.Vendor()
+	switch {
+	case v == "":
 		s.disabled = true
 		return 0, false
-	default:
-		// TODO(rocm-smi): `rocm-smi --showmemuse --csv` for AMD. Until
-		// then admission on AMD cards uses the pre-load estimate.
+	case vramQuery(v) == nil || s.Query == nil:
 		s.disabled = true
 		s.logger().Info("VRAM measurement not implemented for this GPU vendor; memory admission uses estimates", "vendor", v)
 		return 0, false
@@ -134,18 +153,29 @@ func (s *VRAMSampler) Sample(ctx context.Context) (mb int64, ok bool) {
 	if err != nil {
 		if errors.Is(err, ErrNoGPUTool) {
 			s.disabled = true
-			s.logger().Info("nvidia-smi not on PATH; VRAM admission uses estimates")
+			s.logger().Info("no VRAM source for this GPU; VRAM admission uses estimates", "vendor", v, "sources", vramSources(v))
 			return 0, false
 		}
 		if !s.warned {
 			s.warned = true
-			s.logger().Warn("VRAM sample failed; keeping the estimate (further failures logged at debug)", "err", err)
+			s.logger().Warn("VRAM sample failed; keeping the estimate (further failures logged at debug)", "vendor", v, "err", err)
 		} else {
-			s.logger().Debug("VRAM sample failed", "err", err)
+			s.logger().Debug("VRAM sample failed", "vendor", v, "err", err)
 		}
 		return 0, false
 	}
 	return mb, true
+}
+
+// vramSources names what Sample looked for, for the once-logged hint.
+func vramSources(vendor string) string {
+	switch vendor {
+	case "nvidia":
+		return "nvidia-smi on PATH"
+	case "amd":
+		return "amdgpu sysfs (mem_info_vram_used) or rocm-smi on PATH"
+	}
+	return ""
 }
 
 func (s *VRAMSampler) logger() *slog.Logger {

@@ -52,7 +52,7 @@ func TestAutoBudget(t *testing.T) {
 func TestProcessFootprintSelf(t *testing.T) {
 	mb, err := ProcessFootprintMB(os.Getpid())
 	switch runtime.GOOS {
-	case "darwin", "linux":
+	case "darwin", "linux", "windows":
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -68,7 +68,7 @@ func TestProcessFootprintSelf(t *testing.T) {
 			t.Fatal("expected ErrUnsupported")
 		}
 	}
-	if _, err := ProcessFootprintMB(-1); err == nil && runtime.GOOS != "windows" {
+	if _, err := ProcessFootprintMB(-1); err == nil {
 		t.Fatal("bogus pid measured without error")
 	}
 }

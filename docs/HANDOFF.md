@@ -146,16 +146,16 @@ proves the end-to-end standalone path.
    daemon-owned `<data_dir>/limits.toml` overlay (config.toml untouched).
 4. **Keychain**: move `node.key` and `local_api_token` to
    Keychain/DPAPI/secret-service (files are 0600 today, documented).
-5. **Windows**: GetProcessMemoryInfo footprint (flockd#16); an SCM
-   session-0 mode for headless servers needs a session-aware idle source
-   first. (Idle source, hardware detection, battery, job-object child
-   management, logon-task service management: DONE — end-to-end on a real
-   Windows box is still pending the Windows runtime artifact.)
+5. **Windows**: an SCM session-0 mode for headless servers needs a
+   session-aware idle source first. (Idle source, hardware detection,
+   battery, job-object child management, logon-task service management,
+   GetProcessMemoryInfo footprint: DONE — end-to-end on a real Windows box
+   is still pending the Windows runtime artifact.)
 6. **Governor extras**: foreground-GPU-usage signal, screen-lock signal
    (macOS `CGSession`, logind `LockedHint`).
-7. **VRAM on AMD**: NVIDIA is measured with `nvidia-smi` (see "Memory
-   admission"); `rocm-smi --showmemuse` for AMD is the remaining TODO —
-   the estimate is kept there with a one-time log line.
+7. **VRAM on AMD**: DONE (flockd#16) — amdgpu sysfs `mem_info_vram_used`
+   first, `rocm-smi --showmeminfo vram --json` as the fallback; fixture
+   tests only, no AMD box has run it yet.
 8. **SSE auth for EventSource**: browsers can't set headers on
    EventSource; support `?token=` query param (constant-time compare) or
    cookie for `/api/v1/events` so the React dash can use SSE instead of
@@ -190,8 +190,9 @@ what is loaded versus merely on disk.
   cards, failures keep the previous figure); that card-wide sample — plus
   the estimate of any model loaded since it — is what admission charges
   and what the heartbeat's `vram_used_mb` carries, while `ram_used_mb` is
-  the host footprint. AMD is `TODO(rocm-smi)` (one log line, estimates
-  stay); no tool on PATH is also one log line.
+  the host footprint. AMD goes through `AMDVRAMUsedMB` (amdgpu sysfs,
+  then `rocm-smi --showmeminfo vram`); no source available is one log line
+  and the estimates stay.
 - **Admission** (`modelops.LoadInstanceOrigin`): download first (inside
   `max_disk_mb`), then, under `admitMu`, if `used + estimate > budget`
   unload idle instances — mesh-placed before operator-placed (the *store's*
