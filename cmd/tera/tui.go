@@ -501,12 +501,33 @@ func (m *dashModel) View() string {
 			st.Inflight, st.Stats.TotalRequests, st.Stats.RequestsPerMin)))
 	throughput := dashPanel.Width(46).Render(dashHeader.Render("THROUGHPUT") + "\n" + tp)
 
-	// Earnings ticker panel.
-	ep := fmt.Sprintf("%s %s\n%s\n%s",
-		dashBig.Render(fmt.Sprintf("$%.6f", m.earn.EstUsd)),
-		dashLabel.Render("earned"),
-		dashLabel.Render(fmt.Sprintf("%.4f credits · est $%.4f/day", m.earn.EarnedCredits, m.earn.EstUsdPerDay)),
-		dashLabel.Render(fmt.Sprintf("lifetime tokens %d", m.earn.LifetimeTokens)))
+	// Earnings ticker panel: the ledger's settled/pending split for an
+	// enrolled node, the labelled estimate otherwise.
+	var ep string
+	if m.earn.Source == gen.Ledger {
+		perUSD := 1e6
+		if m.earn.CreditsPerUsd != nil && *m.earn.CreditsPerUsd > 0 {
+			perUSD = float64(*m.earn.CreditsPerUsd)
+		}
+		settled, pending := int64(0), int64(0)
+		if m.earn.SettledCredits != nil {
+			settled = *m.earn.SettledCredits
+		}
+		if m.earn.PendingCredits != nil {
+			pending = *m.earn.PendingCredits
+		}
+		ep = fmt.Sprintf("%s %s\n%s\n%s",
+			dashBig.Render(fmt.Sprintf("$%.4f", m.earn.EstUsd)),
+			dashLabel.Render("your account · ledger"),
+			dashLabel.Render(fmt.Sprintf("settled $%.4f · pending $%.4f", float64(settled)/perUSD, float64(pending)/perUSD)),
+			dashLabel.Render(fmt.Sprintf("est $%.4f/day · lifetime tokens %d", m.earn.EstUsdPerDay, m.earn.LifetimeTokens)))
+	} else {
+		ep = fmt.Sprintf("%s %s\n%s\n%s",
+			dashBig.Render(fmt.Sprintf("$%.6f", m.earn.EstUsd)),
+			dashLabel.Render("earned · estimated"),
+			dashLabel.Render(fmt.Sprintf("%.4f credits · est $%.4f/day", m.earn.EarnedCredits, m.earn.EstUsdPerDay)),
+			dashLabel.Render(fmt.Sprintf("lifetime tokens %d", m.earn.LifetimeTokens)))
+	}
 	earnings := dashPanel.Width(40).Render(dashHeader.Render("EARNINGS") + "\n" + ep)
 
 	// Hardware panel.

@@ -349,6 +349,81 @@ func TestEarningsEndpoint(t *testing.T) {
 	if !strings.Contains(e.Note, "simulated") {
 		t.Error("earnings must be honest about being simulated")
 	}
+	if e.Source != gen.Estimated {
+		t.Errorf("source = %q, want estimated", e.Source)
+	}
+}
+
+// An enrolled node with a fresh coordinator snapshot reports the ledger:
+// the operator account's settled/pending split at the snapshot's peg, this
+// node's own token count, and no "simulated" label. A stale snapshot
+// falls back to the labelled estimate.
+func TestEarningsLedgerSource(t *testing.T) {
+	asOf := time.Date(2026, 9, 9, 15, 4, 5, 0, time.UTC)
+	vest := asOf.Add(7 * 24 * time.Hour)
+	le := LedgerEarnings{
+		Settled: 12_000_000, Pending: 3_500_000,
+		EarnedToday: 700_000, Earned7d: 3_500_000, Lifetime: 15_500_000,
+		CreditsPerUSD: 1_000_000, AsOf: asOf, NextVestAt: vest,
+		ReceivedAt: time.Now(), PushInterval: 300 * time.Second,
+	}
+	newSrv := func(t *testing.T, le LedgerEarnings) *httptest.Server {
+		t.Helper()
+		eng := engine.New(servingGovernor(t), nil, nil)
+		inst, err := rt.NewMockRuntime(0).Load(context.Background(), rt.ModelSpec{ID: "mock-8b-instruct"}, rt.ResourceBudget{MaxConcurrent: 4})
+		if err != nil {
+			t.Fatal(err)
+		}
+		eng.Register(rt.ModelSpec{ID: "mock-8b-instruct"}, inst)
+		s := New(Deps{
+			Engine: eng, Log: quietLog(), NodeID: "node-test", Version: "test", Token: testToken,
+			Mesh:     func() MeshStatus { return MeshStatus{Enrolled: true, NodeID: "node-test"} },
+			Earnings: func() (LedgerEarnings, bool) { return le, true },
+		})
+		srv := httptest.NewServer(s.Handler())
+		t.Cleanup(srv.Close)
+		return srv
+	}
+	get := func(t *testing.T, srv *httptest.Server) gen.Earnings {
+		t.Helper()
+		resp := apiGet(t, srv, "/api/v1/earnings")
+		defer resp.Body.Close()
+		var e gen.Earnings
+		if err := json.NewDecoder(resp.Body).Decode(&e); err != nil {
+			t.Fatal(err)
+		}
+		return e
+	}
+
+	e := get(t, newSrv(t, le))
+	if e.Source != gen.Ledger || strings.Contains(e.Note, "simulated") {
+		t.Fatalf("source=%q note=%q", e.Source, e.Note)
+	}
+	if e.SettledCredits == nil || *e.SettledCredits != 12_000_000 || e.PendingCredits == nil || *e.PendingCredits != 3_500_000 ||
+		e.EarnedTodayCredits == nil || *e.EarnedTodayCredits != 700_000 || e.Earned7dCredits == nil || *e.Earned7dCredits != 3_500_000 ||
+		e.LifetimePayoutCredits == nil || *e.LifetimePayoutCredits != 15_500_000 || e.CreditsPerUsd == nil || *e.CreditsPerUsd != 1_000_000 {
+		t.Fatalf("ledger fields = %+v", e)
+	}
+	if e.EarnedMicrocredits != 15_500_000 || e.EarnedCredits != 15.5 || e.EstUsd != 15.5 || e.EscrowCredits != 3.5 {
+		t.Fatalf("legacy fields = micro %d credits %v usd %v escrow %v", e.EarnedMicrocredits, e.EarnedCredits, e.EstUsd, e.EscrowCredits)
+	}
+	if want := 3.5 / 7; e.EstUsdPerDay != want {
+		t.Fatalf("est/day = %v, want %v", e.EstUsdPerDay, want)
+	}
+	if e.AsOf == nil || !e.AsOf.Equal(asOf) || e.NextVestAt == nil || !e.NextVestAt.Equal(vest) {
+		t.Fatalf("timestamps = %v / %v", e.AsOf, e.NextVestAt)
+	}
+	if e.LifetimeTokens != 0 {
+		t.Fatalf("lifetime tokens = %d, want this node's own count (0)", e.LifetimeTokens)
+	}
+
+	// Two intervals without a push: back to the estimate, and honest.
+	stale := le
+	stale.ReceivedAt = time.Now().Add(-11 * time.Minute)
+	e = get(t, newSrv(t, stale))
+	if e.Source != gen.Estimated || !strings.Contains(e.Note, "simulated") || !strings.Contains(e.Note, "stale") || e.SettledCredits != nil {
+		t.Fatalf("stale snapshot: source=%q note=%q settled=%v", e.Source, e.Note, e.SettledCredits)
+	}
 }
 
 func TestEventsSSETicker(t *testing.T) {

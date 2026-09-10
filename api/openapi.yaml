@@ -202,7 +202,7 @@ paths:
     get:
       tags: [management]
       operationId: getEarnings
-      summary: Node earnings (simulated until enrolled with a real ledger)
+      summary: Earnings (ledger-backed when enrolled, else a labelled estimate)
       responses:
         "200":
           description: Earnings snapshot.
@@ -817,15 +817,64 @@ components:
 
     Earnings:
       type: object
+      description: >-
+        Earnings as this node knows them. `source: ledger` — the figures are
+        the operator account's ledger position, pushed by the coordinator
+        over the tunnel (every node of the operator together; settled =
+        vested and redeemable, pending = in escrow until the canary window
+        clears). `source: estimated` — no fresh ledger snapshot (standalone,
+        not enrolled, or the tunnel has been down for two push intervals):
+        a simulated figure from this node's own counters, labelled in
+        `note`. The `*_credits` integer fields are ledger credits at
+        `credits_per_usd`; the legacy `earned_credits` / `escrow_credits`
+        doubles are those divided by 1e6.
       required:
-        [earned_microcredits, earned_credits, est_usd, est_usd_per_day,
+        [source, earned_microcredits, earned_credits, est_usd, est_usd_per_day,
          lifetime_tokens, escrow_credits, note]
       properties:
+        source:
+          type: string
+          enum: [ledger, estimated]
+        as_of:
+          type: string
+          format: date-time
+          description: When the coordinator read the ledger (ledger only).
+        settled_credits:
+          type: integer
+          format: int64
+          description: Vested, redeemable balance (ledger only).
+        pending_credits:
+          type: integer
+          format: int64
+          description: In escrow, vesting after the canary window (ledger only).
+        earned_today_credits:
+          type: integer
+          format: int64
+          description: Payout credits earned since 00:00 UTC (ledger only).
+        earned_7d_credits:
+          type: integer
+          format: int64
+          description: Payout credits earned in the trailing seven days (ledger only).
+        lifetime_payout_credits:
+          type: integer
+          format: int64
+          description: Payout credits earned since the account opened (ledger only).
+        credits_per_usd:
+          type: integer
+          format: int64
+          description: The coordinator's peg; dollars are credits divided by this (ledger only).
+        next_vest_at:
+          type: string
+          format: date-time
+          description: When the oldest pending lot vests; absent with nothing pending.
         earned_microcredits: { type: integer, format: int64 }
         earned_credits: { type: number, format: double }
         est_usd: { type: number, format: double }
         est_usd_per_day: { type: number, format: double }
-        lifetime_tokens: { type: integer, format: int64 }
+        lifetime_tokens:
+          type: integer
+          format: int64
+          description: Always this node's own count, whatever the source.
         escrow_credits: { type: number, format: double }
         note: { type: string }
 

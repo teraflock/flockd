@@ -320,6 +320,26 @@ func (c *Coordinator) PushConfig(cu *tunnelv1.ConfigUpdate) error {
 	return sess.send(&tunnelv1.CoordinatorMessage{Msg: &tunnelv1.CoordinatorMessage_Config{Config: cu}})
 }
 
+// PushEarnings sends an EarningsSnapshot down the session.
+func (c *Coordinator) PushEarnings(es *tunnelv1.EarningsSnapshot) error {
+	sess, err := c.sessionOrErr()
+	if err != nil {
+		return err
+	}
+	return sess.send(&tunnelv1.CoordinatorMessage{Msg: &tunnelv1.CoordinatorMessage_Earnings{Earnings: es}})
+}
+
+// PushRaw sends an arbitrary CoordinatorMessage down the session — one
+// carrying unknown fields, say, to prove the daemon drops what it does
+// not understand.
+func (c *Coordinator) PushRaw(m *tunnelv1.CoordinatorMessage) error {
+	sess, err := c.sessionOrErr()
+	if err != nil {
+		return err
+	}
+	return sess.send(m)
+}
+
 // Heartbeats returns all heartbeats received so far.
 func (c *Coordinator) Heartbeats() []*tunnelv1.Heartbeat {
 	c.mu.Lock()

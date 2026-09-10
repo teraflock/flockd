@@ -20,6 +20,7 @@ import (
 	"github.com/teraflock/flockd/internal/enroll"
 	"github.com/teraflock/flockd/internal/hardware"
 	"github.com/teraflock/flockd/internal/localapi/client"
+	"github.com/teraflock/flockd/internal/localapi/gen"
 	"github.com/teraflock/flockd/internal/runtime/llamacpp"
 	"github.com/teraflock/flockd/internal/svc"
 )
@@ -559,16 +560,47 @@ func cmdEarnings() *cobra.Command {
 				return err
 			}
 			fmt.Println(styleTitle.Render("Earnings"))
-			fmt.Printf("  credits          %.6f\n", e.EarnedCredits)
-			fmt.Printf("  est USD          $%.6f\n", e.EstUsd)
-			fmt.Printf("  est USD/day      $%.4f\n", e.EstUsdPerDay)
-			fmt.Printf("  lifetime tokens  %d\n", e.LifetimeTokens)
+			if e.Source == gen.Ledger {
+				// Ledger-backed: the operator account's position, in the
+				// coordinator's credits at its own peg.
+				perUSD := float64(deref(e.CreditsPerUsd))
+				if perUSD <= 0 {
+					perUSD = 1e6
+				}
+				fmt.Printf("  source           ledger (your account, all nodes)\n")
+				fmt.Printf("  settled          %d credits  $%.4f  (vested, redeemable)\n", deref(e.SettledCredits), float64(deref(e.SettledCredits))/perUSD)
+				fmt.Printf("  pending          %d credits  $%.4f  (in escrow)\n", deref(e.PendingCredits), float64(deref(e.PendingCredits))/perUSD)
+				fmt.Printf("  earned today     %d credits  $%.4f\n", deref(e.EarnedTodayCredits), float64(deref(e.EarnedTodayCredits))/perUSD)
+				fmt.Printf("  earned 7 days    %d credits  $%.4f  (est $%.4f/day)\n", deref(e.Earned7dCredits), float64(deref(e.Earned7dCredits))/perUSD, e.EstUsdPerDay)
+				fmt.Printf("  lifetime payout  %d credits  $%.4f\n", deref(e.LifetimePayoutCredits), float64(deref(e.LifetimePayoutCredits))/perUSD)
+				if e.NextVestAt != nil {
+					fmt.Printf("  next vest        %s\n", e.NextVestAt.Local().Format(time.RFC1123))
+				}
+				fmt.Printf("  lifetime tokens  %d  (this node)\n", e.LifetimeTokens)
+				if e.AsOf != nil {
+					fmt.Println(styleDim.Render("  as of " + e.AsOf.Local().Format(time.RFC1123)))
+				}
+			} else {
+				fmt.Printf("  source           estimated\n")
+				fmt.Printf("  credits          %.6f\n", e.EarnedCredits)
+				fmt.Printf("  est USD          $%.6f\n", e.EstUsd)
+				fmt.Printf("  est USD/day      $%.4f\n", e.EstUsdPerDay)
+				fmt.Printf("  lifetime tokens  %d\n", e.LifetimeTokens)
+			}
 			if e.Note != "" {
 				fmt.Println(styleDim.Render("  note: " + e.Note))
 			}
 			return nil
 		},
 	}
+}
+
+// deref reads an optional int64 field as 0 when absent.
+func deref(p *int64) int64 {
+	if p == nil {
+		return 0
+	}
+	return *p
 }
 
 // defaultRedeemURL is the customer console's redeem page (app.teraflock.com,

@@ -62,6 +62,9 @@ type Options struct {
 	// OnConfigUpdate observes coordinator ConfigUpdates after the client
 	// has applied what it owns (heartbeat cadence, concurrency cap).
 	OnConfigUpdate func(cu *tunnelv1.ConfigUpdate)
+	// OnEarnings observes each EarningsSnapshot after the client has
+	// cached it (Earnings). May be nil.
+	OnEarnings func(es *tunnelv1.EarningsSnapshot)
 	// Releases receives the coordinator's release channel
 	// (ConfigUpdate.latest_version / minimum_version / release_url) as the
 	// authoritative version source. *update.Checker satisfies it. May be
@@ -98,6 +101,41 @@ type Client struct {
 	coordCap int
 	// hbSet delivers a new heartbeat interval to the running loop.
 	hbSet chan time.Duration
+	// earnings is the newest ledger snapshot the coordinator pushed and
+	// when it arrived; kept across reconnects (the figure does not
+	// become wrong because the tunnel blipped — only stale).
+	earnings EarningsState
+}
+
+// EarningsState is the last EarningsSnapshot pushed by the coordinator
+// (the operator account's ledger position, docs#24) and the local time it
+// arrived, which is what its freshness is judged from: the snapshot's own
+// as_of is the coordinator's clock.
+type EarningsState struct {
+	Snapshot   *tunnelv1.EarningsSnapshot
+	ReceivedAt time.Time
+}
+
+// Fresh reports whether the snapshot is younger than two push intervals
+// at now — the daemon shows ledger figures only while that holds and
+// falls back to its labelled estimate otherwise.
+func (e EarningsState) Fresh(now time.Time) bool {
+	if e.Snapshot == nil {
+		return false
+	}
+	interval := time.Duration(e.Snapshot.GetPushIntervalSeconds()) * time.Second
+	if interval <= 0 {
+		interval = 5 * time.Minute
+	}
+	return now.Sub(e.ReceivedAt) < 2*interval
+}
+
+// Earnings returns the last ledger snapshot; ok is false before the first
+// one arrives (a fresh enrollment, or a coordinator that predates it).
+func (c *Client) Earnings() (EarningsState, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.earnings, c.earnings.Snapshot != nil
 }
 
 // NewClient validates options and builds a client.
@@ -349,8 +387,28 @@ func (c *Client) handle(ctx context.Context, ss *sessionStream, msg *tunnelv1.Co
 		c.mu.Unlock()
 	case *tunnelv1.CoordinatorMessage_Config:
 		c.applyConfig(m.Config)
+	case *tunnelv1.CoordinatorMessage_Earnings:
+		c.applyEarnings(m.Earnings)
 	case *tunnelv1.CoordinatorMessage_HelloAck:
 		// Duplicate ack: ignore.
+	case nil:
+		// Forward compatibility: a oneof member this build does not know
+		// (a newer coordinator) is kept in the message's unknown fields
+		// and GetMsg() is nil. Dropped, session intact — this is what lets
+		// the coordinator add messages without a flag day for daemons.
+		c.o.Log.Debug("ignoring unknown coordinator message")
+	}
+}
+
+// applyEarnings caches a pushed ledger snapshot for the local API.
+func (c *Client) applyEarnings(es *tunnelv1.EarningsSnapshot) {
+	c.mu.Lock()
+	c.earnings = EarningsState{Snapshot: es, ReceivedAt: time.Now()}
+	c.mu.Unlock()
+	c.o.Log.Debug("earnings snapshot received", "available", es.GetAvailableCredits(),
+		"escrow", es.GetEscrowCredits(), "lifetime", es.GetLifetimePayoutCredits())
+	if c.o.OnEarnings != nil {
+		c.o.OnEarnings(es)
 	}
 }
 

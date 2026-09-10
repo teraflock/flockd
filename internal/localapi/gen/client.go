@@ -102,7 +102,7 @@ type ClientInterface interface {
 	// Corresponds with GET /api/v1/catalog (the `GetCatalog` operationId).
 	GetCatalog(ctx context.Context, params *GetCatalogParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// GetEarnings Node earnings (simulated until enrolled with a real ledger)
+	// GetEarnings Earnings (ledger-backed when enrolled, else a labelled estimate)
 	//
 	// Corresponds with GET /api/v1/earnings (the `GetEarnings` operationId).
 	GetEarnings(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -258,7 +258,7 @@ func (c *Client) GetCatalog(ctx context.Context, params *GetCatalogParams, reqEd
 	return c.Client.Do(req)
 }
 
-// GetEarnings Node earnings (simulated until enrolled with a real ledger)
+// GetEarnings Earnings (ledger-backed when enrolled, else a labelled estimate)
 //
 // Corresponds with GET /api/v1/earnings (the `GetEarnings` operationId).
 func (c *Client) GetEarnings(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -1271,7 +1271,7 @@ type ClientWithResponsesInterface interface {
 	// Corresponds with GET /api/v1/catalog (the `GetCatalog` operationId).
 	GetCatalogWithResponse(ctx context.Context, params *GetCatalogParams, reqEditors ...RequestEditorFn) (*GetCatalogResponse, error)
 
-	// GetEarningsWithResponse Node earnings (simulated until enrolled with a real ledger)
+	// GetEarningsWithResponse Earnings (ledger-backed when enrolled, else a labelled estimate)
 	//
 	// Returns a wrapper object for the known response body format(s).
 	//
@@ -2495,7 +2495,7 @@ func (c *ClientWithResponses) GetCatalogWithResponse(ctx context.Context, params
 	return ParseGetCatalogResponse(rsp)
 }
 
-// GetEarningsWithResponse Node earnings (simulated until enrolled with a real ledger)
+// GetEarningsWithResponse Earnings (ledger-backed when enrolled, else a labelled estimate)
 //
 // Returns a wrapper object for the known response body format(s).
 //

@@ -323,26 +323,91 @@ func (s *Server) DeleteModel(w http.ResponseWriter, r *http.Request, id gen.Mode
 
 // ---- earnings ----
 
-// GetEarnings implements gen.ServerInterface. Standalone/demo accounting
-// until the ledger exists (Phase 2); numbers are honest simulations,
-// labelled as such.
+// Earnings notes. The estimate's note must keep saying "simulated" —
+// the honesty test pins it, and the desktop shows it as a warning.
+const (
+	noteSimulated = "simulated standalone earnings; real accrual starts when the node is enrolled with a coordinator (Phase 2 ledger)"
+	noteStale     = "estimated from this node's own counters: the last ledger snapshot from the coordinator is stale (tunnel down?), so these are simulated figures until it reconnects"
+	noteLedger    = "your operator account's ledger position across all its nodes: settled credits are vested and redeemable, pending credits are in escrow until the canary window clears"
+)
+
+// GetEarnings implements gen.ServerInterface. Ledger-backed when the
+// coordinator has pushed a fresh EarningsSnapshot over the tunnel
+// (docs#24): the operator account's settled/pending position, at the
+// coordinator's credits_per_usd peg. Otherwise — standalone, not
+// enrolled, or the tunnel has been down for two push intervals — the
+// local estimate from this node's own counters, labelled simulated.
 func (s *Server) GetEarnings(w http.ResponseWriter, _ *http.Request) {
 	snap := s.deps.Engine.Stats().Snapshot()
+	if !s.deps.Standalone && s.deps.Earnings != nil {
+		if le, ok := s.deps.Earnings(); ok && le.Fresh(time.Now()) {
+			writeJSON(w, http.StatusOK, ledgerEarnings(le, snap.TotalTokens))
+			return
+		} else if ok {
+			writeJSON(w, http.StatusOK, estimatedEarnings(snap, s.start, noteStale))
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, estimatedEarnings(snap, s.start, noteSimulated))
+}
+
+// estimatedEarnings is the pre-ledger accounting: the daemon's own
+// per-token counter, where a local "microcredit" is $0.000001 — the same
+// unit as one ledger credit — so credits here read as dollars.
+func estimatedEarnings(snap telemetry.Snapshot, start time.Time, note string) gen.Earnings {
 	credits := float64(snap.EarnedMicrocred) / 1e6
 	usd := credits * 0.000001 * 1e6 // 1 credit = $0.000001 peg (SPEC §4.5)
-	uptime := time.Since(s.start).Hours()
+	uptime := time.Since(start).Hours()
 	perDay := 0.0
 	if uptime > 0 {
 		perDay = usd / uptime * 24
 	}
-	writeJSON(w, http.StatusOK, gen.Earnings{
+	return gen.Earnings{
+		Source:             gen.Estimated,
 		EarnedMicrocredits: snap.EarnedMicrocred,
 		EarnedCredits:      credits,
 		EstUsd:             usd,
 		EstUsdPerDay:       perDay,
 		LifetimeTokens:     snap.TotalTokens,
-		Note:               "simulated standalone earnings; real accrual starts when the node is enrolled with a coordinator (Phase 2 ledger)",
-	})
+		Note:               note,
+	}
+}
+
+// ledgerEarnings renders a fresh coordinator snapshot. Ledger credits are
+// the micro unit ($0.000001), so they fill earned_microcredits directly
+// and the legacy credit fields keep their /1e6 relationship; dollars come
+// only from the snapshot's own peg. Lifetime tokens stay this node's own.
+func ledgerEarnings(le LedgerEarnings, lifetimeTokens int64) gen.Earnings {
+	perUSD := float64(le.CreditsPerUSD)
+	if perUSD <= 0 {
+		perUSD = 1e6
+	}
+	balance := le.Settled + le.Pending
+	e := gen.Earnings{
+		Source:                gen.Ledger,
+		EarnedMicrocredits:    balance,
+		EarnedCredits:         float64(balance) / 1e6,
+		EstUsd:                float64(balance) / perUSD,
+		EstUsdPerDay:          float64(le.Earned7d) / 7 / perUSD,
+		LifetimeTokens:        lifetimeTokens,
+		EscrowCredits:         float64(le.Pending) / 1e6,
+		Note:                  noteLedger,
+		SettledCredits:        &le.Settled,
+		PendingCredits:        &le.Pending,
+		EarnedTodayCredits:    &le.EarnedToday,
+		Earned7dCredits:       &le.Earned7d,
+		LifetimePayoutCredits: &le.Lifetime,
+		CreditsPerUsd:         &le.CreditsPerUSD,
+	}
+	if !le.AsOf.IsZero() {
+		t := le.AsOf
+		e.AsOf = &t
+	}
+	if !le.NextVestAt.IsZero() {
+		t := le.NextVestAt
+		e.NextVestAt = &t
+	}
+	return e
 }
 
 // ---- limits ----

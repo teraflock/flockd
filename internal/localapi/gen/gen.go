@@ -14,6 +14,24 @@ import (
 	"github.com/oapi-codegen/runtime"
 )
 
+// Defines values for EarningsSource.
+const (
+	Estimated EarningsSource = "estimated"
+	Ledger    EarningsSource = "ledger"
+)
+
+// Valid indicates whether the value is a known member of the EarningsSource enum.
+func (e EarningsSource) Valid() bool {
+	switch e {
+	case Estimated:
+		return true
+	case Ledger:
+		return true
+	default:
+		return false
+	}
+}
+
 // ActivityEvent defines model for ActivityEvent.
 type ActivityEvent struct {
 	// Actor mesh | operator | daemon
@@ -108,16 +126,45 @@ type DownloadStatus struct {
 	State string `json:"state"`
 }
 
-// Earnings defines model for Earnings.
+// Earnings Earnings as this node knows them. `source: ledger` — the figures are the operator account's ledger position, pushed by the coordinator over the tunnel (every node of the operator together; settled = vested and redeemable, pending = in escrow until the canary window clears). `source: estimated` — no fresh ledger snapshot (standalone, not enrolled, or the tunnel has been down for two push intervals): a simulated figure from this node's own counters, labelled in `note`. The `*_credits` integer fields are ledger credits at `credits_per_usd`; the legacy `earned_credits` / `escrow_credits` doubles are those divided by 1e6.
 type Earnings struct {
+	// AsOf When the coordinator read the ledger (ledger only).
+	AsOf *time.Time `json:"as_of,omitempty"`
+
+	// CreditsPerUsd The coordinator's peg; dollars are credits divided by this (ledger only).
+	CreditsPerUsd *int64 `json:"credits_per_usd,omitempty"`
+
+	// Earned7dCredits Payout credits earned in the trailing seven days (ledger only).
+	Earned7dCredits    *int64  `json:"earned_7d_credits,omitempty"`
 	EarnedCredits      float64 `json:"earned_credits"`
 	EarnedMicrocredits int64   `json:"earned_microcredits"`
+
+	// EarnedTodayCredits Payout credits earned since 00:00 UTC (ledger only).
+	EarnedTodayCredits *int64  `json:"earned_today_credits,omitempty"`
 	EscrowCredits      float64 `json:"escrow_credits"`
 	EstUsd             float64 `json:"est_usd"`
 	EstUsdPerDay       float64 `json:"est_usd_per_day"`
-	LifetimeTokens     int64   `json:"lifetime_tokens"`
-	Note               string  `json:"note"`
+
+	// LifetimePayoutCredits Payout credits earned since the account opened (ledger only).
+	LifetimePayoutCredits *int64 `json:"lifetime_payout_credits,omitempty"`
+
+	// LifetimeTokens Always this node's own count, whatever the source.
+	LifetimeTokens int64 `json:"lifetime_tokens"`
+
+	// NextVestAt When the oldest pending lot vests; absent with nothing pending.
+	NextVestAt *time.Time `json:"next_vest_at,omitempty"`
+	Note       string     `json:"note"`
+
+	// PendingCredits In escrow, vesting after the canary window (ledger only).
+	PendingCredits *int64 `json:"pending_credits,omitempty"`
+
+	// SettledCredits Vested, redeemable balance (ledger only).
+	SettledCredits *int64         `json:"settled_credits,omitempty"`
+	Source         EarningsSource `json:"source"`
 }
+
+// EarningsSource defines model for Earnings.Source.
+type EarningsSource string
 
 // EnrollRequest defines model for EnrollRequest.
 type EnrollRequest struct {
@@ -375,7 +422,7 @@ type ServerInterface interface {
 	// GetCatalog Model catalog merged with local state
 	// (GET /api/v1/catalog)
 	GetCatalog(w http.ResponseWriter, r *http.Request, params GetCatalogParams)
-	// GetEarnings Node earnings (simulated until enrolled with a real ledger)
+	// GetEarnings Earnings (ledger-backed when enrolled, else a labelled estimate)
 	// (GET /api/v1/earnings)
 	GetEarnings(w http.ResponseWriter, r *http.Request)
 	// EnrollNode Enroll (or re-enroll) this node with the coordinator

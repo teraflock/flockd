@@ -191,7 +191,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Node earnings (simulated until enrolled with a real ledger) */
+        /** Earnings (ledger-backed when enrolled, else a labelled estimate) */
         get: operations["getEarnings"];
         put?: never;
         post?: never;
@@ -259,6 +259,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/activity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Recent node activity (downloads, loads, evictions, declines)
+         * @description The last 200 things the daemon did to its model store and runtimes, newest first, including everything the mesh did on the operator's behalf. In memory only; cleared on restart.
+         */
+        get: operations["getActivity"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/update/check": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Run a version check now
+         * @description Fetches the version feed immediately (the daemon otherwise checks on startup and hourly) and returns the result.
+         */
+        post: operations["checkUpdate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/events": {
         parameters: {
             query?: never;
@@ -276,8 +316,12 @@ export interface paths {
          *     - `models_changed`: `{model, change}` where change is
          *       downloaded|loaded|unloaded|default.
          *     - `model_assignment`: `{model, state, error}` as a coordinator
-         *       placement moves through assigned|downloading|ready|declined|
-         *       failed|evicted.
+         *       placement moves through assigned|downloading|ready|cached|
+         *       declined|failed|evicted.
+         *     - `activity`: one ActivityEvent as it happens (same rows as
+         *       `GET /api/v1/activity`).
+         *     - `update_available`: the Update object when a version check finds
+         *       a newer release (once per discovered version).
          *     - `log` (only with `?logs=1`): one LogEntry per line as logged.
          *
          *     EventSource cannot send headers, so this route additionally accepts
@@ -319,7 +363,16 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** OpenAI-compatible chat completions (streaming supported) */
+        /**
+         * OpenAI-compatible chat completions (streaming supported)
+         * @description Reasoning models: chain-of-thought is returned separately from the
+         *     answer as `reasoning_content` (the DeepSeek / llama.cpp extension
+         *     to the OpenAI shape) — on `choices[].message.reasoning_content` for
+         *     non-streaming responses and on `choices[].delta.reasoning_content`
+         *     for stream chunks — and is absent when the model produced none.
+         *     Reasoning tokens count in `usage.completion_tokens`. Models whose
+         *     thinking llama.cpp cannot parse still return it inline in `content`.
+         */
         post: operations["openaiChatCompletions"];
         delete?: never;
         options?: never;
@@ -400,7 +453,47 @@ export interface components {
             /** Format: double */
             temp_celsius: number;
             hardware?: components["schemas"]["Hardware"];
+            /** @description Accelerator backend of the llama-server build this node runs (`cuda12`, `rocm`, `vulkan`, `metal`, `cpu-avx2`, `cpu`): the first lane of the detection preference chain (cuda12 > rocm > vulkan > cpu) that the pinned runtime manifest publishes, so it can differ from `hardware.gpus[].accel` — an AMD box serves on `vulkan` while no ROCm build is published. Absent for the mock runtime. */
+            runtime_accel?: string;
             stats: components["schemas"]["Stats"];
+            memory: components["schemas"]["Memory"];
+            disk: components["schemas"]["Disk"];
+            /** @description Present once the first version check has completed. */
+            update?: components["schemas"]["Update"];
+        };
+        /** @description Model memory on this node. `used_mb` is the measured footprint of every loaded runtime (physical footprint / proportional set size, not RSS, so mmap'd weight pages shared with the page cache are not double counted). `budget_mb` is what the daemon lets loaded models use in total before it unloads idle instances or declines a load. */
+        Memory: {
+            /** Format: int64 */
+            used_mb: number;
+            /** Format: int64 */
+            budget_mb: number;
+            /** Format: int64 */
+            total_mb: number;
+        };
+        /** @description Model store usage. `models_bytes` counts complete artifacts, `partial_bytes` counts resumable `.partial` downloads, `budget_bytes` is `models.max_disk_mb` (0 = unlimited), `free_bytes` is free space on the volume holding the model directory. */
+        Disk: {
+            /** Format: int64 */
+            models_bytes: number;
+            /** Format: int64 */
+            partial_bytes: number;
+            /** Format: int64 */
+            budget_bytes: number;
+            /** Format: int64 */
+            free_bytes: number;
+            /** @description Absolute path of the model directory. */
+            dir: string;
+        };
+        /** @description Result of the last version check against the mesh's version feed. `minimum` is the oldest daemon the coordinator still serves; below it the node is drained until updated. */
+        Update: {
+            available: boolean;
+            current: string;
+            latest: string;
+            minimum?: string;
+            below_minimum?: boolean;
+            /** @description Release page / download for `latest`. */
+            url?: string;
+            /** Format: date-time */
+            checked_at: string;
         };
         Hardware: {
             os: string;
@@ -440,22 +533,38 @@ export interface components {
             pinned: boolean;
             /** Format: date-time */
             last_used: string;
-            /** @description assigned | downloading | ready. `assigned` is a coordinator placement queued behind other work (nothing on disk yet). */
+            /** @description assigned | downloading | ready | missing. `assigned` is a coordinator placement queued behind other work (nothing on disk yet). `missing` means the index knows the model but its file is gone from disk (deleted outside the daemon); it no longer counts against the budget and loads re-download it. */
             state: string;
             loaded: boolean;
             default: boolean;
+            /** @description Absolute artifact path; present when the file exists. */
+            path?: string;
+            /**
+             * Format: int64
+             * @description Measured memory footprint; present only while loaded.
+             */
+            loaded_mb?: number;
+            /**
+             * Format: date-time
+             * @description Present while loaded and not serving; the daemon unloads the instance after `idle_unload_seconds` (default model exempt).
+             */
+            idle_since?: string;
             /** @description Who installed it: `operator` (you, via the app/CLI/config) or `mesh` (coordinator placement). The mesh can only evict its own; yours are never touched. */
             origin: string;
             /**
              * Format: int64
-             * @description Live progress; present only while downloading.
+             * @description Live progress summed over every file of the artifact; present only while downloading.
              */
             received_bytes?: number;
+            /** @description Files in the artifact: the GGUF shards of a sharded model plus its mmproj sidecar when it has one. Present only for such multi-file models (a plain single-file model omits it). They live in `<models dir>/<id>/` under their upstream names; `path` is the first shard. */
+            parts_total?: number;
+            /** @description How many of `parts_total` are downloaded and verified; present with it. Shards download one at a time, so the one in flight is `parts_done + 1`. */
+            parts_done?: number;
             assignment?: components["schemas"]["Assignment"];
         };
         /** @description Coordinator placement status for this model, when the mesh asked for it. Failures and refusals stay visible for ten minutes. */
         Assignment: {
-            /** @description assigned | downloading | ready | declined | failed | evicted */
+            /** @description assigned | downloading | ready | cached | declined | failed | evicted. `cached` is a mesh-placed model that is on disk but unloaded (idle unload or memory pressure); the coordinator re-sends the assignment to load it when demand returns. */
             state: string;
             /** Format: date-time */
             since: string;
@@ -490,15 +599,70 @@ export interface components {
             installed: boolean;
             /** @description downloading | ready; present when the artifact is local. */
             state?: string;
-            /** Format: int64 */
+            /**
+             * Format: int64
+             * @description Live progress summed over every file; present only while downloading.
+             */
             received_bytes?: number;
+            /**
+             * Format: int64
+             * @description What the download fetches in all — `size_bytes` plus the mmproj sidecar when there is one — the denominator for `received_bytes`. Present only while downloading.
+             */
+            total_bytes?: number;
+            /** @description Files in the artifact (GGUF shards plus mmproj); present only for multi-file models. `size_bytes` is already their sum. */
+            parts_total?: number;
+            /** @description Files downloaded and verified so far; present while downloading a multi-file model. */
+            parts_done?: number;
             loaded: boolean;
             default: boolean;
         };
         CatalogList: {
             models: components["schemas"]["CatalogEntry"][];
         };
+        /** @description Earnings as this node knows them. `source: ledger` — the figures are the operator account's ledger position, pushed by the coordinator over the tunnel (every node of the operator together; settled = vested and redeemable, pending = in escrow until the canary window clears). `source: estimated` — no fresh ledger snapshot (standalone, not enrolled, or the tunnel has been down for two push intervals): a simulated figure from this node's own counters, labelled in `note`. The `*_credits` integer fields are ledger credits at `credits_per_usd`; the legacy `earned_credits` / `escrow_credits` doubles are those divided by 1e6. */
         Earnings: {
+            /** @enum {string} */
+            source: "ledger" | "estimated";
+            /**
+             * Format: date-time
+             * @description When the coordinator read the ledger (ledger only).
+             */
+            as_of?: string;
+            /**
+             * Format: int64
+             * @description Vested, redeemable balance (ledger only).
+             */
+            settled_credits?: number;
+            /**
+             * Format: int64
+             * @description In escrow, vesting after the canary window (ledger only).
+             */
+            pending_credits?: number;
+            /**
+             * Format: int64
+             * @description Payout credits earned since 00:00 UTC (ledger only).
+             */
+            earned_today_credits?: number;
+            /**
+             * Format: int64
+             * @description Payout credits earned in the trailing seven days (ledger only).
+             */
+            earned_7d_credits?: number;
+            /**
+             * Format: int64
+             * @description Payout credits earned since the account opened (ledger only).
+             */
+            lifetime_payout_credits?: number;
+            /**
+             * Format: int64
+             * @description The coordinator's peg; dollars are credits divided by this (ledger only).
+             */
+            credits_per_usd?: number;
+            /**
+             * Format: date-time
+             * @description When the oldest pending lot vests; absent with nothing pending.
+             */
+            next_vest_at?: string;
             /** Format: int64 */
             earned_microcredits: number;
             /** Format: double */
@@ -507,7 +671,10 @@ export interface components {
             est_usd: number;
             /** Format: double */
             est_usd_per_day: number;
-            /** Format: int64 */
+            /**
+             * Format: int64
+             * @description Always this node's own count, whatever the source.
+             */
             lifetime_tokens: number;
             /** Format: double */
             escrow_credits: number;
@@ -521,10 +688,40 @@ export interface components {
             serve_on_battery: boolean;
             /** Format: double */
             max_temp_celsius: number;
-            /** @description Windows like "22:00-08:00" (overnight wraps). */
+            /** @description Daily serving windows for serve_policy=scheduled, one per entry, each "HH:MM-HH:MM" in the node's local time on a 24-hour clock (the hour may be one or two digits, the minute must be two — Go's "15:04" layout). The end is exclusive: "09:00-17:00" serves 09:00 through 16:59. A start later than its end wraps overnight ("22:00-08:00"); "22:00-00:00" runs to midnight; a window whose start equals its end matches nothing, so a full day is ["00:00-12:00", "12:00-00:00"]. The same windows apply every day (there is no day-of-week syntax) and an empty list never serves. An entry the daemon can't parse fails the whole PUT with 400; reads return windows normalised to zero-padded "HH:MM-HH:MM". */
             schedule: string[];
             /** @description Let the mesh place models on this node (download, load, and evict what it placed) inside `models.max_disk_mb`, minus your pinned and excluded models. Off means the node serves only what you installed. Omitted on PUT = unchanged. */
             mesh_managed?: boolean;
+            /**
+             * Format: int64
+             * @description Model store budget (`models.max_disk_mb`); 0 = unlimited. LRU eviction of unpinned models keeps the store under it. Omitted on PUT = unchanged.
+             */
+            max_disk_mb?: number;
+            /** @description Evict unpinned models not used for this many days (0 = never). Omitted on PUT = unchanged. */
+            retention_days?: number;
+            /**
+             * Format: int64
+             * @description Memory budget for loaded models (`budget.max_ram_mb`); 0 = auto (about half of physical memory on unified-memory machines, the GPU budget on discrete GPUs). Omitted on PUT = unchanged.
+             */
+            max_ram_mb?: number;
+            /** @description Unload a loaded model after this long without a request (0 = never; default model exempt). Omitted on PUT = unchanged. */
+            idle_unload_seconds?: number;
+        };
+        ActivityEvent: {
+            /** Format: date-time */
+            time: string;
+            /** @description download_started | downloaded | download_failed | loaded | unloaded | evicted | declined | missing | update_available | assignment */
+            kind: string;
+            /** @description mesh | operator | daemon */
+            actor: string;
+            model?: string;
+            /** @description Human-readable one-liner for activity feeds. */
+            message: string;
+            /** @description Reason / error text when there is one. */
+            detail?: string;
+        };
+        ActivityList: {
+            events: components["schemas"]["ActivityEvent"][];
         };
         LogEntry: {
             /** Format: date-time */
@@ -990,6 +1187,49 @@ export interface operations {
             502: components["responses"]["Upstream"];
         };
     };
+    getActivity: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Activity rows. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActivityList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    checkUpdate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Check result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Update"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            502: components["responses"]["Upstream"];
+        };
+    };
     getEvents: {
         parameters: {
             query?: {
@@ -1047,7 +1287,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Completion (or SSE stream when `stream: true`). */
+            /** @description Completion (or SSE stream when `stream: true`). Chat messages/deltas may carry `reasoning_content`. */
             200: {
                 headers: {
                     [name: string]: unknown;

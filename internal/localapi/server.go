@@ -61,6 +61,10 @@ type Deps struct {
 	// Enroll submits a claim code to the running daemon: enrollment plus
 	// tunnel (re)start. Nil (standalone) answers 501.
 	Enroll func(ctx context.Context, claimCode string) error
+	// Earnings returns the operator account's ledger position as last
+	// pushed by the coordinator (docs#24); ok is false before the first
+	// snapshot. Nil = never enrolled anywhere that pushes one.
+	Earnings func() (LedgerEarnings, bool)
 	// Assign exposes coordinator placement status (model rows carry it).
 	// May be nil.
 	Assign *assign.Service
@@ -81,6 +85,35 @@ type Deps struct {
 	RequireAuthV1 bool
 	// Token authenticates /api/v1 (and /v1 when RequireAuthV1).
 	Token string
+}
+
+// LedgerEarnings is the coordinator's EarningsSnapshot as the local API
+// consumes it: the OPERATOR account's position (every node of the
+// operator together), in integer ledger credits at CreditsPerUSD.
+type LedgerEarnings struct {
+	// Settled is the vested main balance (redeemable); Pending is escrow
+	// (vesting after the canary window).
+	Settled, Pending int64
+	// Payout credits earned since 00:00 UTC / trailing 7 days / ever.
+	EarnedToday, Earned7d, Lifetime int64
+	CreditsPerUSD                   int64
+	// AsOf is the coordinator's read time; NextVestAt is zero with
+	// nothing in escrow.
+	AsOf, NextVestAt time.Time
+	// ReceivedAt (local clock) and PushInterval decide freshness: the
+	// ledger figure is shown only while the snapshot is younger than two
+	// intervals.
+	ReceivedAt   time.Time
+	PushInterval time.Duration
+}
+
+// Fresh reports whether the snapshot is young enough to show.
+func (e LedgerEarnings) Fresh(now time.Time) bool {
+	interval := e.PushInterval
+	if interval <= 0 {
+		interval = 5 * time.Minute
+	}
+	return !e.ReceivedAt.IsZero() && now.Sub(e.ReceivedAt) < 2*interval
 }
 
 // Server is the loopback HTTP server.

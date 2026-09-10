@@ -228,9 +228,39 @@ function StatusPage() {
 function EarningsPage() {
   const { data: e } = useQuery({ queryKey: ["earnings"], queryFn: api.earnings });
   if (!e) return <p className="text-slate-500">loading…</p>;
+  // Ledger-backed (enrolled, fresh coordinator snapshot): the operator
+  // account's settled/pending split at the coordinator's peg. Otherwise
+  // the labelled local estimate.
+  if (e.source === "ledger") {
+    const perUsd = e.credits_per_usd && e.credits_per_usd > 0 ? e.credits_per_usd : 1e6;
+    const usd = (credits?: number) => `$${((credits ?? 0) / perUsd).toFixed(4)}`;
+    return (
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+        <Card title="Your account">
+          <div className="text-2xl font-semibold text-amber-300">${e.est_usd.toFixed(4)}</div>
+          <p className="text-sm text-slate-400">settled {usd(e.settled_credits)} · pending {usd(e.pending_credits)}</p>
+        </Card>
+        <Card title="Earned today / 7 days">
+          <div className="text-2xl font-semibold">{usd(e.earned_today_credits)}</div>
+          <p className="text-sm text-slate-400">
+            {usd(e.earned_7d_credits)} this week · est ${e.est_usd_per_day.toFixed(4)}/day
+          </p>
+        </Card>
+        <Card title="Lifetime">
+          <div className="text-2xl font-semibold">{usd(e.lifetime_payout_credits)}</div>
+          <p className="text-sm text-slate-400">{e.lifetime_tokens} tokens served by this node</p>
+        </Card>
+        <p className="col-span-full text-xs text-slate-500">
+          ledger · {e.note}
+          {e.as_of ? ` · as of ${new Date(e.as_of).toLocaleString()}` : ""}
+          {e.next_vest_at ? ` · next vest ${new Date(e.next_vest_at).toLocaleString()}` : ""}
+        </p>
+      </div>
+    );
+  }
   return (
     <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-      <Card title="Earned">
+      <Card title="Earned (estimated)">
         <div className="text-2xl font-semibold text-amber-300">
           ${e.est_usd.toFixed(6)}
         </div>

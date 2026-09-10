@@ -351,7 +351,8 @@ func run() error {
 			return err
 		}
 		tctx, cancel := context.WithCancel(ctx)
-		if err := startTunnel(tctx, cfg, dialer, cfg.Tunnel.CoordinatorAddr, creds.CoordinatorPubKey, creds.NodeID, identity, hw, gov, stats, eng, mgr, ops, asg, upd, budget, log); err != nil {
+		client, err := startTunnel(tctx, cfg, dialer, cfg.Tunnel.CoordinatorAddr, creds.CoordinatorPubKey, creds.NodeID, identity, hw, gov, stats, eng, mgr, ops, asg, upd, budget, log)
+		if err != nil {
 			cancel()
 			return err
 		}
@@ -361,6 +362,7 @@ func run() error {
 		mesh.stop = cancel
 		mesh.creds = creds
 		mesh.rotationErr = nil
+		mesh.client = client
 		return nil
 	}
 
@@ -375,7 +377,7 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		if err := startTunnel(ctx, cfg, coord.Dialer(), coord.Addr(), coord.PubKey(), creds.NodeID, identity, hw, gov, stats, eng, mgr, ops, asg, upd, budget, log); err != nil {
+		if _, err := startTunnel(ctx, cfg, coord.Dialer(), coord.Addr(), coord.PubKey(), creds.NodeID, identity, hw, gov, stats, eng, mgr, ops, asg, upd, budget, log); err != nil {
 			return err
 		}
 		nodeID = creds.NodeID
@@ -486,6 +488,21 @@ func run() error {
 			}
 			return localapi.MeshStatus{NodeID: nodeID}
 		},
+		// The coordinator's ledger snapshot for /api/v1/earnings
+		// (docs#24); absent until the tunnel has delivered one.
+		Earnings: func() (localapi.LedgerEarnings, bool) {
+			mesh.mu.Lock()
+			client := mesh.client
+			mesh.mu.Unlock()
+			if client == nil {
+				return localapi.LedgerEarnings{}, false
+			}
+			st, ok := client.Earnings()
+			if !ok {
+				return localapi.LedgerEarnings{}, false
+			}
+			return ledgerEarningsFrom(st), true
+		},
 		Enroll:      enrollNow,
 		Assign:      asg,
 		MeshManaged: meshManaged.Load,
@@ -515,12 +532,37 @@ func run() error {
 type meshRunner struct {
 	mu        sync.Mutex
 	creds     *enroll.Credentials
+	client    *tunnel.Client
 	stop      context.CancelFunc
 	enrolling bool
 	// rotationErr is why the last due cert rotation did not happen
 	// (surfaced in /api/v1/status as cert_rotation_error); nil once a
 	// rotation or re-enrollment lands fresh credentials.
 	rotationErr error
+}
+
+// ledgerEarningsFrom maps the tunnel's cached snapshot onto the local
+// API's view of it. Dollars are never computed here: the peg travels
+// with the snapshot and the API divides by it.
+func ledgerEarningsFrom(st tunnel.EarningsState) localapi.LedgerEarnings {
+	s := st.Snapshot
+	le := localapi.LedgerEarnings{
+		Settled:       s.GetAvailableCredits(),
+		Pending:       s.GetEscrowCredits(),
+		EarnedToday:   s.GetEarnedTodayCredits(),
+		Earned7d:      s.GetEarned_7DCredits(),
+		Lifetime:      s.GetLifetimePayoutCredits(),
+		CreditsPerUSD: int64(s.GetCreditsPerUsd()),
+		ReceivedAt:    st.ReceivedAt,
+		PushInterval:  time.Duration(s.GetPushIntervalSeconds()) * time.Second,
+	}
+	if s.GetAsOf() != nil {
+		le.AsOf = s.GetAsOf().AsTime()
+	}
+	if s.GetNextVestAt() != nil {
+		le.NextVestAt = s.GetNextVestAt().AsTime()
+	}
+	return le
 }
 
 // loadDefaultModel makes one model servable at startup. Further models
@@ -580,7 +622,7 @@ func reportRuntimeBuild(hw *typesv1.CapabilityProfile, inst rt.Instance, log *sl
 // startTunnel runs the session client in the background. nodeID must be the
 // coordinator-assigned ID from enrollment — the session is rejected
 // otherwise.
-func startTunnel(ctx context.Context, cfg config.Config, dialer tunnel.Dialer, addr string, coordKey []byte, nodeID string, _ *enroll.Identity, hw *typesv1.CapabilityProfile, gov *governor.Governor, stats *telemetry.Stats, eng *engine.Engine, _ *models.Manager, ops *modelops.Service, asg *assign.Service, upd *update.Checker, _ rt.ResourceBudget, log *slog.Logger) error {
+func startTunnel(ctx context.Context, cfg config.Config, dialer tunnel.Dialer, addr string, coordKey []byte, nodeID string, _ *enroll.Identity, hw *typesv1.CapabilityProfile, gov *governor.Governor, stats *telemetry.Stats, eng *engine.Engine, _ *models.Manager, ops *modelops.Service, asg *assign.Service, upd *update.Checker, _ rt.ResourceBudget, log *slog.Logger) (*tunnel.Client, error) {
 	protoBudget := &typesv1.ResourceBudget{
 		MaxVramPercent:        uint32(cfg.Budget.MaxVRAMPercent),
 		MaxRamMb:              uint64(max(cfg.Budget.MaxRAMMB, 0)),
@@ -656,13 +698,13 @@ func startTunnel(ctx context.Context, cfg config.Config, dialer tunnel.Dialer, a
 		},
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// Assignment progress reports ride this session; a reconnect installs
 	// the new client's send (Hello/heartbeats carry live states anyway).
 	asg.SetReporter(client.SendModelState)
 	go client.Run(ctx)
-	return nil
+	return client, nil
 }
 
 // standaloneEnroll enrolls against the in-process fake coordinator. Its

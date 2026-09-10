@@ -17,6 +17,9 @@ import (
 	"github.com/teraflock/flockd/internal/update"
 	tunnelv1 "github.com/teraflock/proto/gen/go/flock/tunnel/v1"
 	typesv1 "github.com/teraflock/proto/gen/go/flock/types/v1"
+	"google.golang.org/protobuf/encoding/protowire"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func quietLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
@@ -585,5 +588,91 @@ func TestConfigUpdateReleaseChannel(t *testing.T) {
 			t.Fatal("release channel never reached the checker")
 		case <-time.After(10 * time.Millisecond):
 		}
+	}
+}
+
+// An EarningsSnapshot pushed by the coordinator is cached with its receipt
+// time (docs#24): the local API serves it while fresh, and the observer
+// callback sees it too.
+func TestEarningsSnapshotCached(t *testing.T) {
+	seen := make(chan *tunnelv1.EarningsSnapshot, 1)
+	h := newHarness(t, func(o *tunnel.Options) {
+		o.OnEarnings = func(es *tunnelv1.EarningsSnapshot) { seen <- es }
+	})
+	if _, ok := h.client.Earnings(); ok {
+		t.Fatal("snapshot before any push")
+	}
+	before := time.Now()
+	want := &tunnelv1.EarningsSnapshot{
+		AvailableCredits: 1200, EscrowCredits: 350, CreditsPerUsd: 1_000_000,
+		EarnedTodayCredits: 70, Earned_7DCredits: 350, LifetimePayoutCredits: 1550,
+		AsOf: timestamppb.Now(), PushIntervalSeconds: 300,
+	}
+	if err := h.coord.PushEarnings(want); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-seen:
+		if !proto.Equal(got, want) {
+			t.Fatalf("observed %+v, want %+v", got, want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("snapshot never observed")
+	}
+	st, ok := h.client.Earnings()
+	if !ok || !proto.Equal(st.Snapshot, want) {
+		t.Fatalf("cached = %+v (%v)", st.Snapshot, ok)
+	}
+	if st.ReceivedAt.Before(before) || !st.Fresh(time.Now()) {
+		t.Fatalf("receipt %s not fresh", st.ReceivedAt)
+	}
+	// Two push intervals on, the daemon stops trusting it.
+	if st.Fresh(st.ReceivedAt.Add(11 * time.Minute)) {
+		t.Fatal("snapshot still fresh after two intervals")
+	}
+}
+
+// Forward compatibility, on the wire: a CoordinatorMessage carrying a
+// oneof member this build does not know arrives as unknown fields
+// (GetMsg() == nil) and is dropped — the session stays up and the next
+// known message is handled. This is the assumption behind adding
+// EarningsSnapshot without a flag day for 0.5.x / 0.6.0 daemons, which
+// have exactly this switch minus the earnings arm.
+func TestUnknownCoordinatorMessageIgnored(t *testing.T) {
+	h := newHarness(t, nil)
+	// Field 999 of CoordinatorMessage, length-delimited: what a future
+	// oneof member looks like to a daemon built before it existed.
+	raw := protowire.AppendTag(nil, 999, protowire.BytesType)
+	raw = protowire.AppendBytes(raw, []byte("from-the-future"))
+	unknown := &tunnelv1.CoordinatorMessage{}
+	if err := proto.Unmarshal(raw, unknown); err != nil {
+		t.Fatal(err)
+	}
+	if unknown.GetMsg() != nil {
+		t.Fatalf("unknown field parsed as a known member: %T", unknown.GetMsg())
+	}
+	if err := h.coord.PushRaw(unknown); err != nil {
+		t.Fatal(err)
+	}
+	// A known message right behind it is handled on the same session.
+	if err := h.coord.PushEarnings(&tunnelv1.EarningsSnapshot{EscrowCredits: 7, PushIntervalSeconds: 300}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.After(5 * time.Second)
+	for {
+		if st, ok := h.client.Earnings(); ok {
+			if st.Snapshot.GetEscrowCredits() != 7 {
+				t.Fatalf("snapshot = %+v", st.Snapshot)
+			}
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("session did not survive an unknown coordinator message")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	if n := h.client.Sessions(); n != 1 {
+		t.Fatalf("sessions = %d: the unknown message caused a reconnect", n)
 	}
 }
