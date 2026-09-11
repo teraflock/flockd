@@ -82,9 +82,11 @@ type Runtime struct {
 	// RequireSignature refuses runtime manifests and artifacts that carry
 	// no cosign signature, refuses cached extracts that were trusted by
 	// sha256 alone, and refuses to run without a pinned signing key.
-	// Default false in this release (flockd#25 stage 1: verify whenever a
-	// signature is advertised); flips to true once every published
-	// manifest is signed and the daemon embeds the Teraflock key.
+	// Default true since flockd#25 stage 2: the stable manifest and every
+	// artifact it lists are signed (runtimes llamacpp-b9892-4 onward) and
+	// the daemon embeds the Teraflock key. A cached runtime that predates
+	// signing is refused on the next start and re-fetched from stable;
+	// false is for self-hosted catalogs that have not adopted signing.
 	RequireSignature bool `koanf:"require_signature"`
 }
 
@@ -214,6 +216,7 @@ func Default() Config {
 			// Pinned llama-server builds published by teraflock/runtimes;
 			// runtime.llama_server_path overrides for self-built binaries.
 			ArtifactManifestURL: "https://teraflock-downloads.s3.amazonaws.com/runtimes/llamacpp/manifest.json",
+			RequireSignature:    true,
 			MockTokensPerSec:    120,
 			MaxContext:          16384,
 		},

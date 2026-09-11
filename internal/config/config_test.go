@@ -136,9 +136,10 @@ func TestRuntimeSigningKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Defaults: no pin override, signatures not (yet) required.
+	// Defaults: no pin override (the embedded key is the pin), signatures
+	// required (flockd#25 stage 2).
 	def := Default()
-	if def.Runtime.ArtifactSigningKey != "" || def.Runtime.RequireSignature {
+	if def.Runtime.ArtifactSigningKey != "" || !def.Runtime.RequireSignature {
 		t.Fatalf("defaults: key=%q require=%v", def.Runtime.ArtifactSigningKey, def.Runtime.RequireSignature)
 	}
 	if b, err := def.Runtime.ArtifactSigningKeyPEM(); err != nil || b != nil {

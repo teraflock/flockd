@@ -47,10 +47,12 @@ artifact_manifest_url = "https://teraflock-downloads.s3.amazonaws.com/runtimes/l
 # their own key. Never taken from the manifest or the artifact host.
 artifact_signing_key = ""
 # Refuse runtime manifests and artifacts that carry no cosign signature
-# (and refuse to run without a pinned key). Off in this release: signatures
-# are verified whenever a manifest advertises one, unsigned builds warn.
-# The default flips to true once every published build is signed.
-require_signature = false
+# (and refuse to run without a pinned key). On by default: the stable
+# manifest and every build it lists are signed with the key the daemon
+# embeds. A runtime cached before signing existed is refused at the next
+# start and re-fetched. Set false only for a self-hosted catalog that does
+# not sign its builds.
+require_signature = true
 # Synthetic generation speed for kind=mock (tests, demos).
 mock_tokens_per_sec = 120
 # --ctx-size override passed to llama-server (0 = model default, capped by
