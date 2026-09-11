@@ -173,6 +173,41 @@ func TestSignatureAcceptsBundleAtSignatureURL(t *testing.T) {
 	assertNotExtracted(t, dir2)
 }
 
+// cosign v3 `sign-blob --bundle` with --tlog-upload=false writes its own
+// key-mode bundle, {"base64Signature": ...} and nothing else — the shape
+// runtimes llamacpp-b9892-4 published to stable, and the one a daemon
+// with require_signature=true refused until it was accepted here.
+func TestSignatureAcceptsCosignKeyModeBundle(t *testing.T) {
+	priv, pub := newTestKey(t)
+	tarball := makeTarball(t, []byte("#!/bin/sh\necho key-mode\n"))
+	bundle := `{"base64Signature":"` + strings.TrimSpace(string(signBlob(t, priv, tarball))) + `"}`
+	_, manifestURL, _ := serveSigned(t, tarball, sigOpts{advertise: true, artSig: []byte(bundle), manKey: priv})
+	dir := t.TempDir()
+	f := &Fetcher{ManifestURL: manifestURL, CacheDir: dir, SigningKeyPEM: pub, RequireSignature: true}
+	if _, _, err := f.Ensure(context.Background(), "metal"); err != nil {
+		t.Fatalf("cosign key-mode bundle rejected: %v", err)
+	}
+	if got := readTrust(t, dir); got != trustCosign {
+		t.Errorf("trust stamp = %q, want cosign", got)
+	}
+
+	// The same shape over a different blob still fails: no digest is
+	// recorded, so the ECDSA check itself has to catch it.
+	other := makeTarball(t, []byte("#!/bin/sh\necho other\n"))
+	wrong := `{"base64Signature":"` + strings.TrimSpace(string(signBlob(t, priv, other))) + `"}`
+	_, manifestURL2, _ := serveSigned(t, tarball, sigOpts{advertise: true, artSig: []byte(wrong), manKey: priv})
+	_, _, err := (&Fetcher{ManifestURL: manifestURL2, CacheDir: t.TempDir(), SigningKeyPEM: pub, RequireSignature: true}).Ensure(context.Background(), "metal")
+	if err == nil || !strings.Contains(err.Error(), "ECDSA verification failed") {
+		t.Fatalf("want ECDSA refusal for a key-mode bundle over another blob, got %v", err)
+	}
+
+	// Ambiguity is refused rather than guessed.
+	both := `{"base64Signature":"AA==","messageSignature":{"signature":"AA=="}}`
+	if _, err := decodeSignature(make([]byte, 32), []byte(both)); err == nil || !strings.Contains(err.Error(), "both") {
+		t.Fatalf("want refusal of a bundle carrying both shapes, got %v", err)
+	}
+}
+
 func TestSignatureRejectsBadSignature(t *testing.T) {
 	priv, pub := newTestKey(t)
 	tarball := makeTarball(t, []byte("#!/bin/sh\necho evil\n"))

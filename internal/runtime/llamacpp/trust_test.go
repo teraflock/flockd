@@ -73,12 +73,17 @@ func TestVerifierRoundTrip(t *testing.T) {
 	if err := v.Verify(other[:], sig); err == nil || !strings.Contains(err.Error(), "ECDSA verification failed") {
 		t.Errorf("signature over another digest accepted: %v", err)
 	}
-	// The same signature wrapped the cosign v3 way, with and without the
-	// recorded digest, and with whitespace around the JSON.
+	// The same signature wrapped every way cosign has written a bundle:
+	// the Sigstore bundle with and without the recorded digest, with
+	// whitespace around the JSON, and cosign's own key-mode bundle (what
+	// `sign-blob --bundle --tlog-upload=false` writes: runtimes
+	// llamacpp-b9892-4 onward), with the extra keys it may carry.
 	for name, bundle := range map[string]string{
-		"full":      `{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json","verificationMaterial":{"publicKey":{"hint":"x"}},"messageSignature":{"messageDigest":{"algorithm":"SHA2_256","digest":"` + base64.StdEncoding.EncodeToString(digest[:]) + `"},"signature":"` + strings.TrimSpace(string(sig)) + `"}}`,
-		"no digest": `{"messageSignature":{"signature":"` + strings.TrimSpace(string(sig)) + `"}}`,
-		"padded":    "\n  {\"messageSignature\":{\"signature\":\"" + strings.TrimSpace(string(sig)) + "\"}}\n",
+		"key-mode":       `{"base64Signature":"` + strings.TrimSpace(string(sig)) + `"}`,
+		"key-mode extra": `{"base64Signature":"` + strings.TrimSpace(string(sig)) + `","cert":"","rekorBundle":null}`,
+		"full":           `{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json","verificationMaterial":{"publicKey":{"hint":"x"}},"messageSignature":{"messageDigest":{"algorithm":"SHA2_256","digest":"` + base64.StdEncoding.EncodeToString(digest[:]) + `"},"signature":"` + strings.TrimSpace(string(sig)) + `"}}`,
+		"no digest":      `{"messageSignature":{"signature":"` + strings.TrimSpace(string(sig)) + `"}}`,
+		"padded":         "\n  {\"messageSignature\":{\"signature\":\"" + strings.TrimSpace(string(sig)) + "\"}}\n",
 	} {
 		if err := v.Verify(digest[:], []byte(bundle)); err != nil {
 			t.Errorf("bundle %s rejected: %v", name, err)
@@ -95,7 +100,8 @@ func TestVerifierRoundTrip(t *testing.T) {
 		"not DER":                         []byte(base64.StdEncoding.EncodeToString([]byte("garbage"))),
 		"tampered":                        []byte("A" + string(sig[1:])),
 		"oversize":                        []byte(strings.Repeat("A", maxSignatureBytes+1)),
-		"cosign-json":                     []byte(`{"base64Signature":"` + strings.TrimSpace(string(sig)) + `"}`),
+		"key-mode tampered":               []byte(`{"base64Signature":"A` + strings.TrimSpace(string(sig))[1:] + `"}`),
+		"both shapes":                     []byte(`{"base64Signature":"` + strings.TrimSpace(string(sig)) + `","messageSignature":{"signature":"` + strings.TrimSpace(string(sig)) + `"}}`),
 		"bundle without messageSignature": []byte(`{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json","dsseEnvelope":{}}`),
 		"bundle with bad signature":       []byte(`{"messageSignature":{"signature":"AAAA"}}`),
 		"bundle wrong digest algorithm":   []byte(`{"messageSignature":{"messageDigest":{"algorithm":"SHA2_512","digest":"` + base64.StdEncoding.EncodeToString(digest[:]) + `"},"signature":"` + strings.TrimSpace(string(sig)) + `"}}`),

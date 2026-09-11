@@ -112,11 +112,15 @@ func ParseVerifier(pemBytes []byte) (*Verifier, error) {
 // is under 100 bytes, so anything near the cap is not a signature.
 const maxSignatureBytes = 64 << 10
 
-// Verify checks sig — the contents of a cosign_signature_url: either a
-// bare base64 ASN.1/DER ECDSA signature (cosign v2 .sig, surrounding
-// whitespace tolerated) or a Sigstore bundle JSON (cosign v3, first
-// non-space byte '{') — over blobSHA256, the SHA-256 digest of the signed
-// blob. cosign sign-blob signs the digest, so callers pass the same hash
+// Verify checks sig — the contents of a cosign_signature_url, in any of
+// the three shapes cosign sign-blob has written over blobSHA256, the
+// SHA-256 digest of the signed blob: a bare base64 ASN.1/DER ECDSA
+// signature (--output-signature, surrounding whitespace tolerated), or
+// JSON (first non-space byte '{') that is either cosign's own key-mode
+// bundle {"base64Signature": ...} — what --bundle writes with
+// --tlog-upload=false, so what the release workflow actually publishes
+// (runtimes llamacpp-b9892-4) — or a Sigstore bundle with
+// messageSignature.signature. cosign sign-blob signs the digest, so callers pass the same hash
 // they already computed for the sha256 pin — never the blob itself. A
 // bundle that records a different digest than the one being verified is
 // rejected before the signature is even looked at.
@@ -140,11 +144,15 @@ func (v *Verifier) Verify(blobSHA256 []byte, sig []byte) error {
 	return nil
 }
 
-// sigstoreBundle is the slice of a Sigstore bundle
-// (application/vnd.dev.sigstore.bundle.v0.3+json) that key-mode
-// verification needs. verificationMaterial (public-key hint, Rekor entry,
-// RFC 3161 timestamp) is ignored: the pinned key is the trust anchor.
+// sigstoreBundle is the slice of the two JSON shapes cosign writes for
+// --bundle that key-mode verification needs. Base64Signature is cosign's
+// own bundle ({"base64Signature", "cert", "rekorBundle"}; only the first
+// is present when nothing was uploaded to Rekor). MessageSignature is the
+// Sigstore bundle (application/vnd.dev.sigstore.bundle.v0.3+json).
+// Everything else in either — public-key hint, Rekor entry, RFC 3161
+// timestamp, certificate — is ignored: the pinned key is the trust anchor.
 type sigstoreBundle struct {
+	Base64Signature  string `json:"base64Signature"`
 	MessageSignature *struct {
 		MessageDigest *struct {
 			Algorithm string `json:"algorithm"`
@@ -168,10 +176,24 @@ func decodeSignature(blobSHA256, sig []byte) ([]byte, error) {
 		if err := json.Unmarshal([]byte(trimmed), &bundle); err != nil {
 			return nil, fmt.Errorf("sigstore bundle: %w", err)
 		}
-		if bundle.MessageSignature == nil || bundle.MessageSignature.Signature == "" {
-			return nil, errors.New("sigstore bundle has no messageSignature.signature (DSSE/attestation bundles are not runtime signatures)")
+		switch {
+		case bundle.Base64Signature != "" && bundle.MessageSignature != nil:
+			return nil, errors.New("bundle carries both base64Signature and messageSignature; refusing to guess which one was meant")
+		case bundle.Base64Signature != "":
+			// cosign's key-mode bundle records no digest; the sha256 pin
+			// the caller already checked is what binds it to the blob.
+			b64 = bundle.Base64Signature
+		case bundle.MessageSignature == nil || bundle.MessageSignature.Signature == "":
+			return nil, errors.New("bundle has neither base64Signature nor messageSignature.signature (DSSE/attestation bundles are not runtime signatures)")
 		}
-		if md := bundle.MessageSignature.MessageDigest; md != nil && md.Digest != "" {
+		var md *struct {
+			Algorithm string `json:"algorithm"`
+			Digest    string `json:"digest"`
+		}
+		if bundle.MessageSignature != nil {
+			md = bundle.MessageSignature.MessageDigest
+		}
+		if md != nil && md.Digest != "" {
 			if md.Algorithm != "" && md.Algorithm != "SHA2_256" {
 				return nil, fmt.Errorf("sigstore bundle digest algorithm %q, want SHA2_256", md.Algorithm)
 			}
@@ -183,7 +205,9 @@ func decodeSignature(blobSHA256, sig []byte) ([]byte, error) {
 				return nil, fmt.Errorf("sigstore bundle was made over digest %x, not this artifact's %x", recorded, blobSHA256)
 			}
 		}
-		b64 = bundle.MessageSignature.Signature
+		if bundle.MessageSignature != nil {
+			b64 = bundle.MessageSignature.Signature
+		}
 	}
 	der, err := base64.StdEncoding.DecodeString(b64)
 	if err != nil {
