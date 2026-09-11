@@ -203,11 +203,13 @@ func TestVerifierMatchesRealCosignOutput(t *testing.T) {
 	if err := v.Verify(digest[:], swapped); err == nil || !strings.Contains(err.Error(), "was made over digest") {
 		t.Errorf("bundle with a foreign digest accepted: %v", err)
 	}
-	// The embedded pin is intentionally empty until docs#34 records the
-	// key; when it is populated it must at least parse as P-256.
-	if embeddedRuntimeSigningKeyPEM != "" {
-		if _, err := ParseVerifier([]byte(embeddedRuntimeSigningKeyPEM)); err != nil {
-			t.Fatalf("embedded pin does not parse: %v", err)
-		}
+	// The embedded pin is the public half of the KMS key in SPEC §A3.1.
+	// It must be present and parse as P-256: an empty or malformed pin
+	// silently downgrades every node to sha256-only artifact trust.
+	if embeddedRuntimeSigningKeyPEM == "" {
+		t.Fatal("embedded runtime signing pin is empty; SPEC §A3.1 records the key")
+	}
+	if _, err := ParseVerifier([]byte(embeddedRuntimeSigningKeyPEM)); err != nil {
+		t.Fatalf("embedded pin does not parse: %v", err)
 	}
 }

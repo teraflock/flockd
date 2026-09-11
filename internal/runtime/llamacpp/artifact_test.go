@@ -119,6 +119,26 @@ func TestFetcherDownloadsVerifiesAndUnpacks(t *testing.T) {
 	}
 }
 
+// manifestServer serves body at /manifest.json and 404s everything else,
+// which is what the artifact host does for the ".sig" probe while
+// teraflock/runtimes publishes no signatures (runtimes#1). Tests must go
+// through this rather than answering every path: the daemon pins a real
+// key now (embeddedRuntimeSigningKeyPEM), so a fixture that returns the
+// manifest body for "<url>.sig" looks like a corrupt signature and
+// correctly fails closed.
+func manifestServer(t *testing.T, body []byte) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/manifest.json" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL + "/manifest.json"
+}
+
 func readStamp(t *testing.T, dir string) string {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join(dir, ".tarball.sha256"))
@@ -131,6 +151,13 @@ func readStamp(t *testing.T, dir string) string {
 func TestFetcherRejectsSHAMismatch(t *testing.T) {
 	tarball := makeTarball(t, []byte("evil"))
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The artifact host has no signature to serve yet (runtimes#1);
+		// it answers the probe with a 4xx, so the fixture must too, or a
+		// tarball body reads as a corrupt signature against the pin.
+		if strings.HasSuffix(r.URL.Path, ".sig") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		if strings.HasSuffix(r.URL.Path, "manifest.json") {
 			man := ArtifactManifest{RuntimeBuildID: "llamacpp-b9999-1", Artifacts: []Artifact{{
 				OS: runtime.GOOS, Arch: runtime.GOARCH, Accel: "cpu-avx2",
@@ -173,13 +200,10 @@ func TestFetcherRejectsTarballWithoutBinary(t *testing.T) {
 }
 
 func TestFetcherRejectsEmptyManifest(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		// The pre-fix flockd shape: proof that a wrong-format manifest is a
-		// loud error, not an empty struct that fails later.
-		_, _ = w.Write([]byte(`{"build_id":"x","builds":[{"os":"darwin"}]}`))
-	}))
-	defer srv.Close()
-	_, _, err := (&Fetcher{ManifestURL: srv.URL, CacheDir: t.TempDir()}).Ensure(context.Background(), "metal")
+	// The pre-fix flockd shape: proof that a wrong-format manifest is a
+	// loud error, not an empty struct that fails later.
+	url := manifestServer(t, []byte(`{"build_id":"x","builds":[{"os":"darwin"}]}`))
+	_, _, err := (&Fetcher{ManifestURL: url, CacheDir: t.TempDir()}).Ensure(context.Background(), "metal")
 	if err == nil || !strings.Contains(err.Error(), "no runtime_build_id") {
 		t.Fatalf("want format error, got %v", err)
 	}
@@ -262,10 +286,7 @@ func TestEnsureSelectionReportsChosenAccel(t *testing.T) {
 		{OS: runtime.GOOS, Arch: runtime.GOARCH, Accel: "vulkan", URL: srv.URL + "/llama-server.tar.gz", SHA256: hex.EncodeToString(sum[:])},
 	}}
 	mj, _ := json.Marshal(man)
-	msrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(mj) }))
-	defer msrv.Close()
-
-	f := &Fetcher{ManifestURL: msrv.URL, CacheDir: t.TempDir()}
+	f := &Fetcher{ManifestURL: manifestServer(t, mj), CacheDir: t.TempDir()}
 	sel, err := f.EnsureSelection(context.Background(), "rocm", "vulkan", "cpu-avx2")
 	if err != nil {
 		t.Fatal(err)
@@ -322,10 +343,7 @@ func TestPreflightRejectsPlatformWithNoBuild(t *testing.T) {
 		{OS: "plan9", Arch: "amd64", Accel: "metal", URL: "http://x", SHA256: strings.Repeat("0", 64)},
 	}}
 	mj, _ := json.Marshal(man)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(mj) }))
-	defer srv.Close()
-
-	err := (&Fetcher{ManifestURL: srv.URL}).Preflight(context.Background(), "cuda12")
+	err := (&Fetcher{ManifestURL: manifestServer(t, mj)}).Preflight(context.Background(), "cuda12")
 	if err == nil || !strings.Contains(err.Error(), "no build for") {
 		t.Fatalf("want no-build error, got %v", err)
 	}
@@ -336,12 +354,9 @@ func TestPreflightAcceptsCPUFallback(t *testing.T) {
 		{OS: runtime.GOOS, Arch: runtime.GOARCH, Accel: "cpu-avx2", URL: "http://x", SHA256: strings.Repeat("0", 64)},
 	}}
 	mj, _ := json.Marshal(man)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(mj) }))
-	defer srv.Close()
-
 	// Asking for a GPU accel that the manifest doesn't advertise must still
 	// succeed via the cpu-avx2 fallback — same rule as Ensure.
-	if err := (&Fetcher{ManifestURL: srv.URL}).Preflight(context.Background(), "cuda12"); err != nil {
+	if err := (&Fetcher{ManifestURL: manifestServer(t, mj)}).Preflight(context.Background(), "cuda12"); err != nil {
 		t.Fatalf("cpu fallback should satisfy preflight, got %v", err)
 	}
 }

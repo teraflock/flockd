@@ -224,6 +224,7 @@ func TestSignatureRejectsUnparseablePin(t *testing.T) {
 // docs#34 records the key): trusted by sha256 with one warning, unless
 // the operator demanded signatures.
 func TestSignatureAdvertisedButNoVerifier(t *testing.T) {
+	withoutEmbeddedPin(t)
 	priv, _ := newTestKey(t)
 	tarball := makeTarball(t, []byte("#!/bin/sh\necho unpinned\n"))
 	_, manifestURL, _ := serveSigned(t, tarball, sigOpts{advertise: true, artKey: priv, manKey: priv})
@@ -351,6 +352,7 @@ func TestManifestSignaturePolicy(t *testing.T) {
 // nothing to check it against, and guessing keys is exactly what the
 // design forbids.
 func TestManifestSignatureSkippedWithoutVerifier(t *testing.T) {
+	withoutEmbeddedPin(t)
 	priv, _ := newTestKey(t)
 	tarball := makeTarball(t, []byte("#!/bin/sh\n"))
 	_, manifestURL, _ := serveSigned(t, tarball, sigOpts{advertise: false, artKey: priv, manSig: []byte("would fail if checked\n")})
@@ -363,7 +365,18 @@ func TestManifestSignatureSkippedWithoutVerifier(t *testing.T) {
 // or a pre-#25 daemon that wrote no trust stamp at all) is re-fetched
 // and signature-verified once require_signature is on; a cosign stamp
 // is reused without touching the network for the tarball.
+// withoutEmbeddedPin models a daemon built before SPEC §A3.1 recorded the
+// runtime signing key, so "no pin configured" can still be exercised now
+// that release binaries carry one.
+func withoutEmbeddedPin(t *testing.T) {
+	t.Helper()
+	saved := embeddedRuntimeSigningKeyPEM
+	embeddedRuntimeSigningKeyPEM = ""
+	t.Cleanup(func() { embeddedRuntimeSigningKeyPEM = saved })
+}
+
 func TestCachedReuseHonoursTrustPolicy(t *testing.T) {
+	withoutEmbeddedPin(t)
 	priv, pub := newTestKey(t)
 	tarball := makeTarball(t, []byte("#!/bin/sh\necho cached\n"))
 	_, manifestURL, downloads := serveSigned(t, tarball, sigOpts{advertise: true, artKey: priv, manKey: priv})

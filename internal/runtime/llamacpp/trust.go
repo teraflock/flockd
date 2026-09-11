@@ -48,13 +48,28 @@ import (
 // only ever prove what the host chose to publish.
 
 // embeddedRuntimeSigningKeyPEM is the daemon's pin: the PKIX PEM public key
-// that Teraflock runtime artifacts are signed with. Empty until SPEC §A3
-// Key custody (teraflock/docs#34) records the public key; a daemon release
-// then embeds it here, and the same release flips
-// config.Runtime.RequireSignature's default to true (stage 2 of #25).
-// Never populated from the manifest or the artifact host: an attacker who
-// controls those controls whatever key they would serve.
-const embeddedRuntimeSigningKeyPEM = ""
+// that Teraflock runtime artifacts are signed with. This is the public half
+// of the AWS KMS key recorded in SPEC §A3.1 Key custody
+// (alias/teraflock-artifact-signing, decided in teraflock/docs#34); only the
+// flockd and runtimes release workflows can sign with the private half, and
+// only on a tag. Never populated from the manifest or the artifact host: an
+// attacker who controls those controls whatever key they would serve.
+//
+// Rotating this is a daemon release, by design (SPEC §A3.1: there is no
+// revocation list; a compromised key means a new pin here plus a
+// ConfigUpdate.minimum_version drain of older nodes).
+//
+// config.Runtime.RequireSignature still defaults to false: teraflock/runtimes
+// does not publish signatures next to its tarballs yet (runtimes#1), so
+// requiring them would break every node's runtime fetch. Flipping that
+// default is stage 2 of #25 and waits on runtimes#1.
+// A var, not a const, only so tests can model a daemon built before the
+// pin existed; nothing outside _test.go writes it.
+var embeddedRuntimeSigningKeyPEM = `-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEW24PNaVshWhqlboDdqx0SjJJF5QG
+vl4fl1HGx8Aw+Zu6FsrrXVYveDsizVLBYJrujeIxnnblvIn6c04vx4iJVg==
+-----END PUBLIC KEY-----
+`
 
 // Verifier checks cosign key-mode blob signatures against one pinned
 // ECDSA P-256 public key.
