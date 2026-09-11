@@ -432,10 +432,12 @@ func pickReason(goos, goarch string, accels []string, chosen string) string {
 
 // fetchAndUnpack downloads the tarball, verifies its SHA-256, verifies its
 // cosign signature per the trust policy, and only then extracts
-// llama-server (plus LICENSE/BUILDINFO) into dir. The tarball layout is
-// llama-server-<tag>-<os>-<arch>-<accel>/{llama-server,LICENSE.llama.cpp,BUILDINFO};
-// entries are extracted by basename to fixed paths, so hostile archive
-// paths cannot escape dir.
+// llama-server (plus LICENSE/BUILDINFO, and on Windows any *.dll the build
+// needs) into dir. The tarball layout is
+// llama-server-<tag>-<os>-<arch>-<accel>/{llama-server,LICENSE.llama.cpp,BUILDINFO}
+// plus, for lanes that cannot link their GPU runtime statically, DLLs
+// beside the binary; entries are extracted by basename to fixed paths, so
+// hostile archive paths cannot escape dir.
 func (f *Fetcher) fetchAndUnpack(ctx context.Context, a Artifact, dir, buildID string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("llamacpp: mkdir: %w", err)
@@ -519,6 +521,7 @@ func extractRuntime(tarball, dir string) error {
 	defer gz.Close()
 
 	found := false
+	dlls := 0
 	tr := tar.NewReader(gz)
 	for {
 		hdr, err := tr.Next()
@@ -533,11 +536,24 @@ func extractRuntime(tarball, dir string) error {
 		}
 		var dest string
 		var mode os.FileMode
-		switch filepath.Base(hdr.Name) {
-		case binaryName():
+		base := filepath.Base(hdr.Name)
+		switch {
+		case base == binaryName():
 			dest, mode, found = filepath.Join(dir, binaryName()), 0o755, true
-		case "LICENSE.llama.cpp", "BUILDINFO":
-			dest, mode = filepath.Join(dir, filepath.Base(hdr.Name)), 0o644
+		case base == "LICENSE.llama.cpp" || base == "BUILDINFO":
+			dest, mode = filepath.Join(dir, base), 0o644
+		case isWindowsDLL(base):
+			// NVIDIA ships no static cuBLAS for Windows, so the CUDA
+			// tarball must carry cublas64_12.dll and cublasLt64_12.dll
+			// beside the exe; dropping them leaves a binary that cannot
+			// start (teraflock/flockd#45, teraflock/runtimes#3). A DLL
+			// next to the exe is loaded by that exe, so it is exactly as
+			// trusted as the exe — and it is covered by the same tarball
+			// sha256 and signature, which is what makes this acceptable.
+			if dlls++; dlls > maxRuntimeDLLs {
+				return fmt.Errorf("llamacpp: tarball carries more than %d DLLs", maxRuntimeDLLs)
+			}
+			dest, mode = filepath.Join(dir, base), 0o644
 		default:
 			continue
 		}
@@ -554,6 +570,21 @@ func extractRuntime(tarball, dir string) error {
 		return fmt.Errorf("llamacpp: tarball contains no %s", binaryName())
 	}
 	return nil
+}
+
+// maxRuntimeDLLs bounds what a tarball can drop next to the binary. The
+// CUDA lane needs two; the cap is defence in depth behind the sha256 and
+// signature checks, not the primary control.
+const maxRuntimeDLLs = 16
+
+// isWindowsDLL reports whether a tar member is a DLL this platform should
+// keep. Only on Windows: a Linux or macOS node has no use for one, and the
+// narrower rule keeps the tarball contract tight.
+func isWindowsDLL(base string) bool {
+	if runtime.GOOS != "windows" {
+		return false
+	}
+	return strings.EqualFold(filepath.Ext(base), ".dll")
 }
 
 func binaryName() string {

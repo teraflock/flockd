@@ -371,3 +371,65 @@ func TestPreflightAcceptsExistingLocalBinary(t *testing.T) {
 		t.Fatalf("existing binary should satisfy preflight, got %v", err)
 	}
 }
+
+// A Windows CUDA tarball carries the cuBLAS DLLs beside the exe because
+// NVIDIA ships no static cuBLAS for Windows (flockd#45). They must land
+// next to the binary on Windows and be ignored everywhere else, and a
+// hostile path must not escape the build dir.
+func TestExtractKeepsWindowsDLLsByBasename(t *testing.T) {
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	members := []struct{ name, body string }{
+		{"pkg/" + binaryName(), "#!/bin/sh\necho hi\n"},
+		{"pkg/BUILDINFO", "tag=b1\n"},
+		{"pkg/cublas64_12.dll", "dll-one"},
+		{"pkg/bin/cublasLt64_12.dll", "dll-two"},
+		{"../../escape.dll", "hostile"},
+		{"pkg/notes.txt", "ignored"},
+	}
+	for _, m := range members {
+		if err := tw.WriteHeader(&tar.Header{Name: m.name, Mode: 0o644, Size: int64(len(m.body)), Typeflag: tar.TypeReg}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write([]byte(m.body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "a.tar.gz")
+	if err := os.WriteFile(src, buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "out")
+	if err := os.MkdirAll(out, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := extractRuntime(src, out); err != nil {
+		t.Fatal(err)
+	}
+
+	// Never a subdirectory and never outside out/, whatever the archive said.
+	if _, err := os.Stat(filepath.Join(dir, "escape.dll")); err == nil {
+		t.Fatal("a ../.. member escaped the build dir")
+	}
+	if _, err := os.Stat(filepath.Join(out, "notes.txt")); err == nil {
+		t.Fatal("an unrelated member was extracted")
+	}
+	for _, dll := range []string{"cublas64_12.dll", "cublasLt64_12.dll", "escape.dll"} {
+		_, err := os.Stat(filepath.Join(out, dll))
+		if runtime.GOOS == "windows" && err != nil {
+			t.Errorf("windows: %s should have been kept: %v", dll, err)
+		}
+		if runtime.GOOS != "windows" && err == nil {
+			t.Errorf("%s: DLLs are Windows-only", dll)
+		}
+	}
+}
