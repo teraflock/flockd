@@ -43,8 +43,13 @@ rcodesign sign \
   "$bin"
 
 zip -q -j "$tmp/$name.zip" "$bin"
+# Wait limit: Apple's Notary service usually answers in 1-5 minutes, but a
+# team's FIRST submissions are much slower — v0.6.2 was still InProgress at
+# the old 1500s limit and failed the release. An hour per binary is well
+# inside the job's own budget and the wait is what makes the "published =
+# notarized" invariant true, so waiting longer beats publishing unsigned.
 log "macos: submitting $name for notarization (waiting for Apple)"
 rcodesign notary-submit --api-key-file "$tmp/asc.json" \
-  --wait --max-wait-seconds "${NOTARY_MAX_WAIT_SECONDS:-1500}" \
+  --wait --max-wait-seconds "${NOTARY_MAX_WAIT_SECONDS:-3600}" \
   "$tmp/$name.zip"
 log "macos: $name signed and notarized"
