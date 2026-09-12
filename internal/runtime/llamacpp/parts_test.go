@@ -7,6 +7,30 @@ import (
 	rt "github.com/teraflock/flockd/internal/runtime"
 )
 
+// Admission hands the adapter a planned layout (flockd#46); without one
+// the adapter keeps its own resolution, so callers that do not plan
+// (tera's preflight, older tests) are unchanged.
+func TestServerArgsHonourThePlannedLayout(t *testing.T) {
+	a := &Adapter{Accel: "metal", MaxContext: 16384}
+	arg := func(args []string, flag string) string {
+		if i := slices.Index(args, flag); i >= 0 && i+1 < len(args) {
+			return args[i+1]
+		}
+		return ""
+	}
+	m := rt.ModelSpec{ID: "m", Path: "/models/m.gguf", ContextLength: 131072}
+
+	unplanned := a.serverArgs(m, rt.ResourceBudget{MaxConcurrent: 2}, 1)
+	if arg(unplanned, "--parallel") != "2" || arg(unplanned, "--ctx-size") != "16384" {
+		t.Fatalf("unplanned: --parallel %s --ctx-size %s", arg(unplanned, "--parallel"), arg(unplanned, "--ctx-size"))
+	}
+
+	planned := a.serverArgs(m, rt.ResourceBudget{MaxConcurrent: 2, Slots: 12, ContextTokens: 12 * 8192}, 1)
+	if arg(planned, "--parallel") != "12" || arg(planned, "--ctx-size") != "98304" {
+		t.Fatalf("planned: --parallel %s --ctx-size %s", arg(planned, "--parallel"), arg(planned, "--ctx-size"))
+	}
+}
+
 func TestServerArgsPassMmprojAndSizeTheWholeSet(t *testing.T) {
 	a := &Adapter{Accel: "metal", VRAMMB: 16 * 1024}
 	res := rt.ResourceBudget{MaxConcurrent: 2, MaxVRAMPercent: 80}

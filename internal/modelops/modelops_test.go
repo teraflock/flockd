@@ -188,3 +188,31 @@ func TestCancelDownload(t *testing.T) {
 		t.Fatalf("cancelled download left entries: %+v", rows)
 	}
 }
+
+// The load receives the planned slots and total context (flockd#46), not
+// the raw ceiling: with no budget known the plan is the ceiling at the
+// cap, so --parallel 2 and --ctx-size 2 × 8192 for an unknown window.
+func TestLoadPassesThePlannedLayout(t *testing.T) {
+	svc, _ := harness(t, "planned-model", []byte("gguf bytes"))
+	cap := &captureLoader{mock: rt.NewMockRuntime(0)}
+	svc.Loader = cap
+	if err := svc.Load(context.Background(), "planned-model"); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cap.lastBudget.Slots != 2 || cap.lastBudget.ContextTokens != 2*8192 {
+		t.Fatalf("planned layout = %d slots × %d total, want 2 × 16384", cap.lastBudget.Slots, cap.lastBudget.ContextTokens)
+	}
+	if cap.lastBudget.MaxConcurrent != 2 {
+		t.Fatalf("ceiling not carried through: %+v", cap.lastBudget)
+	}
+	// The operator's pin narrows every slot and is charged accordingly.
+	svc2, _ := harness(t, "pinned-model", []byte("gguf bytes"))
+	cap2 := &captureLoader{mock: rt.NewMockRuntime(0)}
+	svc2.Loader, svc2.ContextLength = cap2, 4096
+	if err := svc2.Load(context.Background(), "pinned-model"); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cap2.lastBudget.Slots != 2 || cap2.lastBudget.ContextTokens != 2*4096 {
+		t.Fatalf("pinned layout = %d × %d, want 2 × 8192", cap2.lastBudget.Slots, cap2.lastBudget.ContextTokens)
+	}
+}

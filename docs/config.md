@@ -55,14 +55,21 @@ artifact_signing_key = ""
 require_signature = true
 # Synthetic generation speed for kind=mock (tests, demos).
 mock_tokens_per_sec = 120
-# --ctx-size override passed to llama-server (0 = model default, capped by
-# max_context).
+# Context and slots are planned per load from the memory budget: after
+# room is made for the smallest acceptable layout, spare memory is spent
+# on context (up to max_context per request) across up to
+# budget.max_concurrent slots, split evenly; slots are given up before a
+# request gets less than min_context. The daemon logs the plan
+# ("context plan": slots, ctx_per_slot, estimate_mb) at every load.
+#
+# Pin per-request context exactly (0 = planned). Slots still adapt.
 context_length = 0
-# Cap on the context window handed to llama-server, in tokens, shared across
-# the budget.max_concurrent slots (0 = no cap). The KV cache scales with it:
-# a 3B model at its 131072-token training window reserves ~14 GB of memory,
-# at 16384 about 1.8 GB. Per-request context is max_context / max_concurrent.
+# Cap on per-request context, in tokens (0 = the model's training window).
+# The KV cache is sized by slots × context: a 3B model costs ~31 KB per
+# token, an 8B ~75 KB, so 16 slots at 16384 tokens is ~8 GB for the 3B.
 max_context = 16384
+# Floor on per-request context; fewer slots before less context.
+min_context = 8192
 
 [governor]
 serve_policy     = "idle-only"  # always | idle-only | scheduled
@@ -95,7 +102,10 @@ max_ram_mb       = 0    # memory budget for LOADED models. 0 = auto: half of
                         # one serving a request); if that is not enough the
                         # load is refused — mesh placements then stay on disk
                         # as `cached`. Live via PUT /api/v1/limits max_ram_mb.
-max_concurrent   = 2    # parallel slots
+max_concurrent   = 0    # slot ceiling per model and the node's dispatch cap;
+                        # 0 = auto by accelerator class (16 with a GPU or
+                        # unified memory, 2 CPU-only). Memory decides the
+                        # actual slots per load; see [runtime] max_context.
 
 [models]
 manifest_path = ""              # local catalog file (teraflock/models YAML/JSON)

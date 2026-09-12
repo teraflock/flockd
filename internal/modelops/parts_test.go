@@ -16,16 +16,18 @@ import (
 	rt "github.com/teraflock/flockd/internal/runtime"
 )
 
-// captureLoader records what the service asks the runtime to load.
+// captureLoader records what the service asks the runtime to load, and
+// with what budget (the planned slots and context ride in it, flockd#46).
 type captureLoader struct {
-	mock rt.Runtime
-	mu   sync.Mutex
-	last rt.ModelSpec
+	mock       rt.Runtime
+	mu         sync.Mutex
+	last       rt.ModelSpec
+	lastBudget rt.ResourceBudget
 }
 
 func (c *captureLoader) Load(ctx context.Context, m rt.ModelSpec, res rt.ResourceBudget) (rt.Instance, error) {
 	c.mu.Lock()
-	c.last = m
+	c.last, c.lastBudget = m, res
 	c.mu.Unlock()
 	return c.mock.Load(ctx, m, res)
 }

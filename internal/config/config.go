@@ -63,15 +63,16 @@ type Runtime struct {
 	// MockTokensPerSec controls the synthetic generation speed of the mock
 	// runtime (tests, --standalone demos).
 	MockTokensPerSec float64 `koanf:"mock_tokens_per_sec"`
-	// ContextLength override passed to llama-server (0 = model default,
-	// capped by MaxContext).
+	// ContextLength pins the per-request (per-slot) context exactly
+	// (0 = planned from the memory budget, flockd#46). Slots still adapt.
 	ContextLength int `koanf:"context_length"`
-	// MaxContext caps the context window handed to llama-server, in
-	// tokens, shared across the `--parallel` slots (0 = no cap). The KV
-	// cache scales with it: a 3B model at its 131072-token training window
-	// reserves ~14 GB, at 16384 about 1.8 GB. Per-request context is
-	// MaxContext / budget.max_concurrent.
+	// MaxContext caps per-request context, in tokens (0 = the model's
+	// training window). The planner spends spare memory on context up to
+	// this cap, on every slot; the KV cache is sized by slots × context.
 	MaxContext int `koanf:"max_context"`
+	// MinContext is the per-request floor: the planner gives up slots
+	// before a request gets less than this (0 = 8192).
+	MinContext int `koanf:"min_context"`
 	// ArtifactSigningKey overrides the daemon's built-in pin for the key
 	// that runtime manifests and tarballs are cosign-signed with
 	// (internal/runtime/llamacpp/trust.go): either an inline PEM public
@@ -133,8 +134,12 @@ type Budget struct {
 	// physical memory on unified-memory machines, vram × max_vram_percent
 	// on discrete GPUs). Loads beyond it unload idle models first, then
 	// are refused (mesh placements stay on disk as `cached`).
-	MaxRAMMB      int64 `koanf:"max_ram_mb"`
-	MaxConcurrent int   `koanf:"max_concurrent"`
+	MaxRAMMB int64 `koanf:"max_ram_mb"`
+	// MaxConcurrent is the slot ceiling per loaded model (llama-server
+	// --parallel) and the node's dispatch cap. 0 = auto by accelerator
+	// class (16 with a GPU or unified memory, 2 CPU-only; memory.DefaultSlots).
+	// Memory decides the actual slot count per load (flockd#46).
+	MaxConcurrent int `koanf:"max_concurrent"`
 }
 
 type Models struct {
@@ -219,6 +224,7 @@ func Default() Config {
 			RequireSignature:    true,
 			MockTokensPerSec:    120,
 			MaxContext:          16384,
+			MinContext:          8192,
 		},
 		Governor: Governor{
 			ServePolicy:    "idle-only",
@@ -231,7 +237,7 @@ func Default() Config {
 		Budget: Budget{
 			MaxVRAMPercent: 80,
 			MaxRAMMB:       0, // 0 = auto (half of system RAM)
-			MaxConcurrent:  2,
+			MaxConcurrent:  0, // 0 = auto by accelerator class (flockd#46)
 		},
 		Models: Models{
 			// The hosted flat catalog (models repo CI publishes it); a
@@ -383,8 +389,11 @@ func (c Config) Validate() error {
 	if c.Budget.MaxVRAMPercent < 1 || c.Budget.MaxVRAMPercent > 100 {
 		return fmt.Errorf("config: budget.max_vram_percent must be 1-100, got %d", c.Budget.MaxVRAMPercent)
 	}
-	if c.Budget.MaxConcurrent < 1 {
-		return fmt.Errorf("config: budget.max_concurrent must be >= 1")
+	if c.Budget.MaxConcurrent < 0 {
+		return fmt.Errorf("config: budget.max_concurrent must be >= 0 (0 = auto by accelerator class)")
+	}
+	if c.Runtime.MinContext < 0 || c.Runtime.MaxContext < 0 || c.Runtime.ContextLength < 0 {
+		return fmt.Errorf("config: runtime.min_context, max_context and context_length must be >= 0")
 	}
 	if c.Budget.MaxRAMMB < 0 {
 		return fmt.Errorf("config: budget.max_ram_mb must be >= 0 (0 = auto)")

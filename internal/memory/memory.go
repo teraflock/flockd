@@ -94,6 +94,10 @@ func EstimateMB(fileBytes int64, minRAMMB int64, ctx int) int64 {
 	return est
 }
 
+// hardwareProfile is the capability profile as the planner sees it
+// (nil-safe: proto getters on a nil profile return zero values).
+type hardwareProfile = *typesv1.CapabilityProfile
+
 // Unified reports whether the node's GPU shares system memory (Apple
 // Silicon). On such machines the RAM budget is the whole story: there is no
 // separate VRAM to fill.

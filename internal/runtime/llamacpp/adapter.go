@@ -175,12 +175,22 @@ func (a *Adapter) Load(ctx context.Context, m rt.ModelSpec, res rt.ResourceBudge
 
 // serverArgs is llama-server's command line for a model.
 func (a *Adapter) serverArgs(m rt.ModelSpec, res rt.ResourceBudget, port int) []string {
+	// Admission plans slots and total context together from the memory
+	// budget (memory.PlanContext, flockd#46); a caller that did not plan
+	// (tests, tera's preflight) gets the pre-plan behaviour.
 	ctxLen := memory.ResolveContext(a.ContextLength, m.ContextLength, a.MaxContext)
+	if res.ContextTokens > 0 {
+		ctxLen = res.ContextTokens
+	}
+	slots := max(res.MaxConcurrent, 1)
+	if res.Slots > 0 {
+		slots = res.Slots
+	}
 	args := []string{
 		"-m", m.Path,
 		"--host", "127.0.0.1",
 		"--port", strconv.Itoa(port),
-		"--parallel", strconv.Itoa(max(res.MaxConcurrent, 1)),
+		"--parallel", strconv.Itoa(slots),
 		"--no-webui",
 		// Reasoning models: llama-server splits chain-of-thought out of
 		// `content` into `reasoning_content` deltas (the DeepSeek wire

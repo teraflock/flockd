@@ -206,11 +206,20 @@ func run() error {
 	}
 	eng := engine.New(gov, stats, touch)
 
+	// The slot ceiling: the operator's number, or the hardware default
+	// (flockd#46). It is the per-model --parallel ceiling, the dispatch
+	// cap the tunnel enforces, and the figure advertised to the
+	// coordinator as the most it may ask for.
+	maxConc := cfg.Budget.MaxConcurrent
+	if maxConc <= 0 {
+		maxConc = memory.DefaultSlots(hw)
+	}
 	budget := rt.ResourceBudget{
 		MaxVRAMPercent: cfg.Budget.MaxVRAMPercent,
 		MaxRAMMB:       cfg.Budget.MaxRAMMB,
-		MaxConcurrent:  cfg.Budget.MaxConcurrent,
+		MaxConcurrent:  maxConc,
 	}
+	log.Info("slot ceiling", "max_concurrent", maxConc, "auto", cfg.Budget.MaxConcurrent <= 0)
 
 	// modelops backs both startup model loading and the local API's
 	// on-demand download/load/switch routes (llamacpp only: the mock
@@ -262,6 +271,7 @@ func run() error {
 			Hardware:      hw,
 			ContextLength: cfg.Runtime.ContextLength,
 			MaxContext:    cfg.Runtime.MaxContext,
+			MinContext:    cfg.Runtime.MinContext,
 		}
 		// Memory admission (plan 17 A): loads must fit budget.max_ram_mb
 		// (0 = auto: half of unified memory); idle instances are unloaded
@@ -622,11 +632,13 @@ func reportRuntimeBuild(hw *typesv1.CapabilityProfile, inst rt.Instance, log *sl
 // startTunnel runs the session client in the background. nodeID must be the
 // coordinator-assigned ID from enrollment — the session is rejected
 // otherwise.
-func startTunnel(ctx context.Context, cfg config.Config, dialer tunnel.Dialer, addr string, coordKey []byte, nodeID string, _ *enroll.Identity, hw *typesv1.CapabilityProfile, gov *governor.Governor, stats *telemetry.Stats, eng *engine.Engine, _ *models.Manager, ops *modelops.Service, asg *assign.Service, upd *update.Checker, _ rt.ResourceBudget, log *slog.Logger) (*tunnel.Client, error) {
+func startTunnel(ctx context.Context, cfg config.Config, dialer tunnel.Dialer, addr string, coordKey []byte, nodeID string, _ *enroll.Identity, hw *typesv1.CapabilityProfile, gov *governor.Governor, stats *telemetry.Stats, eng *engine.Engine, _ *models.Manager, ops *modelops.Service, asg *assign.Service, upd *update.Checker, budget rt.ResourceBudget, log *slog.Logger) (*tunnel.Client, error) {
 	protoBudget := &typesv1.ResourceBudget{
-		MaxVramPercent:        uint32(cfg.Budget.MaxVRAMPercent),
-		MaxRamMb:              uint64(max(cfg.Budget.MaxRAMMB, 0)),
-		MaxConcurrentRequests: uint32(cfg.Budget.MaxConcurrent),
+		MaxVramPercent: uint32(cfg.Budget.MaxVRAMPercent),
+		MaxRamMb:       uint64(max(cfg.Budget.MaxRAMMB, 0)),
+		// The resolved ceiling, never the raw 0 of "auto": this is the
+		// most the coordinator may set max_concurrent_requests to.
+		MaxConcurrentRequests: uint32(budget.MaxConcurrent),
 		MaxDiskMb:             uint64(max(cfg.Models.MaxDiskMB, 0)),
 		ServeOnBattery:        cfg.Governor.ServeOnBattery,
 		MaxTempCelsius:        uint32(cfg.Governor.MaxTempCelsius),
@@ -662,7 +674,7 @@ func startTunnel(ctx context.Context, cfg config.Config, dialer tunnel.Dialer, a
 		CoordinatorPubKey: coordKey,
 		Engine:            eng,
 		Admit:             gov,
-		MaxConcurrent:     cfg.Budget.MaxConcurrent,
+		MaxConcurrent:     budget.MaxConcurrent,
 		HeartbeatInterval: cfg.Tunnel.HeartbeatInterval,
 		ReconnectMin:      cfg.Tunnel.ReconnectMin,
 		ReconnectMax:      cfg.Tunnel.ReconnectMax,

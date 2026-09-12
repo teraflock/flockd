@@ -69,10 +69,14 @@ type Service struct {
 	// discrete memory. Nil disables admission unless a budget is
 	// configured explicitly (SetMemoryBudgetMB).
 	Hardware *typesv1.CapabilityProfile
-	// MaxContext mirrors runtime.max_context (0 = no cap).
+	// MaxContext mirrors runtime.max_context: the per-slot context cap
+	// (0 = the model's window).
 	MaxContext int
-	// ContextLength is the operator's runtime.context_length override,
-	// which the footprint estimate must reflect (0 = catalog/default).
+	// MinContext mirrors runtime.min_context: the per-slot floor the
+	// planner gives up slots to protect (0 = memory.DefaultMinContext).
+	MinContext int
+	// ContextLength is the operator's runtime.context_length pin on
+	// per-slot context (0 = planned from the budget).
 	ContextLength int
 	// OnUnloaded is called after any unload (operator, idle, memory
 	// pressure) with the model id; the assign service reports `cached` to
@@ -325,19 +329,37 @@ func (s *Service) LoadInstanceOrigin(ctx context.Context, id, origin string) (rt
 			fileBytes = int64(pspec.GetSizeBytes())
 		}
 	}
-	ctxLen := memory.ResolveContext(s.ContextLength, spec.ContextLength, s.MaxContext)
-	estimate := memory.EstimateMB(fileBytes, int64(pspec.GetMinRamMb()), ctxLen)
+	// Slots and context are planned from the memory budget (flockd#46):
+	// admission is asked for room for the smallest layout the operator
+	// accepts (the per-slot floor on one slot), and once idle models have
+	// been unloaded for that much, the plan spends whatever is free on
+	// slots and context, evenly. The estimate charged to the load is the
+	// plan's, so admission and the launch arguments cannot disagree.
+	in := memory.PlanInput{
+		FileBytes: fileBytes, MinRAMMB: int64(pspec.GetMinRamMb()),
+		Window: spec.ContextLength, Slots: s.slotCeiling(),
+		MinCtx: s.MinContext, MaxCtx: s.MaxContext, CtxPin: s.ContextLength,
+	}
+	minEstimate := memory.EstimateMB(fileBytes, in.MinRAMMB, memory.FloorContext(in))
 
 	s.admitMu.Lock()
 	defer s.admitMu.Unlock()
 	if inst, ok := s.loadedInstance(id); ok {
 		return inst, nil // raced with another loader while downloading
 	}
-	if err := s.admit(ctx, id, estimate); err != nil {
-		s.log().Warn("model not loaded: over memory budget", "model", id, "estimate_mb", estimate, "err", err)
+	if err := s.admit(ctx, id, minEstimate); err != nil {
+		s.log().Warn("model not loaded: over memory budget", "model", id, "estimate_mb", minEstimate, "err", err)
 		return nil, err
 	}
-	inst, err := s.Loader.Load(ctx, spec, s.Budget)
+	in.BudgetMB, in.UsedMB = s.MemoryBudgetMB(), s.usedMB()
+	plan := memory.PlanContext(in)
+	estimate := plan.EstimateMB
+	res := s.Budget
+	res.Slots, res.ContextTokens = plan.Slots, plan.TotalCtx
+	s.log().Info("context plan", "model", id, "slots", plan.Slots, "ctx_per_slot", plan.CtxPerSlot,
+		"ctx_total", plan.TotalCtx, "estimate_mb", estimate, "used_mb", in.UsedMB, "budget_mb", in.BudgetMB,
+		"squeezed", plan.Squeezed)
+	inst, err := s.Loader.Load(ctx, spec, res)
 	if err != nil {
 		return nil, err
 	}
@@ -359,6 +381,15 @@ func (s *Service) LoadInstanceOrigin(ctx context.Context, id, origin string) (rt
 	}
 	s.Activity.Record(activity.KindLoaded, actor, id, fmt.Sprintf("loaded %s (~%d MB)", id, estimate), "")
 	return inst, nil
+}
+
+// slotCeiling is the most slots a load may plan: the operator's
+// budget.max_concurrent, or the hardware default when that is 0 (auto).
+func (s *Service) slotCeiling() int {
+	if s.Budget.MaxConcurrent > 0 {
+		return s.Budget.MaxConcurrent
+	}
+	return memory.DefaultSlots(s.Hardware)
 }
 
 // Loading reports whether a load of id is in progress (download, admission

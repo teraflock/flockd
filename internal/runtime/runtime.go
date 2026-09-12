@@ -27,11 +27,19 @@ type ModelSpec struct {
 	SizeBytes int64
 }
 
-// ResourceBudget is the operator-configured ceiling passed to Load.
+// ResourceBudget is the operator-configured ceiling passed to Load, plus
+// the layout admission planned for this particular load.
 type ResourceBudget struct {
 	MaxVRAMPercent int
 	MaxRAMMB       int64
-	MaxConcurrent  int
+	// MaxConcurrent is the slot ceiling (budget.max_concurrent, or the
+	// hardware default when that is 0).
+	MaxConcurrent int
+	// Slots and ContextTokens are what memory.PlanContext decided for
+	// this load: --parallel and --ctx-size. 0 = unplanned; the adapter
+	// falls back to MaxConcurrent and its own context resolution.
+	Slots         int
+	ContextTokens int
 }
 
 // Runtime loads models into serving Instances. Exactly per SPEC §A1.3.
