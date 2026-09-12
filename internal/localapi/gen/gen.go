@@ -348,7 +348,7 @@ type Status struct {
 	RuntimeAccel *string `json:"runtime_accel,omitempty"`
 	Standalone   bool    `json:"standalone"`
 
-	// State serving | yielded | paused-battery | paused-thermal | outside-schedule
+	// State serving | starting | idle | no-model | yielded | paused-battery | paused-thermal | outside-schedule. `starting`: the default model is still being fetched or loaded; `idle`: nothing loaded but models are on disk (a placement or request loads one); `no-model`: nothing loaded and nothing on disk.
 	State       string  `json:"state"`
 	Stats       Stats   `json:"stats"`
 	TempCelsius float64 `json:"temp_celsius"`

@@ -97,6 +97,7 @@ const daemonStartWait = 60 * time.Second
 
 func cmdUp() *cobra.Command {
 	var standalone bool
+	var defaultModel string
 	c := &cobra.Command{
 		Use:   "up",
 		Short: "Install and start the flockd service (launchd / systemd --user / Windows logon task)",
@@ -108,6 +109,9 @@ func cmdUp() *cobra.Command {
 			daemonArgs := []string{}
 			if standalone {
 				daemonArgs = append(daemonArgs, "--standalone")
+			}
+			if defaultModel != "" {
+				daemonArgs = append(daemonArgs, "--default-model", defaultModel)
 			}
 			logPath := filepath.Join(dataDir(), "flockd.log")
 			ctx := cmd.Context()
@@ -168,6 +172,7 @@ func cmdUp() *cobra.Command {
 		},
 	}
 	c.Flags().BoolVar(&standalone, "standalone", false, "run the daemon with the in-process fake coordinator")
+	c.Flags().StringVar(&defaultModel, "default-model", "", "model the daemon loads at startup (\"none\" = nothing: serve what the mesh places or you pick later; default: the daemon's models.default)")
 	return c
 }
 

@@ -299,6 +299,7 @@ func Load(path string) (Config, error) {
 	if err := k.Unmarshal("", &cfg); err != nil {
 		return cfg, fmt.Errorf("config: unmarshal: %w", err)
 	}
+	cfg.Models.Default = NormalizeDefaultModel(cfg.Models.Default)
 
 	// Live-edited limits (PUT /api/v1/limits) persist in a daemon-owned
 	// overlay so the operator's config.toml — comments and all — is never
@@ -430,4 +431,18 @@ func (t Tunnel) CACertPEM() ([]byte, error) {
 		return nil, fmt.Errorf("config: tunnel.ca_cert: %w", err)
 	}
 	return b, nil
+}
+
+// NoDefaultModel is the models.default (and flockd --default-model) value
+// meaning "load nothing at startup": the node serves what the mesh places
+// or the operator loads (flockd#49). Empty means the same; this spelling
+// exists because an empty flag or env value reads as unset.
+const NoDefaultModel = "none"
+
+// NormalizeDefaultModel maps the "none" spelling to empty.
+func NormalizeDefaultModel(id string) string {
+	if strings.EqualFold(strings.TrimSpace(id), NoDefaultModel) {
+		return ""
+	}
+	return id
 }

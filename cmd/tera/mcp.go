@@ -357,6 +357,12 @@ func statusSummary(st gen.Status) string {
 	case "serving":
 		return fmt.Sprintf("Serving: %d model(s) loaded, %d request(s) in flight, %.1f tok/s over the last minute; default model %q.",
 			st.ModelsLoaded, st.Inflight, st.Stats.TokensPerSec1m, st.DefaultModel)
+	case "starting":
+		return fmt.Sprintf("Starting: the default model is still being downloaded or loaded; %d model(s) on the way. Chat works once it is ready.", 1)
+	case "idle":
+		return "Idle: nothing loaded right now (models are on disk and load on the first request or placement)."
+	case "no-model":
+		return "No model: nothing loaded and nothing on disk yet. Download one with `tera models pull <id>` or let the mesh place one."
 	case "yielded":
 		return "Not serving: the operator is using the machine and the serve policy is idle-only, so inference is refused until the node goes idle. `tera limits --serve always` serves now."
 	case "paused-battery":

@@ -58,14 +58,15 @@ func main() {
 
 func run() error {
 	var (
-		configPath  = flag.String("config", "", "path to config.toml (default <data_dir>/config.toml)")
-		standalone  = flag.Bool("standalone", false, "run with the in-process fake coordinator (no control plane needed)")
-		runtimeKind = flag.String("runtime", "", "runtime adapter: llamacpp|mock (overrides config)")
-		listen      = flag.String("listen", "", "local API listen address (overrides config)")
-		dataDir     = flag.String("data-dir", "", "data directory (overrides config)")
-		logLevel    = flag.String("log-level", "", "debug|info|warn|error (overrides config)")
-		logFile     = flag.String("log-file", "", "also append logs to this file (overrides config; the Windows logon task's only sink)")
-		showVersion = flag.Bool("version", false, "print version and exit")
+		configPath   = flag.String("config", "", "path to config.toml (default <data_dir>/config.toml)")
+		standalone   = flag.Bool("standalone", false, "run with the in-process fake coordinator (no control plane needed)")
+		runtimeKind  = flag.String("runtime", "", "runtime adapter: llamacpp|mock (overrides config)")
+		listen       = flag.String("listen", "", "local API listen address (overrides config)")
+		dataDir      = flag.String("data-dir", "", "data directory (overrides config)")
+		logLevel     = flag.String("log-level", "", "debug|info|warn|error (overrides config)")
+		logFile      = flag.String("log-file", "", "also append logs to this file (overrides config; the Windows logon task's only sink)")
+		defaultModel = flag.String("default-model", "", "model to load at startup (overrides models.default; \"none\" = load nothing, serve what the mesh places)")
+		showVersion  = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Parse()
 
@@ -92,6 +93,9 @@ func run() error {
 	}
 	if *logFile != "" {
 		cfg.Log.File = *logFile
+	}
+	if *defaultModel != "" {
+		cfg.Models.Default = config.NormalizeDefaultModel(*defaultModel)
 	}
 	if *standalone {
 		cfg.Tunnel.Standalone = true
@@ -228,6 +232,9 @@ func run() error {
 	// runtimeAccel reports the accel of the llama-server build in use for
 	// /api/v1/status (nil for the mock runtime).
 	var runtimeAccel func() string
+	// prepareRuntime resolves the llama-server build ahead of the tunnel
+	// (nil for the mock runtime).
+	var prepareRuntime func(context.Context) (string, error)
 	if cfg.Runtime.Kind == "llamacpp" {
 		// Resolve the runtime signing key pin up front so a bad
 		// runtime.artifact_signing_key refuses boot with a clear message
@@ -257,6 +264,7 @@ func run() error {
 			MaxContext:    cfg.Runtime.MaxContext,
 		}
 		runtimeAccel = adapter.SelectedAccel
+		prepareRuntime = adapter.Prepare
 		ops = &modelops.Service{
 			Mgr:           mgr,
 			Eng:           eng,
@@ -293,15 +301,56 @@ func run() error {
 		}
 	}
 
-	if err := loadDefaultModel(ctx, cfg, hw, ops, mgr, eng, budget, log); err != nil {
-		return err
+	// The runtime binary is resolved before anything connects so the
+	// session Hello carries runtime_build_id (fingerprint challenges key
+	// on it) even while the first model is still downloading. Cached after
+	// the first boot; a failure is logged and retried by the first load.
+	if prepareRuntime != nil {
+		pctx, pcancel := context.WithTimeout(ctx, 5*time.Minute)
+		if id, err := prepareRuntime(pctx); err != nil {
+			log.Warn("runtime not resolved yet; the first model load retries", "err", err)
+		} else {
+			hw.RuntimeBuildId = id
+			log.Info("runtime build identified", "runtime_build_id", id)
+		}
+		pcancel()
 	}
-	// Store hygiene (stale .partial GC, retention) starts only now: its
-	// first pass runs immediately, and before the default model is loaded
-	// it would see nothing in use and could evict the very file
-	// loadDefaultModel is about to open — then re-download it.
-	if mgr != nil {
-		go mgr.RunHousekeeping(ctx)
+
+	// The default model is not on the boot path (flockd#48): the API and
+	// the tunnel come up now and the model is fetched and loaded behind
+	// them, with retry; until then the node reports `starting`. The mock
+	// runtime keeps its synchronous fake load. Store hygiene (stale
+	// .partial GC, retention) starts after the first load attempt: its
+	// first pass runs immediately and must not see the default model's
+	// file as unused while the load is about to open it.
+	boot := &bootState{model: cfg.Models.Default}
+	switch {
+	case cfg.Runtime.Kind != "llamacpp":
+		if err := loadDefaultModel(ctx, cfg, hw, ops, mgr, eng, budget, log); err != nil {
+			return err
+		}
+	case cfg.Models.Default == "":
+		log.Info("no default model; serving what the mesh places or the operator loads")
+		if mgr != nil {
+			go mgr.RunHousekeeping(ctx)
+		}
+	default:
+		boot.pending.Store(true)
+		go func() {
+			first := true
+			err := retryUntilLoaded(ctx, cfg.Models.Default, func(ctx context.Context) error {
+				err := loadDefaultModel(ctx, cfg, hw, ops, mgr, eng, budget, log)
+				if first && mgr != nil {
+					first = false
+					go mgr.RunHousekeeping(ctx)
+				}
+				return err
+			}, log, sleepCtx)
+			boot.pending.Store(false)
+			if err == nil {
+				log.Info("default model ready", "model", cfg.Models.Default)
+			}
+		}()
 	}
 
 	// ---- mesh placement (plan 05) ----
@@ -482,6 +531,7 @@ func run() error {
 		NodeID:       nodeID,
 		Version:      version,
 		Standalone:   cfg.Tunnel.Standalone,
+		BootPending:  boot.DefaultPending,
 		Mesh: func() localapi.MeshStatus {
 			mesh.mu.Lock()
 			defer mesh.mu.Unlock()

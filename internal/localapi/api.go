@@ -69,6 +69,20 @@ func (s *Server) status() gen.Status {
 		resp.OnBattery = p.OnBattery
 		resp.TempCelsius = p.TempCelsius
 	}
+	// Nothing loaded is a state of its own (flockd#48): `starting` while
+	// the default model is on its way, `idle` when models are on disk but
+	// unloaded (idle unload; a placement or request loads one), `no-model`
+	// when the node has never had one. The governor's pauses still win.
+	if resp.State == "serving" && resp.ModelsLoaded == 0 {
+		switch {
+		case s.deps.BootPending != nil && s.deps.BootPending():
+			resp.State = "starting"
+		case s.anyModelOnDisk():
+			resp.State = "idle"
+		default:
+			resp.State = "no-model"
+		}
+	}
 	hw := s.deps.Hardware
 	if hw != nil {
 		hs := &gen.Hardware{
@@ -675,4 +689,17 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+// anyModelOnDisk reports whether the store holds at least one ready model.
+func (s *Server) anyModelOnDisk() bool {
+	if s.deps.Models == nil {
+		return false
+	}
+	for _, m := range s.deps.Models.List() {
+		if m.State == models.StateReady {
+			return true
+		}
+	}
+	return false
 }

@@ -58,6 +58,10 @@ type Deps struct {
 	// Mesh reports live mesh membership (enrolled, node id, cert expiry).
 	// Nil falls back to the static NodeID with enrolled=false.
 	Mesh func() MeshStatus
+	// BootPending reports that the default model is still being fetched
+	// or loaded: status says `starting` rather than `no-model` while a
+	// node has nothing loaded (flockd#48). Nil = never pending.
+	BootPending func() bool
 	// Enroll submits a claim code to the running daemon: enrollment plus
 	// tunnel (re)start. Nil (standalone) answers 501.
 	Enroll func(ctx context.Context, claimCode string) error

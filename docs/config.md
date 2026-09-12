@@ -120,7 +120,10 @@ manifest_url  = ""              # or a catalog URL; one of the two is required f
                                 # takes file:///C:/models/a.gguf, C:\models\a.gguf,
                                 # and \\nas\share\a.gguf; a rooted /models/a.gguf
                                 # there resolves against the current drive.
-default       = "mock-8b-instruct"  # model served at startup
+default       = "mock-8b-instruct"  # model loaded at startup (behind the API, with retry);
+                                # "" or "none" = nothing: the node serves what the mesh
+                                # places or the operator loads; `tera up --default-model`
+                                # sets it per install without editing this file
 max_disk_mb   = 61440           # model-cache budget; LRU eviction below it
 pin           = []              # model ids exempt from eviction (yours or the mesh's)
 exclude       = []              # model ids the mesh may never place here

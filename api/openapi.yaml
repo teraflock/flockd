@@ -553,7 +553,12 @@ components:
             later restart rotates it or the node is re-enrolled.
         state:
           type: string
-          description: serving | yielded | paused-battery | paused-thermal | outside-schedule
+          description: >
+            serving | starting | idle | no-model | yielded | paused-battery |
+            paused-thermal | outside-schedule. `starting`: the default model
+            is still being fetched or loaded; `idle`: nothing loaded but
+            models are on disk (a placement or request loads one);
+            `no-model`: nothing loaded and nothing on disk.
         uptime_seconds: { type: integer, format: int64 }
         default_model: { type: string }
         models_loaded: { type: integer }

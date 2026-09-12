@@ -280,3 +280,26 @@ func TestTunnelCACert(t *testing.T) {
 		t.Fatal("Load accepted an unreadable tunnel.ca_cert")
 	}
 }
+
+func TestDefaultModelNoneMeansNothing(t *testing.T) {
+	for _, in := range []string{"none", "None", " NONE ", ""} {
+		if got := NormalizeDefaultModel(in); got != "" {
+			t.Fatalf("NormalizeDefaultModel(%q) = %q, want empty", in, got)
+		}
+	}
+	if got := NormalizeDefaultModel("llama-3.2-3b-instruct-q4_k_m"); got != "llama-3.2-3b-instruct-q4_k_m" {
+		t.Fatalf("real id changed: %q", got)
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte("data_dir = \""+strings.ReplaceAll(dir, `\`, `\\`)+"\"\n[models]\ndefault = \"none\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Models.Default != "" {
+		t.Fatalf("models.default = %q after \"none\", want empty", cfg.Models.Default)
+	}
+}

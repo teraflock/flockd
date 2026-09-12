@@ -79,6 +79,21 @@ func (a *Adapter) SelectedAccel() string {
 	return a.preferred()
 }
 
+// Prepare resolves (fetching and verifying if needed) the llama-server
+// build for this machine without loading a model, and returns its build
+// id. Boot calls it before the tunnel connects so the session Hello
+// carries runtime_build_id — fingerprint challenges key on it — even
+// while the first model is still on its way (flockd#48). Cached after
+// the first boot.
+func (a *Adapter) Prepare(ctx context.Context) (string, error) {
+	sel, err := a.Fetcher.EnsureSelection(ctx, a.chain()...)
+	if err != nil {
+		return "", err
+	}
+	a.record(sel)
+	return sel.BuildID, nil
+}
+
 // record remembers the Fetcher's pick and logs it the first time (and
 // whenever it changes, e.g. a manifest that grew a lane).
 func (a *Adapter) record(sel Selection) string {
