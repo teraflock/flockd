@@ -20,6 +20,7 @@ import (
 	"github.com/teraflock/flockd/internal/activity"
 	"github.com/teraflock/flockd/internal/engine"
 	"github.com/teraflock/flockd/internal/events"
+	"github.com/teraflock/flockd/internal/gguf"
 	"github.com/teraflock/flockd/internal/memory"
 	"github.com/teraflock/flockd/internal/models"
 	rt "github.com/teraflock/flockd/internal/runtime"
@@ -340,7 +341,21 @@ func (s *Service) LoadInstanceOrigin(ctx context.Context, id, origin string) (rt
 		Window: spec.ContextLength, Slots: s.slotCeiling(),
 		MinCtx: s.MinContext, MaxCtx: s.MaxContext, CtxPin: s.ContextLength,
 	}
-	minEstimate := memory.EstimateMB(fileBytes, in.MinRAMMB, memory.FloorContext(in))
+	// The GGUF header says exactly what a context token costs and, for a
+	// local model with no catalog entry, how long the training window is.
+	// The file-size heuristic stays as the fallback; it is 2–4x low on
+	// small GQA models (the 3B: 112 KB/token real, 30 KB guessed), which
+	// planned a 262k-token cache the estimate put at 10 GB and the process
+	// took 27 GB for.
+	if meta, err := gguf.ReadMeta(path); err == nil {
+		in.KVBytesPerToken = meta.KVBytesPerToken()
+		if in.Window <= 0 && meta.ContextLength > 0 {
+			in.Window = meta.ContextLength
+		}
+	} else {
+		s.log().Debug("gguf header not read; using the size heuristic", "model", id, "err", err)
+	}
+	minEstimate := in.EstimateAt(memory.FloorContext(in))
 
 	s.admitMu.Lock()
 	defer s.admitMu.Unlock()
@@ -357,8 +372,8 @@ func (s *Service) LoadInstanceOrigin(ctx context.Context, id, origin string) (rt
 	res := s.Budget
 	res.Slots, res.ContextTokens = plan.Slots, plan.TotalCtx
 	s.log().Info("context plan", "model", id, "slots", plan.Slots, "ctx_per_slot", plan.CtxPerSlot,
-		"ctx_total", plan.TotalCtx, "estimate_mb", estimate, "used_mb", in.UsedMB, "budget_mb", in.BudgetMB,
-		"squeezed", plan.Squeezed)
+		"ctx_total", plan.TotalCtx, "kv_kb_per_token", in.KVBytesPerToken/1024, "estimate_mb", estimate,
+		"used_mb", in.UsedMB, "budget_mb", in.BudgetMB, "squeezed", plan.Squeezed)
 	inst, err := s.Loader.Load(ctx, spec, res)
 	if err != nil {
 		return nil, err

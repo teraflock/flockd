@@ -157,3 +157,40 @@ func TestDefaultSlotsByAcceleratorClass(t *testing.T) {
 		}
 	}
 }
+
+// The header's KV cost replaces the file-size guess, which is 3.7x low for
+// the 3B: 112 KB/token real vs 30 KB. On a 16 GB budget the guess plans
+// the full 16 × 16k (a 27 GB process); the real figure plans what fits.
+func TestPlanUsesTheHeaderKVCost(t *testing.T) {
+	const kv3B = 114688
+	budget := int64(16 * 1024)
+	guess := PlanContext(PlanInput{BudgetMB: budget, FileBytes: file3B, Window: window3B, Slots: gpuSlots, MaxCtx: defaultMx})
+	exact := PlanContext(PlanInput{BudgetMB: budget, FileBytes: file3B, KVBytesPerToken: kv3B, Window: window3B, Slots: gpuSlots, MaxCtx: defaultMx})
+	if guess.TotalCtx != gpuSlots*defaultMx {
+		t.Fatalf("heuristic plan changed: %+v", guess)
+	}
+	if exact.TotalCtx >= guess.TotalCtx || !exact.Squeezed {
+		t.Fatalf("header cost did not shrink the plan: exact=%+v guess=%+v", exact, guess)
+	}
+	if exact.EstimateMB > budget {
+		t.Fatalf("exact plan overshoots: %+v", exact)
+	}
+	if exact.CtxPerSlot < DefaultMinContext {
+		t.Fatalf("floor violated: %+v", exact)
+	}
+	// The estimate is the header's arithmetic, not the divisor's.
+	in := PlanInput{FileBytes: file3B, KVBytesPerToken: kv3B}
+	fw := float64(file3B) * weightsFactor
+	fkv := float64(262144) * float64(kv3B)
+	want := int64((fw+fkv)/MiB) + runtimeOverheadMB
+	if got := in.EstimateAt(262144); got != want {
+		t.Fatalf("EstimateAt(262144) = %d MB, want %d", got, want)
+	}
+	if want < 30*1024 {
+		t.Fatalf("262k tokens of the 3B should cost ~31 GB, got %d MB", want)
+	}
+	// Unknown cost: identical to EstimateMB.
+	if got := (PlanInput{FileBytes: file3B}).EstimateAt(8192); got != EstimateMB(file3B, 0, 8192) {
+		t.Fatalf("fallback differs from EstimateMB: %d", got)
+	}
+}

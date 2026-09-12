@@ -37,6 +37,11 @@ type PlanInput struct {
 	// from it, as in EstimateMB); MinRAMMB the catalog's floor, 0 = none.
 	FileBytes int64
 	MinRAMMB  int64
+	// KVBytesPerToken is the model's KV-cache cost per context token from
+	// its GGUF header (gguf.Meta.KVBytesPerToken); 0 = unknown, and the
+	// file-size heuristic in EstimateMB stands in. The heuristic is 2–4x low
+	// for small GQA models, which is exactly where over-planning hurts.
+	KVBytesPerToken int64
 	// Window is the model's training context; 0 = unknown, DefaultContext.
 	Window int
 	// Slots is the ceiling on --parallel (budget.max_concurrent, resolved
@@ -114,6 +119,12 @@ func (in PlanInput) caps() (capCtx, floor int) {
 
 func roundCtx(n int) int { return n - n%ctxGranularity }
 
+// EstimateAt is the load's footprint at a total context of ctx tokens,
+// with the header's KV cost when in carries one.
+func (in PlanInput) EstimateAt(ctx int) int64 {
+	return estimateMB(in.FileBytes, in.MinRAMMB, ctx, in.KVBytesPerToken)
+}
+
 // PlanContext decides slots and context for one load.
 //
 //	spare      = BudgetMB − UsedMB − weights − overhead   (MB)
@@ -133,7 +144,7 @@ func PlanContext(in PlanInput) Plan {
 	if in.BudgetMB > 0 && in.FileBytes > 0 {
 		weights := float64(in.FileBytes) * weightsFactor / MiB
 		spareMB := float64(in.BudgetMB-in.UsedMB) - weights - runtimeOverheadMB
-		kvPerTok := float64(in.FileBytes) / kvBytesPerTokenDivisor
+		kvPerTok := kvPerToken(in.FileBytes, in.KVBytesPerToken)
 		if spareMB <= 0 {
 			tokens = 0
 		} else {
@@ -160,6 +171,6 @@ func PlanContext(in PlanInput) Plan {
 		}
 	}
 	p.TotalCtx = p.Slots * p.CtxPerSlot
-	p.EstimateMB = EstimateMB(in.FileBytes, in.MinRAMMB, p.TotalCtx)
+	p.EstimateMB = in.EstimateAt(p.TotalCtx)
 	return p
 }

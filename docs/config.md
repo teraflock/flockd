@@ -65,8 +65,11 @@ mock_tokens_per_sec = 120
 # Pin per-request context exactly (0 = planned). Slots still adapt.
 context_length = 0
 # Cap on per-request context, in tokens (0 = the model's training window).
-# The KV cache is sized by slots × context: a 3B model costs ~31 KB per
-# token, an 8B ~75 KB, so 16 slots at 16384 tokens is ~8 GB for the 3B.
+# The KV cache is sized by slots × context, at the per-token cost read
+# from the model's GGUF header (layers × KV heads × head size × 2 × 2 B):
+# Llama-3.2 3B is 112 KB/token, Llama-3.1 8B 128 KB, Qwen3 8B 144 KB, so
+# 16 slots at 16384 tokens is ~29 GB of KV for the 3B. Sizing follows the
+# budget, not the other way round: a smaller budget plans fewer slots.
 max_context = 16384
 # Floor on per-request context; fewer slots before less context.
 min_context = 8192
@@ -203,7 +206,9 @@ login_url = "https://teraflock.ai/claim"   # browser page opened by `tera login`
   `GetProcessMemoryInfo` — the larger of PrivateUsage and WorkingSetSize —
   on Windows), not RSS — mmap'd weights shared with the page cache are not
   double counted. Before the first sample a load is charged its estimate:
-  `file_bytes × 1.15 + ctx × file_bytes/65536 + 256 MB` (ctx is the total
+  `file_bytes × 1.15 + ctx × kv_bytes_per_token + 256 MB`, with the KV cost
+  from the GGUF header (`file_bytes/65536` when the header lacks the
+  geometry, which is 2–4x low for small GQA models) (ctx is the total
   `--ctx-size`, which llama-server splits across its slots, so the KV term
   is counted once regardless of `max_concurrent`), or the catalog's
   `min_ram_mb` if larger. On a discrete GPU the card's used memory is

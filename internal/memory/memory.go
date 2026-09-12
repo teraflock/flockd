@@ -33,8 +33,9 @@ const (
 	// from the weight file size: file_bytes / 65536. That reproduces the
 	// f16 KV of GQA models within ~2x across the catalog's size range
 	// (Llama-3 8B Q4: 75 KB/token estimated vs 128 KB real; Llama-3 70B
-	// Q4: 610 KB vs 655 KB) without parsing GGUF metadata. TODO(gguf):
-	// read block_count / n_head_kv / n_embd from the file header.
+	// Q4: 610 KB vs 655 KB) — but 2–4x low on small GQA models (Llama-3.2
+	// 3B: 30 KB vs 112 KB). It is the fallback only: loads read the exact
+	// figure from the GGUF header (internal/gguf) and pass it in.
 	kvBytesPerTokenDivisor = 65536
 	// runtimeOverheadMB is the fixed cost of a llama-server process
 	// (binary, Metal/CUDA context, tokenizer, HTTP server).
@@ -82,11 +83,17 @@ func ResolveContext(override, model, maxCtx int) int {
 }
 
 func EstimateMB(fileBytes int64, minRAMMB int64, ctx int) int64 {
+	return estimateMB(fileBytes, minRAMMB, ctx, 0)
+}
+
+// estimateMB is EstimateMB with the model's real KV cost per token when
+// the GGUF header supplied one (kvBytes > 0); 0 keeps the heuristic.
+func estimateMB(fileBytes, minRAMMB int64, ctx int, kvBytes int64) int64 {
 	if ctx <= 0 {
 		ctx = DefaultContext
 	}
 	weights := float64(fileBytes) * weightsFactor
-	kv := float64(ctx) * (float64(fileBytes) / kvBytesPerTokenDivisor)
+	kv := float64(ctx) * kvPerToken(fileBytes, kvBytes)
 	est := int64((weights+kv)/MiB) + runtimeOverheadMB
 	if minRAMMB > est {
 		return minRAMMB
@@ -164,4 +171,13 @@ func ProcessFootprintMB(pid int) (int64, error) {
 		return 0, err
 	}
 	return int64(b / MiB), nil
+}
+
+// kvPerToken is the KV-cache bytes one context token costs: the header's
+// figure when known, else file_bytes / kvBytesPerTokenDivisor.
+func kvPerToken(fileBytes, known int64) float64 {
+	if known > 0 {
+		return float64(known)
+	}
+	return float64(fileBytes) / kvBytesPerTokenDivisor
 }
