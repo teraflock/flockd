@@ -198,6 +198,7 @@ func TestMultiPartResumeNeverRefetchesAVerifiedPart(t *testing.T) {
 
 	dir := t.TempDir()
 	m, _ := NewManager(dir, 0, quietLog())
+	m.DownloadMaxAttempts = 1 // a 502 is retried in production; this test wants the fast, final failure
 	if _, err := m.Ensure(context.Background(), spec); err == nil {
 		t.Fatal("expected part 3 to fail")
 	}

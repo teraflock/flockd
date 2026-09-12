@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -80,6 +81,13 @@ type Manager struct {
 	// IsLoaded reports whether a model is currently loaded in a runtime;
 	// retention never evicts a loaded model. Nil = nothing is loaded.
 	IsLoaded func(id string) bool
+
+	// DownloadMaxAttempts, DownloadBackoffMin/Max bound the retry schedule
+	// for a transient download failure (rate limiting, a flaky upstream).
+	// NewManager sets the package defaults; tests lower them to keep a
+	// simulated failure fast.
+	DownloadMaxAttempts                    int
+	DownloadBackoffMin, DownloadBackoffMax time.Duration
 
 	mu            sync.Mutex
 	maxDiskMB     int64
@@ -159,13 +167,16 @@ func NewManager(dir string, maxDiskMB int64, log *slog.Logger) (*Manager, error)
 		log = slog.Default()
 	}
 	m := &Manager{
-		Dir:         dir,
-		maxDiskMB:   maxDiskMB,
-		Client:      &http.Client{}, // long downloads: no client timeout, ctx governs
-		Log:         log,
-		state:       cacheState{Entries: map[string]*cacheEntry{}},
-		progress:    map[string]Progress{},
-		missingSeen: map[string]bool{},
+		Dir:                 dir,
+		maxDiskMB:           maxDiskMB,
+		Client:              &http.Client{}, // long downloads: no client timeout, ctx governs
+		Log:                 log,
+		DownloadMaxAttempts: downloadMaxAttempts,
+		DownloadBackoffMin:  downloadBackoffMin,
+		DownloadBackoffMax:  downloadBackoffMax,
+		state:               cacheState{Entries: map[string]*cacheEntry{}},
+		progress:            map[string]Progress{},
+		missingSeen:         map[string]bool{},
 
 		reconcileRejected: map[string]bool{},
 		verified:          map[string]bool{},
@@ -475,12 +486,101 @@ func humanBytes(n int64) string {
 	}
 }
 
-// download performs a resumable fetch of one file into dest via a
-// .partial temp file, verifying SHA256 over the complete content before
-// renaming into place. base is what the model's earlier files already
-// add up to and total the whole set, so progress is reported for the
-// model, not the file.
+// downloadMaxAttempts, downloadBackoffMin/Max bound the retry schedule for
+// a transient download failure (rate limiting, a flaky upstream) — hosts
+// like Hugging Face, which most catalog artifact_urls point at directly,
+// rate-limit anonymous fetches (429) with no auth option here to avoid it.
+const (
+	downloadMaxAttempts = 6
+	downloadBackoffMin  = 2 * time.Second
+	downloadBackoffMax  = 60 * time.Second
+)
+
+// transientDownloadError marks a download failure as worth retrying — a
+// 429/5xx from the upstream host or a transport-level error — as opposed
+// to one a retry can't fix (404, a bad URL, a hash mismatch).
+type transientDownloadError struct {
+	err error
+	// retryAfter, when nonzero, is the upstream's requested wait (the
+	// Retry-After header) and overrides the caller's own backoff.
+	retryAfter time.Duration
+}
+
+func (e *transientDownloadError) Error() string { return e.err.Error() }
+func (e *transientDownloadError) Unwrap() error { return e.err }
+
+func isRetryableStatus(code int) bool {
+	return code == http.StatusTooManyRequests || code >= 500
+}
+
+// parseRetryAfter reads a Retry-After header (either delta-seconds or an
+// HTTP-date); 0 means absent, invalid, or already in the past.
+func parseRetryAfter(h string) time.Duration {
+	if h == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(strings.TrimSpace(h)); err == nil && secs >= 0 {
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(h); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+	}
+	return 0
+}
+
+// jitter returns d +/- 30%, so retries from several files/models don't
+// all land on the same upstream request in lockstep.
+func jitter(d time.Duration) time.Duration {
+	f := 0.7 + 0.6*rand.Float64() //nolint:gosec // backoff jitter, not crypto
+	return time.Duration(float64(d) * f)
+}
+
+// download performs a resumable fetch of one file into dest, retrying a
+// transient failure (upstream rate limit, a 5xx, a transport error) with
+// backoff instead of failing the whole pull on one bad request.
 func (m *Manager) download(ctx context.Context, id string, f artifactFile, dest string, base, total int64) error {
+	maxAttempts := max(m.DownloadMaxAttempts, 1)
+	backoff := m.DownloadBackoffMin
+	if backoff <= 0 {
+		backoff = downloadBackoffMin
+	}
+	backoffMax := m.DownloadBackoffMax
+	if backoffMax <= 0 {
+		backoffMax = downloadBackoffMax
+	}
+	var err error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		err = m.downloadAttempt(ctx, id, f, dest, base, total)
+		if err == nil {
+			return nil
+		}
+		var te *transientDownloadError
+		if !errors.As(err, &te) || attempt == maxAttempts {
+			break
+		}
+		wait := te.retryAfter
+		if wait <= 0 {
+			wait = jitter(backoff)
+			backoff = min(backoff*2, backoffMax)
+		}
+		m.Log.Warn("model download failed transiently; retrying", "model", id, "file", f.Name, "err", err, "wait", wait, "attempt", attempt)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(wait):
+		}
+	}
+	return err
+}
+
+// downloadAttempt performs one fetch of one file into dest via a .partial
+// temp file, verifying SHA256 over the complete content before renaming
+// into place. base is what the model's earlier files already add up to
+// and total the whole set, so progress is reported for the model, not the
+// file. Errors worth retrying are wrapped in *transientDownloadError.
+func (m *Manager) downloadAttempt(ctx context.Context, id string, f artifactFile, dest string, base, total int64) error {
 	tmp := dest + ".partial"
 	var offset int64
 	if fi, err := os.Stat(tmp); err == nil {
@@ -496,7 +596,11 @@ func (m *Manager) download(ctx context.Context, id string, f artifactFile, dest 
 	}
 	resp, err := m.Client.Do(req)
 	if err != nil {
-		return fmt.Errorf("models: download %s: %w", id, err)
+		wrapped := fmt.Errorf("models: download %s: %w", id, err)
+		if ctx.Err() != nil {
+			return wrapped // cancelled/deadline, not a transient upstream hiccup
+		}
+		return &transientDownloadError{err: wrapped}
 	}
 	defer resp.Body.Close()
 
@@ -508,7 +612,11 @@ func (m *Manager) download(ctx context.Context, id string, f artifactFile, dest 
 	case http.StatusOK:
 		flags |= os.O_TRUNC // server ignored Range: start over
 	default:
-		return fmt.Errorf("models: download %s (%s): status %s", id, f.Name, resp.Status)
+		statusErr := fmt.Errorf("models: download %s (%s): status %s", id, f.Name, resp.Status)
+		if isRetryableStatus(resp.StatusCode) {
+			return &transientDownloadError{err: statusErr, retryAfter: parseRetryAfter(resp.Header.Get("Retry-After"))}
+		}
+		return statusErr
 	}
 
 	out, err := os.OpenFile(tmp, flags, 0o644) //nolint:gosec
