@@ -179,6 +179,12 @@ jobs:
       APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
       APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      # The pkg job does the installer signing, but preflight here decides
+      # the plan for the whole tag: SIGNING_REQUIRED=pkg is enforced in this
+      # job, and TERAFLOCK_MACOS_PKG is what makes goreleaser leave the
+      # binary cask unpublished so the tap moves once, to the package.
+      APPLE_INSTALLER_CERTIFICATE: ${{ secrets.APPLE_INSTALLER_CERTIFICATE }}
+      APPLE_INSTALLER_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERTIFICATE_PASSWORD }}
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
