@@ -50,7 +50,7 @@ require_tool pkgbuild "Xcode command line tools"
 # Refuse to wrap binaries that are not themselves signed: the notary would
 # reject the package, and the check is free.
 for b in "$flockd_bin" "$tera_bin"; do
-  if ! codesign -dv "$b" 2>&1 | grep -q 'Authority=Developer ID Application'; then
+  if ! codesign -dvv "$b" 2>&1 | grep -q 'Authority=Developer ID Application'; then
     log "ERROR: $(basename "$b") is not Developer ID signed; the pkg leg needs the macos leg"
     exit 1
   fi
