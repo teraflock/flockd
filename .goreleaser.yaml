@@ -157,7 +157,12 @@ homebrew_casks:
         tera login      # opens the claim page in your browser
         tera up         # installs and starts the background service
         tera dashboard  # watch it earn
-    skip_upload: false
+    # When the pkg leg is on (preflight.sh: installer certificate present),
+    # the cask must install the notarized, stapled .pkg instead of these
+    # bare binaries — goreleaser cannot express a `pkg` stanza, so the ci
+    # `pkg` job writes and pushes that cask (scripts/release/publish-cask.sh)
+    # and this one stays unpublished. Otherwise this cask ships as before.
+    skip_upload: '{{ if eq (envOrDefault "TERAFLOCK_MACOS_PKG" "") "true" }}true{{ else }}false{{ end }}'
 
 winget:
   - name: tera
@@ -196,7 +201,9 @@ release:
     **cosign:** this release carries no cosign signature yet.
     {{- end }}
 
-    {{ if eq (envOrDefault "TERAFLOCK_MACOS_SIGNED" "") "true" -}}
+    {{ if eq (envOrDefault "TERAFLOCK_MACOS_PKG" "") "true" -}}
+    **macOS:** `flockd` and `tera` are Developer ID signed and notarized, and `teraflock_{{ .Version }}_darwin_all.pkg` (attached by the pkg job a few minutes after this release appears) is a Developer ID Installer-signed, notarized, **stapled** package — `pkgutil --check-signature` and `xcrun stapler validate` both pass offline. `brew install --cask teraflock/tap/tera` installs the package.
+    {{- else if eq (envOrDefault "TERAFLOCK_MACOS_SIGNED" "") "true" -}}
     **macOS:** `flockd` and `tera` are Developer ID signed and notarized: `codesign -dv --verbose=2 tera` shows `Authority=Developer ID Application`, `spctl -a -vv -t install tera` reports `accepted`.
     {{- else -}}
     **macOS:** `flockd` and `tera` are **not yet notarized** (beta): the brew cask strips the quarantine flag; a direct download needs `xattr -d com.apple.quarantine flockd tera`.

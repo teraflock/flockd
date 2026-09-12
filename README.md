@@ -37,6 +37,16 @@ curl -fsSL https://teraflock.ai/install.sh | sh   # Linux, or anything else
 We publish a Homebrew **cask**, which Homebrew supports only on macOS — on
 Linux use `install.sh`, or the `.deb` / `.rpm` on the release.
 
+On macOS the cask installs a signed, notarized, **stapled** installer
+package (`teraflock_<version>_darwin_all.pkg`, also on the release page)
+into `/usr/local/bin`, so `brew` asks for your password once. That is
+deliberate: files placed by an installer carry no quarantine attribute, so
+neither the install nor the daemon's first launch under launchd ever waits
+on a Gatekeeper dialog (flockd#47). The tarball on the release page is the
+same signed binaries without the package; if you install from it by hand,
+run `flockd -version` once from your terminal before `tera up` so macOS
+asks you there rather than in the background.
+
 Windows: grab the zip from the [latest release](https://github.com/teraflock/flockd/releases/latest)
 (`winget install Teraflock.tera` coming later). On Windows `tera up`
 registers a per-user Task Scheduler logon task named `flockd` (no admin
@@ -311,13 +321,14 @@ change it there first), staticcheck, bodyclose + noctx, and govulncheck.
 ### Release signing
 
 Tags are released by the `release` job in `.github/workflows/ci.yml`
-(goreleaser). Three signing legs are wired and each keys on its own
+(goreleaser). Four signing legs are wired and each keys on its own
 secrets, so a tag publishes unsigned until the keys exist and signed the
 moment they do — no config change in this repo:
 
-| leg | tool (runs on the Linux job) | needs |
+| leg | tool | needs |
 |---|---|---|
-| macOS Developer ID + notarization of `flockd`/`tera` | `rcodesign` | `APPLE_CERTIFICATE` (base64 .p12), `APPLE_CERTIFICATE_PASSWORD`, `APPLE_API_KEY_ID`, `APPLE_API_ISSUER`, `APPLE_API_KEY` (base64 .p8) |
+| macOS Developer ID + notarization of `flockd`/`tera` | `rcodesign` (Linux job) | `APPLE_CERTIFICATE` (base64 .p12), `APPLE_CERTIFICATE_PASSWORD`, `APPLE_API_KEY_ID`, `APPLE_API_ISSUER`, `APPLE_API_KEY` (base64 .p8) |
+| macOS installer `.pkg`: Developer ID **Installer** signature, notarized, stapled; the cask then installs it | `pkgbuild` + `rcodesign` (the `pkg` job, on a Mac) | the macOS leg above, plus `APPLE_INSTALLER_CERTIFICATE` (base64 .p12 of the *Installer* certificate — a different type from the Application one), `APPLE_INSTALLER_CERTIFICATE_PASSWORD` |
 | Windows Authenticode on `flockd.exe`/`tera.exe` | `jsign` + Azure Trusted Signing | secrets `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`; variables `AZURE_SIGNING_ENDPOINT`, `AZURE_SIGNING_ACCOUNT`, `AZURE_SIGNING_PROFILE` |
 | cosign bundle over `checksums.txt` | `cosign` | variable `COSIGN_MODE=keyless` or `COSIGN_MODE=kms` + `COSIGN_KMS_KEY` (+ `AWS_ROLE_TO_ASSUME`) |
 

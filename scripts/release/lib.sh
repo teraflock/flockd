@@ -3,9 +3,12 @@
 # Sourced by sign-macos.sh, sign-windows.sh, cosign-sign.sh and
 # preflight.sh — never run directly.
 #
-# Three signing legs, each keyed on its own secrets/variables:
+# Four signing legs, each keyed on its own secrets/variables:
 #   macos    Developer ID sign + notarize the universal flockd/tera
 #            (rcodesign, from the Linux release job)
+#   pkg      the macOS installer package: Developer ID *Installer* sign,
+#            notarize and staple (rcodesign, from the macOS pkg job —
+#            pkgbuild needs a Mac). Needs the macos leg's notary key too.
 #   windows  Authenticode on flockd.exe/tera.exe via Azure Trusted Signing
 #            (jsign, from the Linux release job)
 #   cosign   Sigstore bundle over checksums.txt (goreleaser `signs:`)
@@ -52,10 +55,15 @@ missing() {
 # takes the team from the certificate; the desktop app's Tauri build is
 # what needs it.
 APPLE_SECRETS=(APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_API_KEY_ID APPLE_API_ISSUER APPLE_API_KEY)
+# The installer package is signed with a different Apple certificate type
+# ("Developer ID Installer"; the Application one cannot sign a .pkg) and
+# notarized with the same App Store Connect key as the binaries.
+APPLE_INSTALLER_SECRETS=(APPLE_INSTALLER_CERTIFICATE APPLE_INSTALLER_CERTIFICATE_PASSWORD APPLE_API_KEY_ID APPLE_API_ISSUER APPLE_API_KEY)
 AZURE_SECRETS=(AZURE_TENANT_ID AZURE_CLIENT_ID AZURE_CLIENT_SECRET)
 AZURE_VARS=(AZURE_SIGNING_ENDPOINT AZURE_SIGNING_ACCOUNT AZURE_SIGNING_PROFILE)
 
 have_apple_secrets() { nonempty "${APPLE_SECRETS[@]}"; }
+have_apple_installer_secrets() { nonempty "${APPLE_INSTALLER_SECRETS[@]}"; }
 have_azure_secrets() { nonempty "${AZURE_SECRETS[@]}" "${AZURE_VARS[@]}"; }
 
 # cosign_ready -> 0 when COSIGN_MODE selects a usable mode, 1 when unset,

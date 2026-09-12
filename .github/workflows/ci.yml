@@ -213,3 +213,61 @@ jobs:
           # TAP_GITHUB_TOKEN is a PAT with write access to teraflock/homebrew-tap;
           # goreleaser uses it only for the cask push (see .goreleaser.yaml homebrew_casks.repository.token).
           TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+
+  pkg:
+    # The macOS installer package (flockd#47): built with pkgbuild on a Mac
+    # from the darwin binaries the release job just published (already
+    # Developer ID signed + notarized there), then Installer-signed,
+    # notarized and stapled with rcodesign, attached to the release, and
+    # the Homebrew cask is pointed at it. Runs only when preflight.sh sees
+    # the installer certificate; SIGNING_REQUIRED=pkg makes its absence
+    # fatal. When it runs, goreleaser leaves the binary cask unpublished
+    # (.goreleaser.yaml homebrew_casks.skip_upload) so the tap moves once,
+    # to the package.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [release]
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    env:
+      SIGNING_REQUIRED: ${{ vars.SIGNING_REQUIRED }}
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+      APPLE_INSTALLER_CERTIFICATE: ${{ secrets.APPLE_INSTALLER_CERTIFICATE }}
+      APPLE_INSTALLER_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERTIFICATE_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Signing preflight
+        run: scripts/release/preflight.sh
+      - name: Release tooling (rcodesign; pinned, sha256-verified)
+        if: env.TERAFLOCK_MACOS_PKG == 'true'
+        run: scripts/release/install-tools.sh
+      - name: Fetch the published darwin binaries
+        if: env.TERAFLOCK_MACOS_PKG == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          mkdir -p dist/pkg
+          gh release download "$GITHUB_REF_NAME" -p "flockd_${version}_darwin_all.tar.gz" -D dist/pkg
+          tar -xzf "dist/pkg/flockd_${version}_darwin_all.tar.gz" -C dist/pkg flockd tera
+      - name: Build, sign, notarize and staple the package
+        if: env.TERAFLOCK_MACOS_PKG == 'true'
+        run: scripts/release/build-pkg.sh "$VERSION" dist/pkg/flockd dist/pkg/tera "dist/pkg/teraflock_${VERSION}_darwin_all.pkg"
+      - name: Attach the package to the release
+        if: env.TERAFLOCK_MACOS_PKG == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "$GITHUB_REF_NAME" "dist/pkg/teraflock_${VERSION}_darwin_all.pkg" --clobber
+      - name: Publish the cask (installs the package)
+        if: env.TERAFLOCK_MACOS_PKG == 'true'
+        env:
+          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+        run: scripts/release/publish-cask.sh "$VERSION" "dist/pkg/teraflock_${VERSION}_darwin_all.pkg"
+      - name: Package leg skipped
+        if: env.TERAFLOCK_MACOS_PKG != 'true'
+        run: echo "pkg leg not configured (APPLE_INSTALLER_CERTIFICATE missing); goreleaser published the binary cask as before"

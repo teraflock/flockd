@@ -7,6 +7,10 @@
 #   TERAFLOCK_MACOS_SIGNED=true|false   read by .goreleaser.yaml templates
 #                                       (cask quarantine hook, release footer)
 #   TERAFLOCK_WINDOWS_SIGNED=true|false
+#   TERAFLOCK_MACOS_PKG=true|false      the pkg job will build, sign,
+#                                       notarize and staple the installer
+#                                       and publish the cask; goreleaser
+#                                       then skips its binary cask
 #   GORELEASER_SIGN_ARGS="--skip=sign"  when COSIGN_MODE is unset
 # "true" here means "this leg WILL sign, and its failure fails the job",
 # which is what makes the template conditions safe: a published release
@@ -16,12 +20,22 @@ set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 
 fail=0
-macos=false windows=false cosign=false sign_args=""
+macos=false pkg=false windows=false cosign=false sign_args=""
 
 if have_apple_secrets; then
   macos=true
 elif signing_required macos; then
   log "ERROR: macos leg required but Apple secrets missing: $(missing "${APPLE_SECRETS[@]}")"
+  fail=1
+fi
+
+# The installer leg presupposes the macos leg: a pkg wrapping unsigned
+# binaries would notarize-fail anyway, and publishing it would hand every
+# brew user the exact quarantine problem the pkg exists to remove (#47).
+if have_apple_installer_secrets && [ "$macos" = true ]; then
+  pkg=true
+elif signing_required pkg; then
+  log "ERROR: pkg leg required but installer secrets missing: $(missing "${APPLE_INSTALLER_SECRETS[@]}") (or macos leg unsigned)"
   fail=1
 fi
 
@@ -49,15 +63,16 @@ case $ready in
 esac
 
 state() { if [ "$1" = true ]; then echo "sign"; else echo "unsigned"; fi; }
-plan="signing plan: macos=$(state $macos) windows=$(state $windows) cosign=$(state $cosign)${COSIGN_MODE:+ (COSIGN_MODE=$COSIGN_MODE)} SIGNING_REQUIRED=${SIGNING_REQUIRED:-unset}"
+plan="signing plan: macos=$(state $macos) pkg=$(state $pkg) windows=$(state $windows) cosign=$(state $cosign)${COSIGN_MODE:+ (COSIGN_MODE=$COSIGN_MODE)} SIGNING_REQUIRED=${SIGNING_REQUIRED:-unset}"
 log "$plan"
-if [ "$macos$windows$cosign" = "falsefalsefalse" ] && [ -z "${SIGNING_REQUIRED:-}" ]; then
+if [ "$macos$pkg$windows$cosign" = "falsefalsefalsefalse" ] && [ -z "${SIGNING_REQUIRED:-}" ]; then
   log "unsigned release (SIGNING_REQUIRED not set): no signing secrets configured"
 fi
 
 if [ -n "${GITHUB_ENV:-}" ]; then
   {
     echo "TERAFLOCK_MACOS_SIGNED=$macos"
+    echo "TERAFLOCK_MACOS_PKG=$pkg"
     echo "TERAFLOCK_WINDOWS_SIGNED=$windows"
     echo "GORELEASER_SIGN_ARGS=$sign_args"
   } >>"$GITHUB_ENV"
@@ -69,6 +84,7 @@ if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     echo "| leg | state |"
     echo "|---|---|"
     echo "| macOS Developer ID + notarization | $(state $macos) |"
+    echo "| macOS installer .pkg (Developer ID Installer, notarized, stapled) | $(state $pkg) |"
     echo "| Windows Authenticode (Azure Trusted Signing) | $(state $windows) |"
     echo "| cosign bundle over checksums.txt | $(state $cosign)${COSIGN_MODE:+ ($COSIGN_MODE)} |"
     echo
