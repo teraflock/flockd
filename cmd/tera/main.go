@@ -90,6 +90,11 @@ func exeSuffix() string {
 	return ""
 }
 
+// daemonStartWait bounds how long `tera up` waits for the local API. The
+// API opens after the default model has loaded, so this must cover a real
+// load: the laptop's 3B at a 262k-token context takes ~13 s on Metal.
+const daemonStartWait = 60 * time.Second
+
 func cmdUp() *cobra.Command {
 	var standalone bool
 	c := &cobra.Command{
@@ -132,17 +137,30 @@ func cmdUp() *cobra.Command {
 			// looks identical to a healthy start. Poll the local API until
 			// it answers, so `tera up` fails loudly instead of leaving a
 			// crash-looping unit behind.
-			waitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			waitCtx, cancel := context.WithTimeout(ctx, daemonStartWait)
 			defer cancel()
 			if err := waitForDaemon(waitCtx, flagAPI); err != nil {
+				// Not answering yet is not the same as dead. The local API
+				// opens once the default model is loaded, and a big model or
+				// a large context plan (flockd#46) can take longer than we
+				// wait; a boot failure, by contrast, logs an error and
+				// launchd/systemd restart it. A loaded unit whose log shows
+				// no error gets the benefit of the doubt.
+				tail := tailFlockdLogs(ctx, logPath)
+				st, _ := m.Status(ctx)
+				if st == svc.StatusRunning && !logLooksBroken(tail) {
+					fmt.Println(styleWarn.Render("…"), "flockd started but is not answering yet on", flagAPI, "(still loading its model)")
+					fmt.Println(styleDim.Render("  check it in a moment with `tera status`, or follow along with `tera logs -f`"))
+					return nil
+				}
 				fmt.Println(styleWarn.Render("✗"), "flockd installed but not responding on", flagAPI)
-				if tail := tailFlockdLogs(ctx, logPath); tail != "" {
+				if tail != "" {
 					fmt.Println(styleDim.Render("  last log lines:"))
 					for _, line := range strings.Split(strings.TrimRight(tail, "\n"), "\n") {
 						fmt.Println(styleDim.Render("    " + line))
 					}
 				}
-				return fmt.Errorf("daemon did not come up within 10s (try `tera down` to stop the restart loop): %w", err)
+				return fmt.Errorf("daemon did not come up within %s (try `tera down` to stop the restart loop): %w", daemonStartWait, err)
 			}
 			fmt.Println(styleOK.Render("✓"), "flockd service installed and started")
 			fmt.Println(styleDim.Render("  check it with `tera status` or `tera dashboard`"))
@@ -229,6 +247,18 @@ func waitForDaemon(ctx context.Context, base string) error {
 // pointed at on macOS (launchd StandardOutPath) and Windows (the logon
 // task passes it as flockd --log-file). Best-effort — an empty return
 // means "we couldn't get anything," not an error to surface to the user.
+// logLooksBroken reports whether the daemon's recent log lines show a boot
+// failure: an ERROR record, or the "flockd: <err>" line main prints on
+// stderr before exiting (stderr goes to the same file).
+func logLooksBroken(tail string) bool {
+	for _, line := range strings.Split(tail, "\n") {
+		if strings.HasPrefix(line, "flockd: ") || strings.Contains(line, "level=ERROR") {
+			return true
+		}
+	}
+	return false
+}
+
 func tailFlockdLogs(ctx context.Context, logPath string) string {
 	if runtime.GOOS == "linux" {
 		out, err := exec.CommandContext(ctx,
