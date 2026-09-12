@@ -38,7 +38,7 @@ cask "tera" do
   version "$version"
   sha256 "$sha"
 
-  url "https://github.com/teraflock/flockd/releases/download/v#{version}/$pkg_name"
+  url "https://github.com/teraflock/flockd/releases/download/v#{version}/teraflock_#{version}_darwin_all.pkg"
   name "tera"
   desc "Teraflock node daemon + CLI — earn credits serving LLM inference on idle hardware"
   homepage "https://teraflock.ai"
@@ -47,9 +47,9 @@ cask "tera" do
     skip "Auto-generated on release."
   end
 
-  depends_on macos: ">= :monterey"
+  depends_on macos: :monterey
 
-  pkg "$pkg_name"
+  pkg "teraflock_#{version}_darwin_all.pkg"
 
   uninstall pkgutil: "ai.teraflock.tera",
             launchctl: "dev.teraflock.flockd"
