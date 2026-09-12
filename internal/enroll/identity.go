@@ -221,3 +221,14 @@ func Enrolled(dataDir string) bool {
 	_, err := os.Stat(filepath.Join(dataDir, credsFile))
 	return err == nil
 }
+
+// RemoveCredentials deletes the persisted enrollment artifacts so the node
+// can be claimed again (e.g. under a different account). The device
+// identity (node.key) is left in place — only the coordinator-issued cert
+// and node ID tied to the previous enrollment are removed.
+func RemoveCredentials(dataDir string) error {
+	if err := os.Remove(filepath.Join(dataDir, credsFile)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("enroll: remove credentials: %w", err)
+	}
+	return nil
+}

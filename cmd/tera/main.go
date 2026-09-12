@@ -54,7 +54,7 @@ func main() {
 	root.PersistentFlags().StringVar(&flagToken, "token", "", "local API bearer token (default: $TERA_TOKEN, else <data-dir>/local_api_token)")
 
 	root.AddCommand(
-		cmdUp(), cmdDown(), cmdStatus(), cmdLogin(), cmdModels(), cmdLimits(),
+		cmdUp(), cmdDown(), cmdStatus(), cmdLogin(), cmdUnenroll(), cmdModels(), cmdLimits(),
 		cmdEarnings(), cmdRedeem(), cmdDashboard(), cmdLogs(), cmdChat(), cmdMCP(), cmdToken(), cmdVersion(), cmdUninstall(),
 	)
 
@@ -370,25 +370,77 @@ func cmdStatus() *cobra.Command {
 
 func cmdLogin() *cobra.Command {
 	var loginURL, claimCode, verifier string
+	var force bool
 	c := &cobra.Command{
 		Use:   "login",
 		Short: "Enroll this node via browser (PKCE loopback handoff)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			alreadyEnrolled := enroll.Enrolled(dataDir())
+			// A bare re-run of `tera login` on an already-enrolled node used
+			// to blindly replay the whole claim flow, which the coordinator
+			// then rejects (an "expired" link, from its point of view) —
+			// dead end for someone who just wants to confirm they're still
+			// connected. Show what's already here instead, unless the
+			// operator explicitly asks to re-claim.
+			if alreadyEnrolled && !force {
+				if creds, err := enroll.LoadCredentials(dataDir()); err == nil {
+					fmt.Println(styleOK.Render("✓"), "this node is already enrolled")
+					fmt.Printf("  node id       %s\n", creds.NodeID)
+					fmt.Printf("  cert expires  %s\n", creds.CertExpiresAt.Local().Format(time.RFC3339))
+					fmt.Println(styleDim.Render("  run `tera login --force` to re-claim this node (e.g. under a different account)"))
+					return nil
+				}
+			}
 			// --claim-code skips the browser entirely: headless boxes, SSH
 			// sessions, and dev meshes have no browser to hand off to.
 			if claimCode == "" {
-				flow := &enroll.LoginFlow{LoginURL: loginURL}
+				flow := &enroll.LoginFlow{
+					LoginURL: loginURL,
+					OnURL: func(url string) {
+						// Fires before the browser opens and before Run
+						// blocks on the callback, so it's here to copy into
+						// another (e.g. SSH) session right away — not just
+						// after the whole flow finishes or times out.
+						fmt.Println(styleDim.Render("Login URL (visit if the browser didn't open, or from another session):\n  " + url))
+					},
+				}
 				ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Minute)
 				defer cancel()
 				fmt.Println("Opening browser to claim this node…")
-				res, openURL, err := flow.Run(ctx)
-				if openURL != "" {
-					fmt.Println(styleDim.Render("If the browser didn't open, visit:\n  " + openURL))
-				}
+				res, _, err := flow.Run(ctx)
 				if err != nil {
 					return err
 				}
 				claimCode, verifier = res.ClaimCode, res.Verifier
+			}
+			// Re-enrolling a node that already has credentials, with a code
+			// that carries no PKCE verifier (only possible via
+			// --claim-code — the browser flow always binds one): the
+			// running daemon's local API can swap credentials live, no
+			// restart. It is the *only* path that works while old
+			// credentials exist — flockd's own startup path refuses to
+			// re-enroll over them (internal/localapi/enroll.go:30-32).
+			if alreadyEnrolled && verifier == "" {
+				if cl, err := newClient(); err == nil {
+					resp, err := cl.Enroll(cmd.Context(), claimCode)
+					if err != nil {
+						return fmt.Errorf("re-enroll: %w", err)
+					}
+					fmt.Println(styleOK.Render("✓"), "re-enrolled — node id", resp.NodeId)
+					return nil
+				}
+				// Daemon not reachable: fall through to the file-based path
+				// below, which needs the stale credentials cleared first.
+			}
+			if alreadyEnrolled {
+				// The file-based path below only gets read by flockd's
+				// startup enrollment when the node is *not* already
+				// enrolled (see the comment above) — clear the stale
+				// credentials so a restart actually picks up the new code
+				// instead of silently keeping the old identity.
+				if err := enroll.RemoveCredentials(dataDir()); err != nil {
+					return err
+				}
 			}
 			// The daemon consumes these on its next start (`tera`/`flockd` are
 			// separate processes, so the data dir is the handoff). The
@@ -422,7 +474,43 @@ func cmdLogin() *cobra.Command {
 	}
 	c.Flags().StringVar(&loginURL, "url", config.Default().Enroll.LoginURL, "signup/claim page URL")
 	c.Flags().StringVar(&claimCode, "claim-code", "", "enroll with this claim code instead of opening a browser")
+	c.Flags().BoolVar(&force, "force", false, "re-run the claim flow even if this node is already enrolled")
 	return c
+}
+
+func cmdUnenroll() *cobra.Command {
+	return &cobra.Command{
+		Use:   "unenroll",
+		Short: "Remove this node's enrollment (keeps device identity, models, and config)",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if !enroll.Enrolled(dataDir()) {
+				fmt.Println(styleDim.Render("this node is not enrolled — nothing to do"))
+				return nil
+			}
+			if err := enroll.RemoveCredentials(dataDir()); err != nil {
+				return err
+			}
+			fmt.Println(styleOK.Render("✓"), "enrollment removed — device identity, models, and config are kept")
+			// The running daemon still holds the old credentials and tunnel
+			// in memory; there's no live "drop enrollment" API (only live
+			// re-enroll — internal/localapi/enroll.go:30-32), so a restart
+			// is what actually takes it off the mesh.
+			m := svc.NewManager()
+			if st, err := m.Status(cmd.Context()); err == nil && st == svc.StatusRunning {
+				fmt.Println("  restarting flockd so it drops the old enrollment…")
+				if err := m.Stop(cmd.Context()); err != nil {
+					return fmt.Errorf("stop service: %w (run `tera down` manually)", err)
+				}
+				if err := m.Start(cmd.Context()); err != nil {
+					return fmt.Errorf("start service: %w (run `tera up` manually)", err)
+				}
+				fmt.Println(styleOK.Render("✓"), "daemon restarted — run `tera login` to claim this node again")
+				return nil
+			}
+			fmt.Println(styleDim.Render("  run `tera login` to claim this node again"))
+			return nil
+		},
+	}
 }
 
 func cmdModels() *cobra.Command {
