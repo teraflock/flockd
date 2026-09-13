@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -356,6 +357,62 @@ func TestDownloadProgressAndDownloadingState(t *testing.T) {
 	}
 }
 
+func TestDownloadRetriesTransientFailureThenSucceeds(t *testing.T) {
+	blob := []byte("hello world")
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if hits.Add(1) <= 2 {
+			http.Error(w, "rate limited", http.StatusTooManyRequests)
+			return
+		}
+		_, _ = w.Write(blob)
+	}))
+	defer srv.Close()
+
+	m, err := NewManager(t.TempDir(), 0, quietLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.DownloadBackoffMin = time.Millisecond
+	m.DownloadBackoffMax = time.Millisecond
+	sp := &typesv1.ModelSpec{Id: "retry-model", Sha256: shaOf(blob), ArtifactUrl: srv.URL + "/blob", SizeBytes: uint64(len(blob))}
+
+	if _, err := m.Ensure(context.Background(), sp); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if n := hits.Load(); n != 3 {
+		t.Fatalf("hits = %d, want 3 (2 rate-limited attempts then success)", n)
+	}
+	if !m.Has("retry-model") {
+		t.Fatal("not ready after a retried download")
+	}
+}
+
+func TestDownloadGivesUpAfterMaxAttempts(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		http.Error(w, "always busy", http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	m, err := NewManager(t.TempDir(), 0, quietLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.DownloadMaxAttempts = 3
+	m.DownloadBackoffMin = time.Millisecond
+	m.DownloadBackoffMax = time.Millisecond
+	sp := &typesv1.ModelSpec{Id: "always-429", Sha256: shaOf([]byte("y")), ArtifactUrl: srv.URL + "/x", SizeBytes: 1}
+
+	if _, err := m.Ensure(context.Background(), sp); err == nil {
+		t.Fatal("expected error after exhausting retries")
+	}
+	if n := hits.Load(); n != 3 {
+		t.Fatalf("hits = %d, want 3 (DownloadMaxAttempts)", n)
+	}
+}
+
 func TestFailedDownloadLeavesNoEntry(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "nope", http.StatusInternalServerError)
@@ -365,6 +422,7 @@ func TestFailedDownloadLeavesNoEntry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	m.DownloadMaxAttempts = 1 // a 500 is retried in production; this test wants the fast, final failure
 	sp := &typesv1.ModelSpec{Id: "failing", Sha256: shaOf([]byte("y")), ArtifactUrl: srv.URL + "/x", SizeBytes: 1}
 	if _, err := m.Ensure(context.Background(), sp); err == nil {
 		t.Fatal("expected error")
