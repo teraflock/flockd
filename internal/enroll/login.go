@@ -29,6 +29,11 @@ type LoginFlow struct {
 	LoginURL string
 	// OpenBrowser launches the URL; overridable in tests. Nil = browser.Open.
 	OpenBrowser func(url string) error
+	// OnURL, if set, is called with the login URL as soon as it's built —
+	// before the browser is opened and before Run blocks on the callback —
+	// so a caller on a headless/remote box can print it immediately instead
+	// of only learning it after the whole flow finishes or times out.
+	OnURL func(url string)
 }
 
 // Result of a completed login flow.
@@ -81,6 +86,9 @@ func (f *LoginFlow) Run(ctx context.Context) (*Result, string, error) {
 	q.Set("state", state)
 	u.RawQuery = q.Encode()
 	openURL := u.String()
+	if f.OnURL != nil {
+		f.OnURL(openURL)
+	}
 
 	type callback struct {
 		code string

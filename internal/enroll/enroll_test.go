@@ -150,6 +150,51 @@ func TestLoginFlowCallback(t *testing.T) {
 	}
 }
 
+func TestLoginFlowOnURLFiresBeforeCallback(t *testing.T) {
+	var onURLSeen string
+	f := &LoginFlow{
+		LoginURL: "https://teraflock.dev/claim",
+		OnURL: func(u string) {
+			onURLSeen = u
+		},
+		OpenBrowser: func(u string) error {
+			// By the time the "browser" would open, OnURL must already have
+			// fired — that's the whole point: a remote/headless operator
+			// needs the URL before the flow blocks on the callback, not
+			// only after Run returns.
+			if onURLSeen == "" {
+				t.Error("OnURL had not fired before OpenBrowser was called")
+			}
+			go func() {
+				parsed := mustParse(t, u)
+				redirect := parsed.Query().Get("redirect_uri")
+				state := parsed.Query().Get("state")
+				time.Sleep(20 * time.Millisecond)
+				resp, err := http.Get(redirect + "?claim_code=cc-42&state=" + state)
+				if err == nil {
+					_ = resp.Body.Close()
+				}
+			}()
+			return nil
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	res, openURL, err := f.Run(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if onURLSeen == "" {
+		t.Fatal("OnURL never fired")
+	}
+	if onURLSeen != openURL {
+		t.Errorf("OnURL saw %q, Run returned %q", onURLSeen, openURL)
+	}
+	if res.ClaimCode != "cc-42" {
+		t.Errorf("claim code = %q", res.ClaimCode)
+	}
+}
+
 func TestLoginFlowRejectsStateMismatch(t *testing.T) {
 	f := &LoginFlow{
 		LoginURL: "https://teraflock.dev/claim",
