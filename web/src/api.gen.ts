@@ -414,6 +414,42 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/systemone": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Typed decisions (TypeSafe-compatible System One API)
+         * @description Answers bounded, typed questions about a `state` with a decision
+         *     model (catalog `decision: true`) and returns probabilities instead
+         *     of text: no tokens are generated and there is no streaming.
+         *
+         *     Same contract as the mesh gateway's `POST /v1/systemone`
+         *     (TypeSafe's request and response shapes):
+         *
+         *     - **Order is preserved.** `answers` come back in the order the
+         *       `questions` were written, and every `probabilities` / `legend`
+         *       object is in the order of the question's `criteria`. Options are
+         *       shown to the model in the order written.
+         *     - `legend` is rebuilt from the request's `criteria`.
+         *     - `images` is rejected (`422`): no decision model in the catalog
+         *       takes image input under llama.cpp yet.
+         *     - Unknown top-level fields are ignored.
+         *
+         *     The model is loaded on demand when it is on disk but not in memory.
+         */
+        post: operations["systemOne"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -422,6 +458,8 @@ export interface components {
             error: {
                 message: string;
                 type: string;
+                /** @description Machine-readable code where one exists (`model_not_found`). */
+                code?: string;
             };
         };
         Ok: {
@@ -442,7 +480,9 @@ export interface components {
              * @description Client-certificate expiry; present when enrolled.
              */
             cert_expires_at?: string;
-            /** @description serving | yielded | paused-battery | paused-thermal | outside-schedule */
+            /** @description Why the last due client-certificate rotation failed; absent when rotation is not due or succeeded. The node keeps serving on the current certificate and leaves the mesh when it expires unless a later restart rotates it or the node is re-enrolled. */
+            cert_rotation_error?: string;
+            /** @description serving | starting | idle | no-model | yielded | paused-battery | paused-thermal | outside-schedule. `starting`: the default model is still being fetched or loaded; `idle`: nothing loaded but models are on disk (a placement or request loads one); `no-model`: nothing loaded and nothing on disk. */
             state: string;
             /** Format: int64 */
             uptime_seconds: number;
@@ -596,6 +636,8 @@ export interface components {
             /** Format: int64 */
             context_length: number;
             embeddings: boolean;
+            /** @description A typed decision model: served by `POST /v1/systemone`, never by the chat endpoints. Mutually exclusive with `embeddings`. */
+            decision: boolean;
             installed: boolean;
             /** @description downloading | ready; present when the artifact is local. */
             state?: string;
@@ -749,6 +791,142 @@ export interface components {
             node_id: string;
             /** Format: date-time */
             cert_expires_at: string;
+        };
+        /** @description Free-form content given to the model: a string, an object or an array. A value that is not a string reaches the model as compact JSON text. */
+        SystemOneJSON: string | {
+            [key: string]: unknown;
+        } | unknown[];
+        /** @description The description of one `choice` option: free-form content, or `null` for an option that needs none. */
+        SystemOneDescription: (string | {
+            [key: string]: unknown;
+        } | unknown[]) | null;
+        SystemOneRequest: {
+            /** @description Catalog id of a decision model (`decision: true`), or its `flock/<id>` alias. */
+            model: string;
+            /** @description The content to evaluate. */
+            state: components["schemas"]["SystemOneJSON"];
+            /** @description Maps a question id (yours) to a question. 1 to 64 entries, ids unique. Key order is preserved: answers come back in this order. */
+            questions: {
+                [key: string]: components["schemas"]["SystemOneQuestion"];
+            };
+        };
+        /** @description One typed question, discriminated by `type`. */
+        SystemOneQuestion: components["schemas"]["SystemOneChoiceQuestion"] | components["schemas"]["SystemOneScoreQuestion"] | components["schemas"]["SystemOneNoulQuestion"];
+        /** @description Pick one of the labelled options. */
+        SystemOneChoiceQuestion: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "choice";
+            /** @description The question. Must not be empty. */
+            instructions: components["schemas"]["SystemOneJSON"];
+            /** @description Maps each option key to its description (or `null`). 2 to 255 options, keys unique; the model reads them in the order written. The model may have a lower limit of its own (`422`). */
+            criteria: {
+                [key: string]: components["schemas"]["SystemOneDescription"];
+            };
+        };
+        /** @description Place the state on an ordered scale. */
+        SystemOneScoreQuestion: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "score";
+            /** @description The question. Must not be empty. */
+            instructions: components["schemas"]["SystemOneJSON"];
+            /** @description 2 to 10 level descriptions, lowest level first. */
+            criteria: components["schemas"]["SystemOneJSON"][];
+        };
+        /** @description The probability that a yes/no statement is true. */
+        SystemOneNoulQuestion: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "noul";
+            /** @description The statement or question. Must not be empty. */
+            instructions: components["schemas"]["SystemOneJSON"];
+            /** @description Optional. Exactly the descriptions of `true` and `false`. */
+            criteria?: {
+                true: components["schemas"]["SystemOneJSON"];
+                false: components["schemas"]["SystemOneJSON"];
+            };
+        };
+        SystemOneResponse: {
+            /** @description The catalog id of the model that answered. */
+            model: string;
+            /** @description Maps each question id to its answer, in request order. */
+            answers: {
+                [key: string]: components["schemas"]["SystemOneAnswer"];
+            };
+            usage: components["schemas"]["SystemOneUsage"];
+        };
+        /** @description One typed answer, discriminated by `type` (the question's type). */
+        SystemOneAnswer: components["schemas"]["SystemOneChoiceAnswer"] | components["schemas"]["SystemOneScoreAnswer"] | components["schemas"]["SystemOneNoulAnswer"];
+        SystemOneChoiceAnswer: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "choice";
+            /** @description The option key with the highest probability. */
+            choice: string;
+            /** @description The probability of each option, in the order of the question's `criteria`; they sum to 1. */
+            probabilities: {
+                [key: string]: number;
+            };
+            /**
+             * Format: double
+             * @description 0 to 1; 0 means all options are equally likely.
+             */
+            confidence: number;
+        };
+        SystemOneScoreAnswer: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "score";
+            /**
+             * Format: double
+             * @description The expected level index, weighted by probability; it can fall between two levels.
+             */
+            score: number;
+            /** @description The description of each level index (`"0"`, `"1"`, …), rebuilt from the request's `criteria`. */
+            legend: {
+                [key: string]: components["schemas"]["SystemOneJSON"];
+            };
+            /** @description The probability of each level index, lowest first; they sum to 1. */
+            probabilities: {
+                [key: string]: number;
+            };
+            /**
+             * Format: double
+             * @description 0 to 1.
+             */
+            confidence: number;
+        };
+        SystemOneNoulAnswer: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "noul";
+            /**
+             * Format: double
+             * @description The probability that the answer is true.
+             */
+            noul: number;
+        };
+        SystemOneUsage: {
+            /** @description Prompt tokens across all questions. */
+            input_tokens: number;
+            /**
+             * @description Always 0: a decision model generates no tokens.
+             * @enum {integer}
+             */
+            output_tokens: 0;
         };
     };
     responses: {
@@ -1351,6 +1529,146 @@ export interface operations {
                 };
                 content: {
                     "application/json": Record<string, never>;
+                };
+            };
+        };
+    };
+    systemOne: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                /**
+                 * @example {
+                 *       "model": "laya-q8_0",
+                 *       "state": "Help! My payouts have been failing for 3 days.",
+                 *       "questions": {
+                 *         "department": {
+                 *           "type": "choice",
+                 *           "instructions": "Which team should handle this?",
+                 *           "criteria": {
+                 *             "billing": "Payments, invoicing, refunds",
+                 *             "technical": null
+                 *           }
+                 *         },
+                 *         "urgency": {
+                 *           "type": "score",
+                 *           "instructions": "How urgent is this?",
+                 *           "criteria": [
+                 *             "can wait",
+                 *             "this week",
+                 *             "today",
+                 *             "right now"
+                 *           ]
+                 *         },
+                 *         "escalate": {
+                 *           "type": "noul",
+                 *           "instructions": "Does this need a human within the hour?"
+                 *         }
+                 *       }
+                 *     }
+                 */
+                "application/json": components["schemas"]["SystemOneRequest"];
+            };
+        };
+        responses: {
+            /** @description One typed answer per question, in request order. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    /**
+                     * @example {
+                     *       "model": "laya-q8_0",
+                     *       "answers": {
+                     *         "department": {
+                     *           "type": "choice",
+                     *           "choice": "billing",
+                     *           "probabilities": {
+                     *             "billing": 0.91,
+                     *             "technical": 0.09
+                     *           },
+                     *           "confidence": 0.82
+                     *         },
+                     *         "urgency": {
+                     *           "type": "score",
+                     *           "score": 2.09,
+                     *           "legend": {
+                     *             "0": "can wait",
+                     *             "1": "this week",
+                     *             "2": "today",
+                     *             "3": "right now"
+                     *           },
+                     *           "probabilities": {
+                     *             "0": 0,
+                     *             "1": 0.12,
+                     *             "2": 0.67,
+                     *             "3": 0.21
+                     *           },
+                     *           "confidence": 0.67
+                     *         },
+                     *         "escalate": {
+                     *           "type": "noul",
+                     *           "noul": 0.63
+                     *         }
+                     *       },
+                     *       "usage": {
+                     *         "input_tokens": 239,
+                     *         "output_tokens": 0
+                     *       }
+                     *     }
+                     */
+                    "application/json": components["schemas"]["SystemOneResponse"];
+                };
+            };
+            /** @description The body is not a JSON object. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Unknown model, or a model that is not a decision model (`error.code: model_not_found`; chat models are served by `/v1/chat/completions`). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Validation failure (the message names the offending `questions.<id>` path), `images`, or input the runtime itself rejected (too many options for the model, a prompt over its context). */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description The runtime failed to answer. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description The governor refuses inference right now (state in the message). */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };

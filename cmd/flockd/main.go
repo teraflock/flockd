@@ -644,6 +644,16 @@ func loadDefaultModel(ctx context.Context, cfg config.Config, hw *typesv1.Capabi
 		eng.Register(spec, inst)
 		reportRuntimeBuild(hw, inst, log)
 		log.Info("mock runtime loaded", "model", spec.ID, "tok_per_sec", cfg.Runtime.MockTokensPerSec)
+		// A second fixture so /v1/systemone has something to answer in
+		// standalone demos and the smoke test: a decision model serves
+		// typed decisions only, so it cannot be the chat fixture too.
+		// Registered second: the chat fixture stays the default model.
+		dspec := rt.ModelSpec{ID: "mock-decision", ContextLength: 8192, Decision: true}
+		dinst, err := mock.Load(ctx, dspec, budget)
+		if err != nil {
+			return err
+		}
+		eng.Register(dspec, dinst)
 		return nil
 
 	case "llamacpp":

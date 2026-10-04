@@ -140,6 +140,9 @@ func New(deps Deps) *Server {
 	s.mux.HandleFunc("POST /v1/chat/completions", s.authV1(s.handleChatCompletions))
 	s.mux.HandleFunc("POST /v1/completions", s.authV1(s.handleCompletions))
 	s.mux.HandleFunc("POST /v1/embeddings", s.authV1(s.handleEmbeddings))
+	// Typed decisions (TypeSafe "System One" API) — same keyless-loopback
+	// rule as the OpenAI routes, typed in the spec under the `openai` tag.
+	s.mux.HandleFunc("POST /v1/systemone", s.authV1(s.handleSystemOne))
 
 	// Daemon management API: routes come from api/openapi.yaml via
 	// oapi-codegen (make gen) — the spec is the router, so the two cannot

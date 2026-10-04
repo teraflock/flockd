@@ -62,6 +62,18 @@ curl -sf -X POST "http://127.0.0.1:$PORT/v1/embeddings" \
   -H 'Content-Type: application/json' \
   -d '{"input":["alpha","beta"]}' | grep -q '"embedding"' || fail "/v1/embeddings"
 
+echo "==> POST /v1/systemone (typed decisions, answers in request order)"
+DEC=$(curl -sf -X POST "http://127.0.0.1:$PORT/v1/systemone" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"mock-decision","state":"payouts failing for 3 days","questions":{"team":{"type":"choice","instructions":"Which team?","criteria":{"technical":null,"billing":"Payments"}},"urgency":{"type":"score","instructions":"How urgent?","criteria":["can wait","today"]},"escalate":{"type":"noul","instructions":"Escalate?"}}}')
+echo "$DEC" | grep -q '"answers":{"team":{"type":"choice".*"urgency":{"type":"score".*"escalate":{"type":"noul"' || fail "/v1/systemone answers malformed or out of order: $DEC"
+echo "$DEC" | grep -q '"probabilities":{"technical":.*"billing":' || fail "/v1/systemone option order not preserved: $DEC"
+echo "$DEC" | grep -q '"output_tokens":0' || fail "/v1/systemone usage: $DEC"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/v1/systemone" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"mock-8b-instruct","state":"x","questions":{"a":{"type":"noul","instructions":"q"}}}')
+[ "$CODE" = "404" ] || fail "/v1/systemone on a chat model: expected 404, got $CODE"
+
 TOKEN=$(cat "$DATA_DIR/local_api_token")
 
 echo "==> /api/v1 auth enforcement"

@@ -69,6 +69,7 @@ func (s *Server) GetCatalog(w http.ResponseWriter, r *http.Request, params gen.G
 			PayoutClass:   m.PayoutClass,
 			ContextLength: int64(m.ContextLength),
 			Embeddings:    m.Embeddings,
+			Decision:      m.Decision,
 			Loaded:        loaded[m.ID],
 			Default:       m.ID == def,
 		}

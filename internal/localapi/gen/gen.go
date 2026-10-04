@@ -68,7 +68,10 @@ type Assignment struct {
 type CatalogEntry struct {
 	ArtifactUrl   string `json:"artifact_url"`
 	ContextLength int64  `json:"context_length"`
-	Default       bool   `json:"default"`
+
+	// Decision A typed decision model: served by `POST /v1/systemone`, never by the chat endpoints. Mutually exclusive with `embeddings`.
+	Decision bool `json:"decision"`
+	Default  bool `json:"default"`
 
 	// DisplayName Human-readable name incl. quant ("Qwen3.8 27B · Q4_K_M") — show this, not the id: ids are ambiguous now that model lines carry point versions (qwen3-8b vs qwen3.8-27b). Optional: absent when the daemon's catalog predates the field.
 	DisplayName *string `json:"display_name,omitempty"`
@@ -181,8 +184,10 @@ type EnrollResponse struct {
 // Error defines model for Error.
 type Error struct {
 	Error struct {
-		Message string `json:"message"`
-		Type    string `json:"type"`
+		// Code Machine-readable code where one exists (`model_not_found`).
+		Code    *string `json:"code,omitempty"`
+		Message string  `json:"message"`
+		Type    string  `json:"type"`
 	} `json:"error"`
 }
 
