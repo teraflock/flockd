@@ -18,7 +18,6 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 
 	rt "github.com/teraflock/flockd/internal/runtime"
 )
@@ -138,7 +137,8 @@ func isEmptyLeaf(compacted string) bool {
 
 // Request is a validated /v1/systemone request.
 type Request struct {
-	// Model is the requested model with the `flock/` alias prefix removed.
+	// Model is the requested model as written (a concrete id, a manifest
+	// id or its `flock/<id>` alias); the caller resolves it.
 	Model string
 	Input rt.DecisionInput
 }
@@ -174,7 +174,6 @@ func ParseRequest(body []byte) (*Request, error) {
 	if err := json.Unmarshal(model, &req.Model); err != nil || req.Model == "" {
 		return nil, invalid("model is required and must be a string")
 	}
-	req.Model = strings.TrimPrefix(req.Model, "flock/")
 
 	if images != nil && kind(images) != 'n' {
 		return nil, invalid("image input is not supported by this model")

@@ -172,6 +172,8 @@ type ClientInterface interface {
 
 	// SetDefaultModel Serve this model when a request names none (must be loaded)
 	//
+	// Only a chat model can be the default: a decision or embedding model is refused with `400`. With no chat model loaded the node has no default (`status.default_model` is empty).
+	//
 	// Corresponds with POST /api/v1/models/{id}/default (the `SetDefaultModel` operationId).
 	SetDefaultModel(ctx context.Context, id ModelID, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -427,6 +429,8 @@ func (c *Client) DeleteModel(ctx context.Context, id ModelID, reqEditors ...Requ
 }
 
 // SetDefaultModel Serve this model when a request names none (must be loaded)
+//
+// Only a chat model can be the default: a decision or embedding model is refused with `400`. With no chat model loaded the node has no default (`status.default_model` is empty).
 //
 // Corresponds with POST /api/v1/models/{id}/default (the `SetDefaultModel` operationId).
 func (c *Client) SetDefaultModel(ctx context.Context, id ModelID, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -1353,6 +1357,8 @@ type ClientWithResponsesInterface interface {
 
 	// SetDefaultModelWithResponse Serve this model when a request names none (must be loaded)
 	//
+	// Only a chat model can be the default: a decision or embedding model is refused with `400`. With no chat model loaded the node has no default (`status.default_model` is empty).
+	//
 	// Returns a wrapper object for the known response body format(s).
 	//
 	// Corresponds with POST /api/v1/models/{id}/default (the `SetDefaultModel` operationId).
@@ -1976,6 +1982,8 @@ type SetDefaultModelResponse struct {
 	HTTPResponse *http.Response
 	// JSON200 the response for an HTTP 200 `application/json` response
 	JSON200 *Ok
+	// JSON400 the response for an HTTP 400 `application/json` response
+	JSON400 *BadRequest
 	// JSON401 the response for an HTTP 401 `application/json` response
 	JSON401 *Unauthorized
 	// JSON404 the response for an HTTP 404 `application/json` response
@@ -1987,6 +1995,11 @@ type SetDefaultModelResponse struct {
 // GetJSON200 returns the response for an HTTP 200 `application/json` response
 func (r SetDefaultModelResponse) GetJSON200() *Ok {
 	return r.JSON200
+}
+
+// GetJSON400 returns the response for an HTTP 400 `application/json` response
+func (r SetDefaultModelResponse) GetJSON400() *BadRequest {
+	return r.JSON400
 }
 
 // GetJSON401 returns the response for an HTTP 401 `application/json` response
@@ -2637,6 +2650,8 @@ func (c *ClientWithResponses) DeleteModelWithResponse(ctx context.Context, id Mo
 
 // SetDefaultModelWithResponse Serve this model when a request names none (must be loaded)
 //
+// Only a chat model can be the default: a decision or embedding model is refused with `400`. With no chat model loaded the node has no default (`status.default_model` is empty).
+//
 // Returns a wrapper object for the known response body format(s).
 //
 // Corresponds with POST /api/v1/models/{id}/default (the `SetDefaultModel` operationId).
@@ -3178,6 +3193,13 @@ func ParseSetDefaultModelResponse(rsp *http.Response) (*SetDefaultModelResponse,
 			return nil, err
 		}
 		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest BadRequest
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON400 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
 		var dest Unauthorized

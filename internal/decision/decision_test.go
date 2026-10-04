@@ -40,8 +40,8 @@ func mustParse(t *testing.T, body string) *Request {
 
 func TestParseRequestPreservesOrder(t *testing.T) {
 	req := mustParse(t, orderedRequest)
-	if req.Model != "laya-q8_0" {
-		t.Fatalf("model = %q, want the flock/ alias stripped", req.Model)
+	if req.Model != "flock/laya-q8_0" {
+		t.Fatalf("model = %q, want it as written", req.Model)
 	}
 	// Compact JSON text, number digits and key order intact, no HTML escaping.
 	if want := `{"ticket":4711,"amount":12.50,"text":"payouts <failing> for 3 days"}`; req.Input.StateJSON != want {
@@ -211,7 +211,7 @@ func TestWriteResponseOrderedWithLegendFromRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := WriteResponse(req.Model, &req.Input, answers, usage)
+	out, err := WriteResponse("laya-q8_0", &req.Input, answers, usage)
 	if err != nil {
 		t.Fatal(err)
 	}

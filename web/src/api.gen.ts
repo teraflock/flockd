@@ -159,7 +159,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Serve this model when a request names none (must be loaded) */
+        /**
+         * Serve this model when a request names none (must be loaded)
+         * @description Only a chat model can be the default: a decision or embedding model is refused with `400`. With no chat model loaded the node has no default (`status.default_model` is empty).
+         */
         post: operations["setDefaultModel"];
         delete?: never;
         options?: never;
@@ -314,7 +317,8 @@ export interface paths {
          *     - `model_progress`: `{model, received_bytes, total_bytes}` during
          *       downloads (throttled).
          *     - `models_changed`: `{model, change}` where change is
-         *       downloaded|loaded|unloaded|default.
+         *       downloaded|loaded|unloaded|default, or `{change: catalog}`
+         *       when a refreshed catalog differs from the one held.
          *     - `model_assignment`: `{model, state, error}` as a coordinator
          *       placement moves through assigned|downloading|ready|cached|
          *       declined|failed|evicted.
@@ -428,6 +432,12 @@ export interface paths {
          * @description Answers bounded, typed questions about a `state` with a decision
          *     model (catalog `decision: true`) and returns probabilities instead
          *     of text: no tokens are generated and there is no streaming.
+         *
+         *     `model` is a concrete catalog id (`laya-q8_0`), a manifest id
+         *     (`laya`) or its `flock/<id>` alias; the latter two resolve to the
+         *     quant this node has loaded, else has on disk, else the manifest's
+         *     first (the same names work on the chat routes). The response's
+         *     `model` is always the concrete id.
          *
          *     Same contract as the mesh gateway's `POST /v1/systemone`
          *     (TypeSafe's request and response shapes):
@@ -1209,6 +1219,7 @@ export interface operations {
         requestBody?: never;
         responses: {
             200: components["responses"]["Ok"];
+            400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
             501: components["responses"]["Unsupported"];

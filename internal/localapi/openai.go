@@ -8,10 +8,13 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/teraflock/flockd/internal/engine"
 	"github.com/teraflock/flockd/internal/governor"
+	"github.com/teraflock/flockd/internal/models"
 	rt "github.com/teraflock/flockd/internal/runtime"
 )
 
@@ -171,7 +174,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	creq := rt.CompletionRequest{
 		ID:     newRequestID(),
-		Model:  req.Model,
+		Model:  s.resolveModel(r.Context(), req.Model),
 		Kind:   rt.KindChat,
 		Params: req.params(),
 	}
@@ -206,7 +209,7 @@ func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	creq := rt.CompletionRequest{
 		ID:     newRequestID(),
-		Model:  req.Model,
+		Model:  s.resolveModel(r.Context(), req.Model),
 		Kind:   rt.KindCompletion,
 		Prompt: prompt,
 		Params: req.params(),
@@ -374,9 +377,10 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	modelID := s.resolveModel(r.Context(), req.Model)
 	stream, err := s.complete(r.Context(), rt.CompletionRequest{
 		ID:             newRequestID(),
-		Model:          req.Model,
+		Model:          modelID,
 		Kind:           rt.KindEmbedding,
 		EmbeddingInput: input,
 	})
@@ -406,7 +410,7 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	model := req.Model
+	model := modelID
 	if model == "" {
 		model = s.deps.Engine.DefaultModel()
 	}
@@ -435,6 +439,67 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func newRequestID() string {
 	return fmt.Sprintf("%08x%08x", rand.Uint32(), rand.Uint32()) //nolint:gosec
+}
+
+// resolveModel maps the model a /v1 request names onto the concrete model
+// id this node serves it with. The mesh gateway's public names work
+// locally too:
+//
+//   - a concrete id (`laya-q8_0`, or an operator's own model) is itself;
+//   - `flock/<manifest id>` and the bare manifest id (`flock/laya`, `laya`)
+//     name every quant of that catalog manifest. The gateway serves the
+//     manifest's first quant; a node prefers the quant it already has —
+//     loaded, else on disk — and falls back to the first.
+//
+// "" stays "" (the default model). A name nothing matches is returned
+// without its `flock/` prefix, for the caller's 404. Responses always
+// carry the concrete id.
+func (s *Server) resolveModel(ctx context.Context, name string) string {
+	bare := strings.TrimPrefix(name, "flock/")
+	if bare == "" {
+		return bare
+	}
+	loaded := map[string]bool{}
+	var loadedQuants []string // loaded quants of manifest `bare`, by id
+	for _, m := range s.deps.Engine.Models() {
+		loaded[m.Spec.ID] = true
+		if models.ManifestIDOf(m.Spec.ID, m.Spec.Quant) == bare {
+			loadedQuants = append(loadedQuants, m.Spec.ID)
+		}
+	}
+	installed := func(id string) bool { return s.deps.Models != nil && s.deps.Models.Has(id) }
+	if loaded[bare] || installed(bare) {
+		return bare
+	}
+	var quants []models.CatalogModel
+	if ops := s.deps.ModelOps; ops != nil {
+		// Lookup refetches the catalog once on a miss (rate-limited), so
+		// a model promoted since the last fetch resolves too.
+		if _, ok, err := ops.Lookup(ctx, bare); err == nil && ok {
+			return bare
+		}
+		if cat, err := ops.Catalog(ctx, false); err == nil {
+			quants = cat.Quants(bare)
+		}
+	}
+	for _, q := range quants {
+		if loaded[q.ID] {
+			return q.ID
+		}
+	}
+	if len(loadedQuants) > 0 { // loaded but not (or no longer) in the catalog
+		sort.Strings(loadedQuants)
+		return loadedQuants[0]
+	}
+	for _, q := range quants {
+		if installed(q.ID) {
+			return q.ID
+		}
+	}
+	if len(quants) > 0 {
+		return quants[0].ID
+	}
+	return bare
 }
 
 // complete dispatches to the engine, loading the model first when it is on

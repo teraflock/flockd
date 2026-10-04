@@ -52,9 +52,13 @@ func (s *Server) handleSystemOne(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// `flock/<manifest id>` and the bare manifest id resolve to the quant
+	// this node has; the response names the concrete id.
+	requested := req.Model
+	req.Model = s.resolveModel(r.Context(), req.Model)
 	if !s.isDecisionModel(r.Context(), req.Model) {
 		writeAPIError(w, http.StatusNotFound, "invalid_request_error", "model_not_found",
-			fmt.Sprintf("model %q is not a decision model on this node; /v1/systemone serves models with decision: true (use /v1/chat/completions for chat models)", req.Model))
+			fmt.Sprintf("model %q is not a decision model on this node; /v1/systemone serves models with decision: true (use /v1/chat/completions for chat models)", requested))
 		return
 	}
 
@@ -121,12 +125,8 @@ func (s *Server) isDecisionModel(ctx context.Context, id string) bool {
 	if s.deps.ModelOps == nil || s.deps.Models == nil || !s.deps.Models.Has(id) {
 		return false
 	}
-	cat, err := s.deps.ModelOps.Catalog(ctx, false)
-	if err != nil {
-		return false
-	}
-	entry, ok := cat.Find(id)
-	return ok && entry.Decision
+	entry, ok, err := s.deps.ModelOps.Lookup(ctx, id)
+	return err == nil && ok && entry.Decision
 }
 
 // writeDecisionError maps a failed decision onto the public statuses.
