@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -33,9 +34,17 @@ var ErrUnknownModel = errors.New("modelops: model not in catalog")
 // ErrDownloadRunning is returned when a download for the id is in flight.
 var ErrDownloadRunning = errors.New("modelops: download already running")
 
-// catalogTTL is how long a fetched catalog is trusted before a background
-// refetch. Catalog reads never block on the network once one copy is held.
-const catalogTTL = 15 * time.Minute
+// catalogTTL is how long a fetched catalog is trusted before the next
+// read refetches it, and how often RunCatalogRefresh does so unasked: a
+// newly promoted catalog reaches a running daemon within this long without
+// a restart. The refetch is conditional (ETag / Last-Modified), so an
+// unchanged catalog costs a 304.
+const catalogTTL = 5 * time.Minute
+
+// catalogMissRefetch rate-limits the refetch a lookup miss triggers (see
+// Lookup): at most one per this long, however many unknown ids are asked
+// for. A var so tests can shorten it.
+var catalogMissRefetch = 30 * time.Second
 
 // Loader loads a model artifact into a serving runtime instance
 // (*llamacpp.Adapter in production; fakes in tests).
@@ -97,17 +106,21 @@ type Service struct {
 	mu        sync.Mutex
 	catalog   *models.Catalog
 	fetchedAt time.Time
-	downloads map[string]context.CancelFunc
-	loading   map[string]bool
-	loads     map[string]*loadInfo
+	// catalogStamp is the HTTP validators of catalog (conditional refetch);
+	// catalogTried is the last fetch attempt, successful or not.
+	catalogStamp models.CatalogStamp
+	catalogTried time.Time
+	downloads    map[string]context.CancelFunc
+	loading      map[string]bool
+	loads        map[string]*loadInfo
 	// Last VRAM sample (discrete GPUs); zero time = never sampled.
 	vramUsedMB    int64
 	vramSampledAt time.Time
 	vramSampleSeq uint64 // incremented per card read; see loadInfo.VRAMSeq
 }
 
-// Catalog returns the model catalog, cached for catalogTTL. refresh forces a
-// refetch.
+// Catalog returns the model catalog, cached for catalogTTL. refresh forces
+// a refetch. A failed refetch keeps the last good copy.
 func (s *Service) Catalog(ctx context.Context, refresh bool) (*models.Catalog, error) {
 	s.mu.Lock()
 	if s.catalog != nil && !refresh && time.Since(s.fetchedAt) < catalogTTL {
@@ -115,9 +128,21 @@ func (s *Service) Catalog(ctx context.Context, refresh bool) (*models.Catalog, e
 		s.mu.Unlock()
 		return c, nil
 	}
+	stamp := s.catalogStamp
+	if s.catalog == nil {
+		stamp = models.CatalogStamp{} // nothing to keep on a 304
+	}
+	s.catalogTried = time.Now()
 	s.mu.Unlock()
 
-	c, err := models.LoadCatalog(ctx, s.ManifestPath, s.ManifestURL, nil)
+	c, newStamp, err := models.FetchCatalog(ctx, s.ManifestPath, s.ManifestURL, nil, stamp)
+	if errors.Is(err, models.ErrCatalogNotModified) {
+		s.mu.Lock()
+		s.fetchedAt = time.Now()
+		c = s.catalog
+		s.mu.Unlock()
+		return c, nil
+	}
 	if err != nil {
 		// A stale catalog beats no catalog: models don't churn hourly.
 		s.mu.Lock()
@@ -130,13 +155,88 @@ func (s *Service) Catalog(ctx context.Context, refresh bool) (*models.Catalog, e
 		return nil, err
 	}
 	s.mu.Lock()
+	prev := s.catalog
 	s.catalog = c
+	s.catalogStamp = newStamp
 	s.fetchedAt = time.Now()
 	s.mu.Unlock()
 	if s.Mgr != nil {
 		s.Mgr.Reconcile(c)
 	}
+	if prev != nil && !sameCatalog(prev, c) {
+		s.log().Info("catalog updated", "models", len(c.Models), "was", len(prev.Models))
+		s.Events.Publish("models_changed", map[string]string{"change": "catalog"})
+	}
 	return c, nil
+}
+
+// sameCatalog reports whether two catalogs list the same artifacts.
+func sameCatalog(a, b *models.Catalog) bool {
+	if len(a.Models) != len(b.Models) {
+		return false
+	}
+	for i := range a.Models {
+		if a.Models[i].ID != b.Models[i].ID || a.Models[i].SHA256 != b.Models[i].SHA256 {
+			return false
+		}
+	}
+	return true
+}
+
+// Lookup finds a catalog entry by id. A miss triggers one refetch before
+// the answer is "not in catalog" — a model promoted since the last fetch
+// is found without waiting for the TTL or a restart — rate-limited to one
+// refetch per catalogMissRefetch so unknown ids cannot hammer the host.
+func (s *Service) Lookup(ctx context.Context, id string) (models.CatalogModel, bool, error) {
+	cat, err := s.Catalog(ctx, false)
+	if err != nil {
+		return models.CatalogModel{}, false, err
+	}
+	if m, ok := cat.Find(id); ok {
+		return m, true, nil
+	}
+	if cat, ok := s.refetchOnMiss(ctx); ok {
+		m, found := cat.Find(id)
+		return m, found, nil
+	}
+	return models.CatalogModel{}, false, nil
+}
+
+// refetchOnMiss refetches the catalog after a lookup miss unless one was
+// attempted within catalogMissRefetch; ok is false when it did not.
+func (s *Service) refetchOnMiss(ctx context.Context) (*models.Catalog, bool) {
+	s.mu.Lock()
+	recent := time.Since(s.catalogTried) < catalogMissRefetch
+	s.mu.Unlock()
+	if recent {
+		return nil, false
+	}
+	cat, err := s.Catalog(ctx, true)
+	if err != nil {
+		return nil, false
+	}
+	return cat, true
+}
+
+// RunCatalogRefresh refetches the catalog every interval (<= 0:
+// catalogTTL) until ctx ends, so a daemon that nobody asks about models
+// still learns of a promoted catalog. Failures keep the last good copy.
+func (s *Service) RunCatalogRefresh(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = catalogTTL
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if _, err := s.Catalog(ctx, true); err != nil {
+				s.log().Warn("catalog refresh failed", "err", err)
+			}
+		}
+	}
 }
 
 // StartDownload begins fetching a catalog model in the background. It
@@ -151,11 +251,10 @@ func (s *Service) StartDownload(ctx context.Context, id string) (bool, error) {
 			return false, nil
 		}
 	}
-	cat, err := s.Catalog(ctx, false)
+	entry, ok, err := s.Lookup(ctx, id)
 	if err != nil {
 		return false, err
 	}
-	entry, ok := cat.Find(id)
 	if !ok {
 		return false, fmt.Errorf("%w: %q", ErrUnknownModel, id)
 	}
@@ -224,11 +323,10 @@ func (s *Service) Fetch(ctx context.Context, id, origin string) error {
 	if err := models.ValidateID(id); err != nil {
 		return err
 	}
-	cat, err := s.Catalog(ctx, false)
+	entry, ok, err := s.Lookup(ctx, id)
 	if err != nil {
 		return err
 	}
-	entry, ok := cat.Find(id)
 	if !ok {
 		return fmt.Errorf("%w: %q", ErrUnknownModel, id)
 	}
@@ -285,11 +383,10 @@ func (s *Service) LoadInstanceOrigin(ctx context.Context, id, origin string) (rt
 		s.mu.Unlock()
 	}()
 
-	cat, err := s.Catalog(ctx, false)
+	entry, ok, err := s.Lookup(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	entry, ok := cat.Find(id)
 	if !ok {
 		return nil, fmt.Errorf("%w: %q", ErrUnknownModel, id)
 	}
@@ -353,13 +450,21 @@ func (s *Service) LoadInstanceOrigin(ctx context.Context, id, origin string) (rt
 	// small GQA models (the 3B: 112 KB/token real, 30 KB guessed), which
 	// planned a 262k-token cache the estimate put at 10 GB and the process
 	// took 27 GB for.
+	arch := ""
 	if meta, err := gguf.ReadMeta(path); err == nil {
+		arch = meta.Architecture
 		in.KVBytesPerToken = meta.KVBytesPerToken()
 		if in.Window <= 0 && meta.ContextLength > 0 {
 			in.Window = meta.ContextLength
 		}
 	} else {
 		s.log().Debug("gguf header not read; using the size heuristic", "model", id, "err", err)
+	}
+	if spec.Decision {
+		// A decision model is planned modestly, not grown into the free
+		// budget; a BERT-family encoder (Laya, Julia) is also costed as
+		// what it is: no KV cache, one batch buffer (memory.DecisionPlanInput).
+		in = memory.DecisionPlanInput(in, strings.Contains(strings.ToLower(arch), "bert"), strings.ToLower(spec.Family))
 	}
 	minEstimate := in.EstimateAt(memory.FloorContext(in))
 
@@ -378,7 +483,8 @@ func (s *Service) LoadInstanceOrigin(ctx context.Context, id, origin string) (rt
 	res := s.Budget
 	res.Slots, res.ContextTokens = plan.Slots, plan.TotalCtx
 	s.log().Info("context plan", "model", id, "slots", plan.Slots, "ctx_per_slot", plan.CtxPerSlot,
-		"ctx_total", plan.TotalCtx, "kv_kb_per_token", in.KVBytesPerToken/1024, "estimate_mb", estimate,
+		"ctx_total", plan.TotalCtx, "kv_kb_per_token", in.KVBytesPerToken/1024,
+		"decision", spec.Decision, "encoder_mb_per_token", in.EncoderMBPerToken, "estimate_mb", estimate,
 		"used_mb", in.UsedMB, "budget_mb", in.BudgetMB, "squeezed", plan.Squeezed)
 	inst, err := s.Loader.Load(ctx, spec, res)
 	if err != nil {

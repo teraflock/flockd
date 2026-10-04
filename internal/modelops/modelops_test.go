@@ -12,6 +12,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -254,5 +256,177 @@ func TestLoadRefusesDecisionModelOnOldRuntime(t *testing.T) {
 	}
 	if m := eng.Models(); len(m) != 1 || !m[0].Spec.Decision || m[0].Spec.Embeddings {
 		t.Fatalf("loaded = %+v", m)
+	}
+}
+
+// catalogServer serves a mutable catalog with an ETag and counts requests.
+type catalogServer struct {
+	mu         sync.Mutex
+	body       string
+	version    int
+	fail       bool
+	full, cond int
+}
+
+func (c *catalogServer) set(body string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.body = body
+	c.version++
+}
+
+func (c *catalogServer) counts() (full, cond int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.full, c.cond
+}
+
+func (c *catalogServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.fail {
+		http.Error(w, "boom", http.StatusInternalServerError)
+		return
+	}
+	etag := fmt.Sprintf(`"v%d"`, c.version)
+	if r.Header.Get("If-None-Match") == etag {
+		c.cond++
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	c.full++
+	w.Header().Set("ETag", etag)
+	_, _ = w.Write([]byte(c.body))
+}
+
+func catalogJSON(ids ...string) string {
+	entries := make([]string, len(ids))
+	for i, id := range ids {
+		entries[i] = fmt.Sprintf(`{"id":%q,"sha256":%q,"artifact_url":"http://127.0.0.1:1/%s","size_bytes":4}`, id, shaOf([]byte(id)), id)
+	}
+	return `{"models":[` + strings.Join(entries, ",") + `]}`
+}
+
+func urlCatalogService(t *testing.T) (*Service, *catalogServer) {
+	t.Helper()
+	cs := &catalogServer{}
+	cs.set(catalogJSON("old-model"))
+	srv := httptest.NewServer(cs)
+	t.Cleanup(srv.Close)
+	mgr, err := models.NewManager(filepath.Join(t.TempDir(), "models"), 0, quietLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &Service{Mgr: mgr, Eng: engine.New(nil, nil, nil), Loader: rt.NewMockRuntime(0), Log: quietLog(), ManifestURL: srv.URL}, cs
+}
+
+// A model promoted into the catalog after the daemon fetched it is found
+// without a restart: a lookup miss refetches once, rate-limited.
+func TestCatalogMissTriggersOneRefetch(t *testing.T) {
+	old := catalogMissRefetch
+	t.Cleanup(func() { catalogMissRefetch = old })
+	catalogMissRefetch = time.Hour
+
+	svc, cs := urlCatalogService(t)
+	ctx := context.Background()
+	if _, ok, err := svc.Lookup(ctx, "old-model"); err != nil || !ok {
+		t.Fatalf("old-model: %v %v", ok, err)
+	}
+	// The catalog is promoted. A hit never refetches; within the rate
+	// limit a miss does not either.
+	cs.set(catalogJSON("old-model", "laya-q8_0"))
+	if _, ok, _ := svc.Lookup(ctx, "laya-q8_0"); ok {
+		t.Fatal("found a model promoted after the fetch without refetching")
+	}
+	if full, cond := cs.counts(); full != 1 || cond != 0 {
+		t.Fatalf("requests = %d full, %d conditional; the rate limit should have held", full, cond)
+	}
+
+	// Past the rate limit: one refetch, and every caller sees the model.
+	catalogMissRefetch = 0
+	if _, ok, err := svc.Lookup(ctx, "laya-q8_0"); err != nil || !ok {
+		t.Fatalf("promoted model not found after a miss refetch: %v %v", ok, err)
+	}
+	if _, err := svc.StartDownload(ctx, "nope"); !errors.Is(err, ErrUnknownModel) {
+		t.Fatalf("unknown id: %v", err)
+	}
+	catalogMissRefetch = time.Hour
+	before, _ := cs.counts()
+	for range 5 {
+		if _, ok, _ := svc.Lookup(ctx, "still-unknown"); ok {
+			t.Fatal("found an unknown model")
+		}
+	}
+	if full, cond := cs.counts(); full != before || cond > 1 {
+		t.Fatalf("unknown ids hammered the catalog host: %d full, %d conditional", full-before, cond)
+	}
+	// The pull path goes through the same lookup: the promoted model's
+	// download starts instead of "not in catalog".
+	started, err := svc.StartDownload(ctx, "laya-q8_0")
+	if err != nil || !started {
+		t.Fatalf("pull of the promoted model: started=%v err=%v", started, err)
+	}
+	svc.CancelDownload("laya-q8_0")
+}
+
+func TestCatalogPeriodicRefreshAndStaleOnFailure(t *testing.T) {
+	old := catalogMissRefetch
+	t.Cleanup(func() { catalogMissRefetch = old })
+	catalogMissRefetch = time.Hour
+
+	svc, cs := urlCatalogService(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if _, err := svc.Catalog(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	go svc.RunCatalogRefresh(ctx, 10*time.Millisecond)
+
+	// Unchanged catalog: the refresh is conditional (304s, no new body).
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, cond := cs.counts(); cond >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no conditional refreshes")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if full, _ := cs.counts(); full != 1 {
+		t.Fatalf("an unchanged catalog was downloaded %d times", full)
+	}
+
+	// Promoted: the loop picks it up with nobody asking for a refresh.
+	cs.set(catalogJSON("old-model", "julia-1-q8_0"))
+	for {
+		cat, _ := svc.Catalog(ctx, false)
+		if _, ok := cat.Find("julia-1-q8_0"); ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("periodic refresh never picked up the promoted catalog")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// The host fails (or serves garbage): the last good catalog stays.
+	cs.mu.Lock()
+	cs.fail = true
+	cs.mu.Unlock()
+	time.Sleep(40 * time.Millisecond)
+	cat, err := svc.Catalog(ctx, true)
+	if err != nil {
+		t.Fatalf("refresh failure lost the catalog: %v", err)
+	}
+	if _, ok := cat.Find("julia-1-q8_0"); !ok || len(cat.Models) != 2 {
+		t.Fatalf("stale catalog = %+v", cat.Models)
+	}
+	cs.mu.Lock()
+	cs.fail, cs.body = false, `{"models":[{"id":"broken"}]}` // no sha256: rejected
+	cs.version++
+	cs.mu.Unlock()
+	if cat, err := svc.Catalog(ctx, true); err != nil || len(cat.Models) != 2 {
+		t.Fatalf("an invalid catalog replaced the good one: %v %v", cat, err)
 	}
 }

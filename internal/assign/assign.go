@@ -207,12 +207,13 @@ func (s *Service) admit(ctx context.Context, spec *typesv1.ModelSpec, stage bool
 		s.conclude(id, StateDeclined, "model is in models.exclude")
 		return
 	}
-	cat, err := s.Ops.Catalog(ctx, false)
+	// A miss refetches the catalog once (rate-limited): the coordinator
+	// may be placing a model promoted after this node last fetched it.
+	entry, ok, err := s.Ops.Lookup(ctx, id)
 	if err != nil {
 		s.conclude(id, StateFailed, "catalog unavailable: "+err.Error())
 		return
 	}
-	entry, ok := cat.Find(id)
 	if !ok {
 		s.conclude(id, StateDeclined, "model not in this node's catalog")
 		return
