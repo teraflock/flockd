@@ -193,3 +193,30 @@ func TestAdmitFailureReleasesInflight(t *testing.T) {
 		t.Fatalf("rejected request leaked inflight: %d", u.Inflight)
 	}
 }
+
+// A decision model serves decisions only: chat, completion and embedding
+// requests are refused before admission and the runtime, with the
+// gateway's wording, and leave nothing in flight.
+func TestDecisionModelRefusesGeneration(t *testing.T) {
+	e := New(nil, nil, nil)
+	mock := rt.NewMockRuntime(0)
+	for _, spec := range []rt.ModelSpec{{ID: "chat"}, {ID: "laya", Decision: true}} {
+		inst, err := mock.Load(context.Background(), spec, rt.ResourceBudget{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.Register(spec, inst)
+	}
+	for _, kind := range []rt.Kind{rt.KindChat, rt.KindCompletion, rt.KindEmbedding} {
+		_, err := e.Complete(context.Background(), rt.CompletionRequest{Model: "laya", Kind: kind, Prompt: "hi", EmbeddingInput: []string{"a"}})
+		if !errors.Is(err, ErrDecisionModel) || err.Error() != `model "laya" is a decision model: use POST /v1/systemone` {
+			t.Fatalf("kind %d: err = %v", kind, err)
+		}
+	}
+	if u, _ := e.Usage("laya"); u.Inflight != 0 {
+		t.Fatalf("refused requests left %d in flight", u.Inflight)
+	}
+	if _, err := e.UnregisterIdle("laya"); err != nil {
+		t.Fatalf("model is not idle after refusals: %v", err)
+	}
+}

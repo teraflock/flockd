@@ -25,6 +25,26 @@ const payoutMicroPerToken = 55
 // ErrModelNotFound is returned for unknown model ids.
 var ErrModelNotFound = errors.New("engine: model not loaded")
 
+// ErrDecisionModel is returned when a chat, completion or embedding
+// request names a decision model. The catalog flag decides, not what the
+// weights could do: a decision model is served by /v1/systemone only.
+var ErrDecisionModel = errors.New("engine: decision model")
+
+// DecisionModelError is the error for a generation or embedding request
+// aimed at decision model id. It wraps ErrDecisionModel and reads exactly
+// like the gateway's refusal.
+func DecisionModelError(id string) error {
+	return &decisionModelError{id: id}
+}
+
+type decisionModelError struct{ id string }
+
+func (e *decisionModelError) Error() string {
+	return fmt.Sprintf("model %q is a decision model: use POST /v1/systemone", e.id)
+}
+
+func (*decisionModelError) Unwrap() error { return ErrDecisionModel }
+
 // ErrBusy is returned by UnregisterIdle when the model has requests in
 // flight (or waiting in admission) and so must not be unloaded.
 var ErrBusy = errors.New("engine: model busy")
@@ -218,6 +238,14 @@ func (e *Engine) Complete(ctx context.Context, req rt.CompletionRequest) (rt.Tok
 	entry, err := e.acquire(req.Model)
 	if err != nil {
 		return nil, err
+	}
+	// A decision model answers typed decisions and nothing else. Refused
+	// here, before admission and the runtime, so the local API and the
+	// tunnel both get one clear error instead of whatever the runtime
+	// makes of a chat request (llama-server: a 500 about logits).
+	if entry.Spec.Decision && req.Kind != rt.KindDecision {
+		entry.inflight.Add(-1)
+		return nil, DecisionModelError(entry.Spec.ID)
 	}
 
 	release := func() {}

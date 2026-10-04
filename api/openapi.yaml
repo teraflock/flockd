@@ -418,6 +418,14 @@ paths:
           content:
             application/json:
               schema: { type: object }
+        "404":
+          description: >-
+            Unknown model, or a decision model (`error.code:
+            model_not_found`, "model \"<id>\" is a decision model: use POST
+            /v1/systemone").
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "503":
           description: The governor refuses inference right now (state in the message).
           content:
@@ -440,6 +448,14 @@ paths:
           content:
             application/json:
               schema: { type: object }
+        "404":
+          description: >-
+            Unknown model, or a decision model (`error.code:
+            model_not_found`, "model \"<id>\" is a decision model: use POST
+            /v1/systemone").
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
   /v1/embeddings:
     post:
       tags: [openai]
@@ -457,6 +473,14 @@ paths:
           content:
             application/json:
               schema: { type: object }
+        "404":
+          description: >-
+            Unknown model, or a decision model (`error.code:
+            model_not_found`, "model \"<id>\" is a decision model: use POST
+            /v1/systemone").
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
   /v1/systemone:
     post:
       tags: [openai]

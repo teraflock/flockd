@@ -1,6 +1,7 @@
 package localapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -51,7 +52,7 @@ func (s *Server) handleSystemOne(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !s.isDecisionModel(r, req.Model) {
+	if !s.isDecisionModel(r.Context(), req.Model) {
 		writeAPIError(w, http.StatusNotFound, "invalid_request_error", "model_not_found",
 			fmt.Sprintf("model %q is not a decision model on this node; /v1/systemone serves models with decision: true (use /v1/chat/completions for chat models)", req.Model))
 		return
@@ -111,7 +112,7 @@ func (s *Server) handleSystemOne(w http.ResponseWriter, r *http.Request) {
 // serve: one that is loaded, or one the catalog marks `decision` that is
 // on disk (complete then loads it on demand). Anything else — unknown
 // ids, chat and embedding models — is a 404.
-func (s *Server) isDecisionModel(r *http.Request, id string) bool {
+func (s *Server) isDecisionModel(ctx context.Context, id string) bool {
 	for _, m := range s.deps.Engine.Models() {
 		if m.Spec.ID == id {
 			return m.Spec.Decision
@@ -120,7 +121,7 @@ func (s *Server) isDecisionModel(r *http.Request, id string) bool {
 	if s.deps.ModelOps == nil || s.deps.Models == nil || !s.deps.Models.Has(id) {
 		return false
 	}
-	cat, err := s.deps.ModelOps.Catalog(r.Context(), false)
+	cat, err := s.deps.ModelOps.Catalog(ctx, false)
 	if err != nil {
 		return false
 	}

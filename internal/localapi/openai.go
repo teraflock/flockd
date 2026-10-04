@@ -41,6 +41,9 @@ func writeEngineError(w http.ResponseWriter, err error) {
 	case errors.As(err, &nse):
 		writeOpenAIError(w, http.StatusServiceUnavailable, "server_error",
 			fmt.Sprintf("node is not serving right now (%s); retry shortly", nse.State))
+	case errors.Is(err, engine.ErrDecisionModel):
+		// Same status, code and wording as the mesh gateway.
+		writeAPIError(w, http.StatusNotFound, "invalid_request_error", "model_not_found", err.Error())
 	case errors.Is(err, engine.ErrModelNotFound):
 		writeOpenAIError(w, http.StatusNotFound, "invalid_request_error", err.Error())
 	default:
@@ -441,6 +444,12 @@ func newRequestID() string {
 // are not on disk still fail with the not-loaded error rather than
 // triggering a download from a chat request.
 func (s *Server) complete(ctx context.Context, creq rt.CompletionRequest) (rt.TokenStream, error) {
+	// A chat, completion or embedding request for a decision model is
+	// refused before anything is loaded for it: the engine refuses a
+	// loaded one, this covers the one that is only on disk.
+	if creq.Kind != rt.KindDecision && creq.Model != "" && s.isDecisionModel(ctx, creq.Model) {
+		return nil, engine.DecisionModelError(creq.Model)
+	}
 	stream, err := s.deps.Engine.Complete(ctx, creq)
 	if !errors.Is(err, engine.ErrModelNotFound) || creq.Model == "" ||
 		s.deps.ModelOps == nil || s.deps.Models == nil || !s.deps.Models.Has(creq.Model) {

@@ -1474,6 +1474,15 @@ export interface operations {
                     "application/json": Record<string, never>;
                 };
             };
+            /** @description Unknown model, or a decision model (`error.code: model_not_found`, "model \"<id>\" is a decision model: use POST /v1/systemone"). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
             /** @description The governor refuses inference right now (state in the message). */
             503: {
                 headers: {
@@ -1507,6 +1516,15 @@ export interface operations {
                     "application/json": Record<string, never>;
                 };
             };
+            /** @description Unknown model, or a decision model (`error.code: model_not_found`, "model \"<id>\" is a decision model: use POST /v1/systemone"). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
         };
     };
     openaiEmbeddings: {
@@ -1529,6 +1547,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": Record<string, never>;
+                };
+            };
+            /** @description Unknown model, or a decision model (`error.code: model_not_found`, "model \"<id>\" is a decision model: use POST /v1/systemone"). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };

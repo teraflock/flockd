@@ -260,6 +260,22 @@ func TestSystemOneLoadsCatalogDecisionModelOnDemand(t *testing.T) {
 	if len(loaded) != 1 || loaded[0].Spec.ID != "laya" || !loaded[0].Spec.Decision {
 		t.Fatalf("loaded = %+v, want laya as a decision model", loaded)
 	}
+	// A chat request for it is refused, loaded or not.
+	if err := ops.Unload(context.Background(), "laya"); err != nil {
+		t.Fatal(err)
+	}
+	cresp, err := http.Post(srv.URL+"/v1/chat/completions", "application/json", strings.NewReader(`{"model":"laya","messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	craw, _ := io.ReadAll(cresp.Body)
+	_ = cresp.Body.Close()
+	if cresp.StatusCode != http.StatusNotFound || !strings.Contains(string(craw), `model \"laya\" is a decision model: use POST /v1/systemone`) {
+		t.Fatalf("chat on an installed decision model: status %d: %s", cresp.StatusCode, craw)
+	}
+	if len(eng.Models()) != 0 {
+		t.Fatal("a refused chat request loaded the decision model")
+	}
 	// An installed chat model is still not a decision model.
 	if status, raw := postSystemOne(t, srv, strings.Replace(body, `"laya"`, `"chat"`, 1)); status != http.StatusNotFound {
 		t.Fatalf("chat model: status %d: %s", status, raw)
@@ -277,5 +293,51 @@ func TestSystemOneLoadsCatalogDecisionModelOnDemand(t *testing.T) {
 	}
 	if len(got) != 2 || !got["laya"] || got["chat"] {
 		t.Fatalf("catalog decision flags = %v", got)
+	}
+}
+
+// Chat, completion and embedding requests aimed at a decision model are
+// refused up front with the gateway's status, code and wording.
+func TestGenerationOnDecisionModelIs404(t *testing.T) {
+	srv := newSystemOneServer(t, servingGovernor(t))
+	const want = `model "laya" is a decision model: use POST /v1/systemone`
+	cases := map[string]string{
+		"/v1/chat/completions": `{"model":"laya","messages":[{"role":"user","content":"hi"}]}`,
+		"/v1/completions":      `{"model":"laya","prompt":"hi"}`,
+		"/v1/embeddings":       `{"model":"laya","input":["alpha"]}`,
+	}
+	for path, body := range cases {
+		for _, stream := range []bool{false, true} {
+			if stream {
+				if path == "/v1/embeddings" {
+					continue
+				}
+				body = strings.Replace(body, `{"model"`, `{"stream":true,"model"`, 1)
+			}
+			resp, err := http.Post(srv.URL+path, "application/json", strings.NewReader(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			var e gen.Error
+			if err := json.Unmarshal(raw, &e); err != nil {
+				t.Fatalf("%s: not the error envelope: %s", path, raw)
+			}
+			if resp.StatusCode != http.StatusNotFound || e.Error.Message != want || e.Error.Type != "invalid_request_error" ||
+				e.Error.Code == nil || *e.Error.Code != "model_not_found" {
+				t.Errorf("%s (stream=%v): status %d: %s", path, stream, resp.StatusCode, raw)
+			}
+		}
+	}
+	// The chat model on the same node is untouched.
+	resp, err := http.Post(srv.URL+"/v1/chat/completions", "application/json",
+		strings.NewReader(`{"model":"mock-8b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":4}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("chat model: status %d", resp.StatusCode)
 	}
 }
