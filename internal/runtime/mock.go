@@ -71,6 +71,14 @@ func (i *mockInstance) Complete(ctx context.Context, req CompletionRequest) (Tok
 	}
 	i.mu.Unlock()
 
+	if req.Kind == KindDecision {
+		return i.decide(req)
+	}
+	if i.spec.Decision {
+		// A decision model generates nothing (llama-server answers a chat
+		// request on one with an error too).
+		return nil, fmt.Errorf("mock: %s is a decision model: it serves /v1/systemone only", i.spec.ID)
+	}
 	if req.Kind == KindEmbedding {
 		return i.embed(req), nil
 	}
@@ -165,6 +173,86 @@ func (*mockInstance) embed(req CompletionRequest) TokenStream {
 	}
 	close(ch)
 	return NewChanStream(ch, nil)
+}
+
+// mockMaxChoiceOptions is the mock's stand-in for a model's own option
+// limit (52 for openjev, 255 for laya): more than this is rejected as
+// invalid input, the way llama-server answers 400.
+const mockMaxChoiceOptions = 255
+
+// decide answers a decision request deterministically: the probabilities
+// are a pure function of the state, the question and its options, so two
+// mock nodes agree (fingerprint and canary flows) and tests can pin
+// values. No tokens are generated.
+func (i *mockInstance) decide(req CompletionRequest) (TokenStream, error) {
+	if !i.spec.Decision {
+		return nil, fmt.Errorf("mock: %s is not a decision model", i.spec.ID)
+	}
+	in := req.Decision
+	if in == nil || len(in.Questions) == 0 {
+		return nil, &InvalidInputError{Msg: "mock: decision request has no questions"}
+	}
+	answers := make([]DecisionAnswer, 0, len(in.Questions))
+	total := estimateTokens(in.StateJSON)
+	for _, q := range in.Questions {
+		h := fnv.New64a()
+		_, _ = h.Write([]byte(in.StateJSON))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(q.ID))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(q.InstructionsJSON))
+		total += estimateTokens(q.InstructionsJSON)
+		for _, o := range q.Options {
+			_, _ = h.Write([]byte{0})
+			_, _ = h.Write([]byte(o.Key))
+			total += estimateTokens(o.Key) + estimateTokens(o.DescriptionJSON)
+		}
+		rng := rand.New(rand.NewSource(int64(h.Sum64()))) //nolint:gosec // deterministic by design
+		a := DecisionAnswer{QuestionID: q.ID, Type: q.Type}
+		switch q.Type {
+		case DecisionNoul:
+			a.Noul = rng.Float64()
+		case DecisionChoice, DecisionScore:
+			if len(q.Options) == 0 {
+				return nil, &InvalidInputError{Msg: fmt.Sprintf("mock: question %q has no options", q.ID)}
+			}
+			if len(q.Options) > mockMaxChoiceOptions {
+				return nil, &InvalidInputError{Msg: fmt.Sprintf("mock: question %q has %d options, the model takes at most %d", q.ID, len(q.Options), mockMaxChoiceOptions)}
+			}
+			weights := make([]float64, len(q.Options))
+			sum := 0.0
+			for n := range weights {
+				w := rng.Float64() + 0.01
+				weights[n] = w * w // spread the mass a little
+				sum += weights[n]
+			}
+			best := 0
+			for n, o := range q.Options {
+				p := weights[n] / sum
+				a.Probabilities = append(a.Probabilities, DecisionProbability{Key: o.Key, Probability: p})
+				a.Score += float64(n) * p
+				if p > a.Probabilities[best].Probability {
+					best = n
+				}
+			}
+			// 0 = all options equally likely, 1 = one option certain.
+			if n := float64(len(q.Options)); n > 1 {
+				a.Confidence = (a.Probabilities[best].Probability - 1/n) / (1 - 1/n)
+			} else {
+				a.Confidence = 1
+			}
+			if q.Type == DecisionChoice {
+				a.Choice, a.Score = q.Options[best].Key, 0
+			}
+		default:
+			return nil, &InvalidInputError{Msg: fmt.Sprintf("mock: question %q has an unknown type", q.ID)}
+		}
+		answers = append(answers, a)
+	}
+	ch := make(chan Chunk, 1)
+	ch <- Chunk{Done: true, Decision: answers, Usage: &Usage{PromptTokens: total}}
+	close(ch)
+	return NewChanStream(ch, nil), nil
 }
 
 func (i *mockInstance) Health(context.Context) (Stats, error) {

@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"testing"
 	"time"
@@ -170,5 +171,121 @@ func TestMockReasoningTokens(t *testing.T) {
 	}
 	if _, reasoning, _, _, _ = DrainAll(ts); reasoning != "" {
 		t.Fatalf("completion produced reasoning %q", reasoning)
+	}
+}
+
+func mockDecisionInput() *DecisionInput {
+	return &DecisionInput{
+		StateJSON: `"payouts failing for 3 days"`,
+		Questions: []DecisionQuestion{
+			{ID: "team", Type: DecisionChoice, InstructionsJSON: `"Which team?"`,
+				Options: []DecisionOption{{Key: "technical"}, {Key: "billing", DescriptionJSON: `"Payments"`}, {Key: "account"}}},
+			{ID: "urgency", Type: DecisionScore, InstructionsJSON: `"How urgent?"`,
+				Options: []DecisionOption{{Key: "0", DescriptionJSON: `"can wait"`}, {Key: "1", DescriptionJSON: `"today"`}, {Key: "2", DescriptionJSON: `"now"`}}},
+			{ID: "escalate", Type: DecisionNoul, InstructionsJSON: `"Escalate?"`},
+		},
+	}
+}
+
+func mockDecide(t *testing.T, inst Instance, in *DecisionInput) Chunk {
+	t.Helper()
+	ts, err := inst.Complete(context.Background(), CompletionRequest{Kind: KindDecision, Decision: in})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := ts.Recv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ts.Recv(); err != io.EOF {
+		t.Fatalf("second Recv err = %v, want EOF", err)
+	}
+	return c
+}
+
+func TestMockDecision(t *testing.T) {
+	inst, err := NewMockRuntime(0).Load(context.Background(), ModelSpec{ID: "mock-decision", Decision: true}, ResourceBudget{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := mockDecisionInput()
+	c := mockDecide(t, inst, in)
+	if !c.Done || c.Usage == nil || c.Usage.PromptTokens == 0 || c.Usage.CompletionTokens != 0 {
+		t.Fatalf("chunk = %+v usage = %+v", c, c.Usage)
+	}
+	if len(c.Decision) != 3 {
+		t.Fatalf("answers = %d", len(c.Decision))
+	}
+	for n, q := range in.Questions {
+		a := c.Decision[n]
+		if a.QuestionID != q.ID || a.Type != q.Type {
+			t.Fatalf("answer %d = %+v, want question %q", n, a, q.ID)
+		}
+		if q.Type == DecisionNoul {
+			if a.Noul < 0 || a.Noul > 1 || a.Probabilities != nil {
+				t.Fatalf("noul answer = %+v", a)
+			}
+			continue
+		}
+		sum, best := 0.0, 0
+		for i, p := range a.Probabilities {
+			if p.Key != q.Options[i].Key {
+				t.Fatalf("%s: probability %d is for %q, want option order (%q)", q.ID, i, p.Key, q.Options[i].Key)
+			}
+			sum += p.Probability
+			if p.Probability > a.Probabilities[best].Probability {
+				best = i
+			}
+		}
+		if sum < 0.999999 || sum > 1.000001 {
+			t.Fatalf("%s: probabilities sum to %v", q.ID, sum)
+		}
+		if a.Confidence < 0 || a.Confidence > 1 {
+			t.Fatalf("%s: confidence %v", q.ID, a.Confidence)
+		}
+		if q.Type == DecisionChoice && a.Choice != q.Options[best].Key {
+			t.Fatalf("choice = %q, most probable is %q", a.Choice, q.Options[best].Key)
+		}
+		if q.Type == DecisionScore && (a.Score < 0 || a.Score > 2 || a.Choice != "") {
+			t.Fatalf("score answer = %+v", a)
+		}
+	}
+
+	// Deterministic: the same input gives the same answers (fingerprints).
+	again := mockDecide(t, inst, mockDecisionInput())
+	if fmt.Sprint(again.Decision) != fmt.Sprint(c.Decision) {
+		t.Fatalf("mock decision not deterministic:\n%+v\n%+v", c.Decision, again.Decision)
+	}
+	// A different state gives different answers.
+	other := mockDecisionInput()
+	other.StateJSON = `"all good, thanks"`
+	if fmt.Sprint(mockDecide(t, inst, other).Decision) == fmt.Sprint(c.Decision) {
+		t.Fatal("answers do not depend on the state")
+	}
+}
+
+func TestMockDecisionErrors(t *testing.T) {
+	ctx := context.Background()
+	dec, _ := NewMockRuntime(0).Load(ctx, ModelSpec{ID: "mock-decision", Decision: true}, ResourceBudget{})
+	chat, _ := NewMockRuntime(0).Load(ctx, ModelSpec{ID: "mock-8b"}, ResourceBudget{})
+
+	// Input the runtime itself rejects: InvalidInputError.
+	if _, err := dec.Complete(ctx, CompletionRequest{Kind: KindDecision}); !IsInvalidInput(err) {
+		t.Fatalf("nil input: err = %v", err)
+	}
+	tooMany := &DecisionInput{StateJSON: `"s"`, Questions: []DecisionQuestion{{ID: "a", Type: DecisionChoice, InstructionsJSON: `"q"`}}}
+	for i := range 256 {
+		tooMany.Questions[0].Options = append(tooMany.Questions[0].Options, DecisionOption{Key: fmt.Sprint(i)})
+	}
+	if _, err := dec.Complete(ctx, CompletionRequest{Kind: KindDecision, Decision: tooMany}); !IsInvalidInput(err) {
+		t.Fatalf("256 options: err = %v", err)
+	}
+	// A chat model does not answer decisions, and a decision model does
+	// not chat; neither is the customer's invalid input.
+	if _, err := chat.Complete(ctx, CompletionRequest{Kind: KindDecision, Decision: mockDecisionInput()}); err == nil || IsInvalidInput(err) {
+		t.Fatalf("decision on a chat model: err = %v", err)
+	}
+	if _, err := dec.Complete(ctx, CompletionRequest{Kind: KindChat, Messages: []Message{{Role: "user", Content: "hi"}}}); err == nil {
+		t.Fatal("chat on a decision model succeeded")
 	}
 }

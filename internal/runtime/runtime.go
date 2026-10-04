@@ -19,6 +19,10 @@ type ModelSpec struct {
 	Path          string // local GGUF path (part 1 of a sharded model)
 	ContextLength int
 	Embeddings    bool // model is served for /v1/embeddings
+	// Decision marks a typed decision model served for /v1/systemone
+	// (KindDecision): it answers bounded questions with probabilities and
+	// generates no tokens. Mutually exclusive with Embeddings.
+	Decision bool
 	// MmprojPath is the vision projector sidecar passed to the runtime
 	// (llama-server --mmproj); "" when the model has none.
 	MmprojPath string
@@ -61,7 +65,103 @@ const (
 	KindChat Kind = iota + 1
 	KindCompletion
 	KindEmbedding
+	KindDecision
 )
+
+// DecisionType is the type of one decision question (and of its answer);
+// it mirrors typesv1.DecisionQuestionType.
+type DecisionType int
+
+const (
+	DecisionChoice DecisionType = iota + 1 // pick one labelled option
+	DecisionScore                          // place on an ordered scale
+	DecisionNoul                           // probability a statement is true
+)
+
+// String is the public name of the type ("choice", "score", "noul").
+func (t DecisionType) String() string {
+	switch t {
+	case DecisionChoice:
+		return "choice"
+	case DecisionScore:
+		return "score"
+	case DecisionNoul:
+		return "noul"
+	default:
+		return "unknown"
+	}
+}
+
+// DecisionOption is one possible answer. Order is part of the contract:
+// the model reads the options in the order the customer wrote them.
+type DecisionOption struct {
+	// Key is the option key (choice), the level index "0", "1", … (score)
+	// or "true"/"false" (noul, only when described).
+	Key string
+	// DescriptionJSON is compact JSON (string, object or array); "" means
+	// JSON null: the option has no description.
+	DescriptionJSON string
+}
+
+// DecisionQuestion is one typed question. Options is a list, never a
+// map, so the order survives every hop.
+type DecisionQuestion struct {
+	ID               string
+	Type             DecisionType
+	InstructionsJSON string // compact JSON: string, object or array
+	Options          []DecisionOption
+}
+
+// DecisionInput is a validated /v1/systemone request: the state and the
+// questions in request order (ids unique).
+type DecisionInput struct {
+	StateJSON string // compact JSON: string, object or array
+	Questions []DecisionQuestion
+}
+
+// DecisionProbability is the probability of one option (or score level).
+type DecisionProbability struct {
+	Key         string
+	Probability float64
+}
+
+// DecisionAnswer is the typed answer to one question. Probabilities are
+// ordered like the question's options and empty for noul.
+type DecisionAnswer struct {
+	QuestionID    string
+	Type          DecisionType
+	Choice        string  // choice: the most probable option key
+	Score         float64 // score: expected level index
+	Noul          float64 // noul: probability the statement is true
+	Probabilities []DecisionProbability
+	Confidence    float64 // choice and score: 0..1
+}
+
+// InvalidInputError means the runtime rejected the input itself (too many
+// options for this model, a prompt over its context — llama-server's 400):
+// another node would reject it too, so the request must not be retried
+// elsewhere. Callers test with errors.As.
+type InvalidInputError struct{ Msg string }
+
+func (e *InvalidInputError) Error() string { return e.Msg }
+
+// IsInvalidInput reports whether err is (or wraps) an InvalidInputError.
+func IsInvalidInput(err error) bool {
+	var ie *InvalidInputError
+	return errors.As(err, &ie)
+}
+
+// ErrRuntimeTooOld is returned when a model needs a runtime build newer
+// than the one this node runs (a decision model on a llama.cpp build that
+// predates /v1/systemone).
+var ErrRuntimeTooOld = errors.New("runtime: build too old for this model")
+
+// ModelSupporter is implemented by runtimes that can tell, without
+// loading, that their build cannot serve a model. modelops and assign ask
+// before downloading so an unservable placement is refused up front.
+type ModelSupporter interface {
+	SupportsModel(ctx context.Context, m ModelSpec) error
+}
 
 type Message struct {
 	Role    string `json:"role"`
@@ -87,11 +187,15 @@ type CompletionRequest struct {
 	Messages       []Message // KindChat
 	Prompt         string    // KindCompletion
 	EmbeddingInput []string  // KindEmbedding
-	Params         GenerationParams
+	// Decision is the KindDecision payload. The result is a single final
+	// Chunk carrying Decision answers (in question order) and Usage.
+	Decision *DecisionInput
+	Params   GenerationParams
 }
 
 // Chunk is one streamed unit. For KindEmbedding a single final chunk
-// carries Embeddings. Usage is set on the final chunk.
+// carries Embeddings; for KindDecision a single final chunk carries
+// Decision. Usage is set on the final chunk.
 //
 // Every token the model produces is relayed as either Delta (the answer)
 // or Reasoning (chain-of-thought, for models whose runtime separates it),
@@ -109,6 +213,7 @@ type Chunk struct {
 	FinishReason string // "stop", "length", "cancelled", "error"
 	Usage        *Usage
 	Embeddings   [][]float32
+	Decision     []DecisionAnswer // KindDecision: one per question, in order
 	Err          string
 }
 
