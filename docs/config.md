@@ -62,6 +62,14 @@ mock_tokens_per_sec = 120
 # request gets less than min_context. The daemon logs the plan
 # ("context plan": slots, ctx_per_slot, estimate_mb) at every load.
 #
+# Decision models (catalog `decision: true`, served by /v1/systemone) are
+# not planned that way: a decision is one short forward pass and the model
+# usually shares the node with a chat model, so they get a fixed, modest
+# layout instead of the free budget — encoders (Laya, Julia: no KV cache,
+# memory is one batch buffer sized by the context) 4 slots of up to 2048
+# tokens, causal ones (Kev, Clef) 2 slots of up to 8192. A longer prompt
+# is a 422. context_length below raises (pins) it for every model.
+#
 # Pin per-request context exactly (0 = planned). Slots still adapt.
 context_length = 0
 # Cap on per-request context, in tokens (0 = the model's training window).

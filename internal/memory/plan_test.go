@@ -194,3 +194,85 @@ func TestPlanUsesTheHeaderKVCost(t *testing.T) {
 		t.Fatalf("fallback differs from EstimateMB: %d", got)
 	}
 }
+
+// Decision models are planned modestly, not grown into the free budget
+// (flockd#53). The inputs are the catalog's and the headers' real figures;
+// the footprints in the comments were measured with llama.cpp b11382.
+func TestDecisionPlans(t *testing.T) {
+	const budget = 32768
+	base := func(file int64, minRAM int64, window int, kv int64) PlanInput {
+		return PlanInput{BudgetMB: budget, FileBytes: file, MinRAMMB: minRAM, Window: window,
+			KVBytesPerToken: kv, Slots: DefaultGPUSlots, MinCtx: 8192, MaxCtx: 16384}
+	}
+
+	// Julia-1 (168 MB, window 8,192): was 11 slots x 8,192 = 90,112 tokens
+	// and estimate_mb=3608 on KV maths that do not apply to an encoder.
+	julia := DecisionPlanInput(base(168166496, 512, 8192, 36864), true, "julia")
+	p := PlanContext(julia)
+	if p.Slots != DecisionEncoderSlots || p.CtxPerSlot != 2048 || p.TotalCtx != 4*2048 || p.Squeezed {
+		t.Fatalf("julia plan = %+v", p)
+	}
+	// Measured 2,066 MB after 1,814-token prompts at this batch size.
+	if p.EstimateMB < 2066 || p.EstimateMB > 3000 {
+		t.Fatalf("julia estimate = %d MB", p.EstimateMB)
+	}
+	// Slots are free for an encoder: the estimate does not move with them.
+	one := julia
+	one.Slots = 1
+	if got := PlanContext(one).EstimateMB; got != p.EstimateMB {
+		t.Fatalf("encoder estimate depends on slots: %d vs %d", got, p.EstimateMB)
+	}
+
+	// Laya (449 MB, catalog window 512): measured 311 MB; the catalog
+	// floor (min_ram_mb) is what admission charges.
+	laya := PlanContext(DecisionPlanInput(base(449397600, 1024, 512, 122880), true, "laya"))
+	if laya.Slots != 4 || laya.CtxPerSlot != 512 || laya.EstimateMB != 1024 {
+		t.Fatalf("laya plan = %+v", laya)
+	}
+
+	// Kev-4B (3.0 GB, catalog window 65,536) is causal: KV maths, but 2
+	// slots of 8,192 instead of everything the budget has free.
+	kevIn := DecisionPlanInput(base(3033489824, 6144, 65536, 131072), false, "kev")
+	kev := PlanContext(kevIn)
+	if kev.Slots != DecisionCausalSlots || kev.CtxPerSlot != 8192 || kev.TotalCtx != 16384 || kev.Squeezed {
+		t.Fatalf("kev plan = %+v", kev)
+	}
+	if kev.EstimateMB != 6144 { // 3.3 GB weights + 2 GB KV + overhead is under the catalog floor
+		t.Fatalf("kev estimate = %d MB", kev.EstimateMB)
+	}
+	// Next to a chat model that already has 26 GB of the budget it still
+	// loads: the plan it would have grown into before did not.
+	kevIn.UsedMB = 26000
+	if tight := PlanContext(kevIn); tight.EstimateMB > budget-26000 || tight.TotalCtx != 16384 {
+		t.Fatalf("kev next to a chat model = %+v", tight)
+	}
+
+	// The same chat-shaped input without the decision plan takes the
+	// whole budget's worth of slots and context (unchanged behaviour).
+	chat := PlanContext(base(3033489824, 6144, 65536, 131072))
+	if chat.Slots <= DecisionCausalSlots || chat.TotalCtx <= kev.TotalCtx {
+		t.Fatalf("chat plan = %+v", chat)
+	}
+
+	// A squeezed encoder gives up context, never below the floor.
+	tight := julia
+	tight.UsedMB = budget - 1800
+	sq := PlanContext(tight)
+	if !sq.Squeezed || sq.CtxPerSlot >= 2048 || sq.CtxPerSlot < decisionMinContext || sq.EstimateMB > 1800 {
+		t.Fatalf("squeezed julia plan = %+v", sq)
+	}
+	if EstimateFloor := tight.EstimateAt(FloorContext(tight)); EstimateFloor != tight.encoderEstimate(decisionMinContext) {
+		t.Fatalf("admission floor = %d MB", EstimateFloor)
+	}
+
+	// An operator pin (runtime.context_length) overrides the decision cap.
+	pinned := julia
+	pinned.CtxPin = 8192
+	if got := PlanContext(pinned); got.CtxPerSlot != 8192 || got.EstimateMB < 8000 {
+		t.Fatalf("pinned julia plan = %+v", got)
+	}
+	// An unmeasured encoder family is costed like the dearest known one.
+	if EncoderMBPerToken("new-encoder") != DefaultEncoderMBPerToken || EncoderMBPerToken("laya") >= EncoderMBPerToken("julia") {
+		t.Fatal("encoder cost table")
+	}
+}

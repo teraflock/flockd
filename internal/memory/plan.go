@@ -55,6 +55,80 @@ type PlanInput struct {
 	// CtxPin is runtime.context_length: the operator pinning per-slot
 	// context exactly (0 = plan it). Slots still adapt to memory.
 	CtxPin int
+	// EncoderMBPerToken > 0 marks a whole-prompt-batch encoder (a
+	// decision model on a BERT-family architecture: Laya, Julia). It has
+	// no KV cache: what grows is the compute buffer for one batch, by
+	// this many MB per token of the longest prompt a slot admits, once,
+	// whatever the slot count. See DecisionPlanInput.
+	EncoderMBPerToken float64
+}
+
+// Decision model planning (flockd#53). A decision request is one forward
+// pass over a short prompt (measured on Metal, llama.cpp b11382: Laya and
+// Julia-1 10-30 ms, Kev-4B 100-240 ms), and a decision model usually
+// shares the node with a chat model, so its plan is modest and fixed
+// instead of growing into whatever the budget has free.
+const (
+	// DecisionEncoderSlots: slots cost an encoder no memory (measured:
+	// Julia-1 with 1, 4 or 11 slots has the same footprint) and its
+	// requests are evaluated one after another anyway.
+	DecisionEncoderSlots = 4
+	// DecisionEncoderContext caps an encoder's per-slot context, which is
+	// also its batch size and the whole of its memory cost: Julia-1 holds
+	// ~1 MB per token of the longest prompt it has seen (8 GB after one
+	// 7,500-token prompt against a 168 MB file). 2,048 tokens is a state
+	// of some 1,500 words; runtime.context_length raises it.
+	DecisionEncoderContext = 2048
+	// DecisionCausalSlots and DecisionCausalContext are the plan for a
+	// causal decision model (Kev, Clef): each slot costs its context in
+	// KV cache like a chat model's. 8,192 is the length Kev's accuracy is
+	// validated to; runtime.context_length raises it.
+	DecisionCausalSlots   = 2
+	DecisionCausalContext = 8192
+	// decisionMinContext is the floor a squeezed decision plan stops at.
+	decisionMinContext = 1024
+	// DefaultEncoderMBPerToken is the batch cost assumed for an encoder
+	// family nobody measured: Julia-1's, the larger of the two known.
+	DefaultEncoderMBPerToken = 1.1
+)
+
+// encoderMBPerToken is the measured compute-buffer growth per prompt
+// token, by catalog family (llama.cpp b11382, Metal, Q8_0, footprint after
+// a prompt of N tokens minus the idle footprint):
+//
+//	julia: 414 tok +350 MB, 1,814 +1,750, 3,714 +3,745, 7,514 +7,800
+//	laya:  428 tok  +90 MB, 1,828   +395, 3,728   +855, 7,528 +1,940
+var encoderMBPerToken = map[string]float64{
+	"julia": 1.1,
+	"laya":  0.3,
+}
+
+// EncoderMBPerToken is the batch cost per token for an encoder family.
+func EncoderMBPerToken(family string) float64 {
+	if v, ok := encoderMBPerToken[family]; ok {
+		return v
+	}
+	return DefaultEncoderMBPerToken
+}
+
+// DecisionPlanInput turns in into the plan input for a decision model:
+// few slots and a per-slot context sized for decision prompts, capped by
+// whatever the operator already capped (runtime.max_context). encoder
+// says the model is a whole-prompt-batch encoder (GGUF architecture
+// *bert*), which is then also costed as one: no KV cache, a batch buffer.
+// A runtime.context_length pin still wins (caps treats it as exact).
+func DecisionPlanInput(in PlanInput, encoder bool, family string) PlanInput {
+	slots, ctx := DecisionCausalSlots, DecisionCausalContext
+	if encoder {
+		slots, ctx = DecisionEncoderSlots, DecisionEncoderContext
+		in.EncoderMBPerToken = EncoderMBPerToken(family)
+	}
+	in.Slots = min(max(in.Slots, 1), slots)
+	if in.MaxCtx <= 0 || in.MaxCtx > ctx {
+		in.MaxCtx = ctx
+	}
+	in.MinCtx = decisionMinContext
+	return in
 }
 
 const (
@@ -121,8 +195,44 @@ func roundCtx(n int) int { return n - n%ctxGranularity }
 
 // EstimateAt is the load's footprint at a total context of ctx tokens,
 // with the header's KV cost when in carries one.
+//
+// For an encoder (EncoderMBPerToken > 0) ctx is the per-slot context: its
+// footprint does not depend on the slot count.
 func (in PlanInput) EstimateAt(ctx int) int64 {
+	if in.EncoderMBPerToken > 0 {
+		return in.encoderEstimate(ctx)
+	}
 	return estimateMB(in.FileBytes, in.MinRAMMB, ctx, in.KVBytesPerToken)
+}
+
+// encoderEstimate is an encoder's footprint with a batch of ctxPerSlot
+// tokens: weights and process overhead as for any model, plus the batch
+// buffer at its largest.
+func (in PlanInput) encoderEstimate(ctxPerSlot int) int64 {
+	weights := float64(in.FileBytes) * weightsFactor / MiB
+	est := int64(weights+in.EncoderMBPerToken*float64(ctxPerSlot)) + runtimeOverheadMB
+	return max(est, in.MinRAMMB)
+}
+
+// planEncoder plans a whole-prompt-batch encoder: the slot ceiling as
+// given (slots are free), and the largest per-slot context up to the cap
+// whose batch buffer fits what the budget has left.
+func planEncoder(in PlanInput) Plan {
+	capCtx, floor := in.caps()
+	p := Plan{Slots: max(in.Slots, 1), CtxPerSlot: capCtx}
+	if in.BudgetMB > 0 {
+		spare := in.BudgetMB - in.UsedMB
+		for p.CtxPerSlot > floor && in.encoderEstimate(p.CtxPerSlot) > spare {
+			p.CtxPerSlot -= ctxGranularity
+			p.Squeezed = true
+		}
+		if in.encoderEstimate(p.CtxPerSlot) > spare {
+			p.Squeezed = true // does not fit even at the floor: admission's call
+		}
+	}
+	p.TotalCtx = p.Slots * p.CtxPerSlot
+	p.EstimateMB = in.encoderEstimate(p.CtxPerSlot)
+	return p
 }
 
 // PlanContext decides slots and context for one load.
@@ -137,6 +247,9 @@ func (in PlanInput) EstimateAt(ctx int) int64 {
 // reach the floor the plan is one slot at the floor and Squeezed; whether
 // that loads is admission's call (EstimateMB says what it would cost).
 func PlanContext(in PlanInput) Plan {
+	if in.EncoderMBPerToken > 0 {
+		return planEncoder(in)
+	}
 	capCtx, floor := in.caps()
 	slots := max(in.Slots, 1)
 
