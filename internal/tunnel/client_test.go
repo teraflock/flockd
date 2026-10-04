@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"log/slog"
@@ -11,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	flockengine "github.com/teraflock/flockd/internal/engine"
 	"github.com/teraflock/flockd/internal/governor"
 	rt "github.com/teraflock/flockd/internal/runtime"
 	"github.com/teraflock/flockd/internal/tunnel"
@@ -897,5 +900,164 @@ func TestDecisionChallengeFailureSendsEmptyResponse(t *testing.T) {
 	}
 	if r.GetChallengeId() == "" || len(r.GetAnswers()) != 0 {
 		t.Fatalf("response = %v", r)
+	}
+}
+
+// realEngine is the production serving funnel (internal/engine) with a
+// chat model (the default) and a decision model loaded, recording nothing:
+// what the tunnel sees in the daemon.
+func realEngine(t *testing.T) *flockengine.Engine {
+	t.Helper()
+	eng := flockengine.New(nil, nil, nil)
+	mock := rt.NewMockRuntime(0)
+	for _, spec := range []rt.ModelSpec{{ID: "chat-default"}, {ID: "chat-other"}, {ID: "laya", Decision: true}} {
+		inst, err := mock.Load(context.Background(), spec, rt.ResourceBudget{MaxConcurrent: 4})
+		if err != nil {
+			t.Fatal(err)
+		}
+		eng.Register(spec, inst)
+	}
+	return eng
+}
+
+// recordingEngine wraps an engine and records the model each request ran on.
+type recordingEngine struct {
+	inner tunnel.Engine
+	reqs  chan rt.CompletionRequest
+}
+
+func (e *recordingEngine) Complete(ctx context.Context, req rt.CompletionRequest) (rt.TokenStream, error) {
+	e.reqs <- req
+	return e.inner.Complete(ctx, req)
+}
+
+func TestChallengeRunsOnTheNamedModel(t *testing.T) {
+	rec := &recordingEngine{inner: realEngine(t), reqs: make(chan rt.CompletionRequest, 4)}
+	h := newHarness(t, func(o *tunnel.Options) { o.Engine = rec })
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// A model that is loaded but is not the node's default.
+	r, err := h.coord.Challenge(ctx, "chat-other", "fingerprint probe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req := <-rec.reqs; req.Model != "chat-other" || req.Kind != rt.KindCompletion {
+		t.Fatalf("challenge ran as %+v, want a completion on chat-other", req)
+	}
+	sum := sha256.Sum256([]byte(r.GetOutput()))
+	if r.GetOutput() == "" || r.GetOutputSha256() != hex.EncodeToString(sum[:]) {
+		t.Fatalf("response = %v", r)
+	}
+
+	// An empty model_id keeps the old behaviour: the default model.
+	if _, err := h.coord.Challenge(ctx, "", "fingerprint probe"); err != nil {
+		t.Fatal(err)
+	}
+	if req := <-rec.reqs; req.Model != "" {
+		t.Fatalf("empty model_id ran on %q, want the node default", req.Model)
+	}
+}
+
+// A text challenge the node cannot run must not be answered at all: the
+// coordinator hashes whatever output comes back, and the hash of an empty
+// output is a wrong fingerprint — a ban. Silence is a timeout, which costs
+// one failed dispatch.
+func TestUnrunnableChallengeIsNotAnswered(t *testing.T) {
+	for name, model := range map[string]string{
+		"model not loaded":             "not-loaded",
+		"text probe on decision model": "laya",
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, func(o *tunnel.Options) { o.Engine = realEngine(t) })
+			ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+			defer cancel()
+			r, err := h.coord.Challenge(ctx, model, "fingerprint probe")
+			if err == nil {
+				t.Fatalf("node answered a challenge it could not run: %v", r)
+			}
+			// The session is intact and a runnable challenge still works.
+			ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel2()
+			if r, err := h.coord.Challenge(ctx2, "chat-default", "fingerprint probe"); err != nil || r.GetOutput() == "" {
+				t.Fatalf("follow-up challenge: %v %v", r, err)
+			}
+		})
+	}
+}
+
+// The same when the governor refuses the work (operator is at the machine).
+func TestChallengeWhileYieldedIsNotAnswered(t *testing.T) {
+	idle := &governor.FakeIdleSource{} // idle 0 => active => yielded
+	gov := governor.New(governor.Policy{Serve: "idle-only", IdleAfter: time.Minute}, idle, &governor.FakePowerSource{}, nil, quietLog())
+	eng := flockengine.New(gov, nil, nil)
+	inst, err := rt.NewMockRuntime(0).Load(context.Background(), rt.ModelSpec{ID: "chat-default"}, rt.ResourceBudget{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng.Register(rt.ModelSpec{ID: "chat-default"}, inst)
+	h := newHarness(t, func(o *tunnel.Options) { o.Engine = eng })
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancel()
+	if r, err := h.coord.Challenge(ctx, "chat-default", "fingerprint probe"); err == nil {
+		t.Fatalf("yielded node answered a challenge: %v", r)
+	}
+}
+
+// Chat, completion and embedding dispatches aimed at a decision model fail
+// with the gateway's wording instead of reaching the runtime.
+func TestGenerationDispatchToDecisionModelFails(t *testing.T) {
+	const want = `model "laya" is a decision model: use POST /v1/systemone`
+	h := newHarness(t, func(o *tunnel.Options) { o.Engine = realEngine(t) })
+
+	for name, opts := range map[string]fakecoord.DispatchOpts{
+		"chat":       {ModelID: "laya", Kind: typesv1.RequestKind_REQUEST_KIND_CHAT, Messages: []*typesv1.ChatMessage{{Role: "user", Content: "hi"}}},
+		"completion": {ModelID: "laya", Kind: typesv1.RequestKind_REQUEST_KIND_COMPLETION, Prompt: "hi"},
+	} {
+		_, acks, tokens, err := h.coord.Dispatch(opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ack := <-acks; !ack.GetAccepted() {
+			t.Fatalf("%s: dispatch not accepted: %v", name, ack)
+		}
+		text, last := collect(t, tokens, 5*time.Second)
+		if text != "" || last == nil || !last.GetDone() ||
+			last.GetFinishReason() != typesv1.FinishReason_FINISH_REASON_ERROR || last.GetError() != want {
+			t.Fatalf("%s: text=%q last=%v", name, text, last)
+		}
+	}
+
+	// An embedding dispatch fails as an EmbeddingResult: the coordinator
+	// waits for nothing else.
+	ch, err := h.coord.DispatchEmbedding("laya", []string{"alpha"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case res := <-ch:
+		if res.GetError() != want || len(res.GetEmbeddings()) != 0 {
+			t.Fatalf("embedding result = %v", res)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no embedding result for a failed embedding dispatch")
+	}
+
+	// The chat model next to it still serves, and the decision model still
+	// answers decisions.
+	_, _, tokens, err := h.coord.Dispatch(fakecoord.DispatchOpts{ModelID: "chat-default", Kind: typesv1.RequestKind_REQUEST_KIND_CHAT,
+		Messages: []*typesv1.ChatMessage{{Role: "user", Content: "hi"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text, last := collect(t, tokens, 5*time.Second); text == "" || last.GetError() != "" {
+		t.Fatalf("chat model: text=%q last=%v", text, last)
+	}
+	dch, err := h.coord.DispatchDecision("laya", decisionProto())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res := <-dch; res.GetError() != "" || len(res.GetAnswers()) != 3 {
+		t.Fatalf("decision result = %v", res)
 	}
 }

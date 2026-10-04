@@ -518,6 +518,15 @@ func (c *Client) runDispatch(ctx context.Context, ss *sessionStream, d *tunnelv1
 
 	stream, err := c.o.Engine.Complete(ctx, req)
 	if err != nil {
+		if req.Kind == rt.KindEmbedding {
+			// An embedding dispatch is answered by an EmbeddingResult and
+			// nothing else: the coordinator ignores a TokenChunk for it
+			// and would wait out its timeout.
+			_ = ss.send(&tunnelv1.NodeMessage{Msg: &tunnelv1.NodeMessage_EmbeddingResult{
+				EmbeddingResult: &tunnelv1.EmbeddingResult{RequestId: id, Error: err.Error()},
+			}})
+			return
+		}
 		c.sendError(ss, d, err)
 		return
 	}
@@ -606,6 +615,22 @@ func (c *Client) handleCancel(cr *tunnelv1.CancelRequest) {
 // handleChallenge runs a fingerprint probe: fixed-seed greedy decode whose
 // output hash the coordinator compares against the private expected set
 // (SPEC §2.2).
+//
+// The probe runs on the model the coordinator names (Challenge.model_id):
+// the expected output is that model's, so a node serving several models
+// must not answer with its default one. An empty model_id is the node's
+// default model, as before the field was honoured.
+//
+// A probe the node could not run — the model is not loaded, the governor
+// has yielded, the runtime failed — is NOT answered. The coordinator
+// judges every text ChallengeResponse by its hash, and the hash of an
+// empty or partial output is a mismatch: an instant ban for a node that
+// honestly did not have the model in memory. The wire has no "could not
+// run" for a text challenge, so silence is the least harmful answer: the
+// coordinator's wait times out and counts one failed dispatch (a
+// reputation dip that only converges on a ban if it keeps happening),
+// exactly what an empty decision probe costs. (Decision probes do answer,
+// with no answers: the coordinator reads that as could-not-run.)
 func (c *Client) handleChallenge(ctx context.Context, ss *sessionStream, ch *tunnelv1.Challenge) {
 	if ch.GetDecision() != nil {
 		c.decisionChallenge(ctx, ss, ch)
@@ -613,24 +638,34 @@ func (c *Client) handleChallenge(ctx context.Context, ss *sessionStream, ch *tun
 	}
 	req := rt.CompletionRequest{
 		ID:     "challenge-" + ch.GetChallengeId(),
+		Model:  ch.GetModelId(), // "" = node default
 		Kind:   rt.KindCompletion,
 		Prompt: ch.GetPrompt(),
 		Params: paramsFromProto(ch.GetParams()),
 	}
 	start := time.Now()
 	stream, err := c.o.Engine.Complete(ctx, req)
-	resp := &tunnelv1.ChallengeResponse{ChallengeId: ch.GetChallengeId()}
+	var (
+		text  string
+		usage rt.Usage
+	)
 	if err == nil {
-		text, usage, _, derr := rt.Drain(stream)
-		if derr == nil {
-			sum := sha256.Sum256([]byte(text))
-			resp.Output = text
-			resp.OutputSha256 = hex.EncodeToString(sum[:])
-			resp.CompletionTokens = uint32(usage.CompletionTokens)
-			if el := time.Since(start).Seconds(); el > 0 {
-				resp.TokensPerSec = float64(usage.CompletionTokens) / el
-			}
-		}
+		text, usage, _, err = rt.Drain(stream)
+	}
+	if err != nil {
+		c.o.Log.Warn("fingerprint challenge could not run; not answering (an empty answer would be judged a wrong fingerprint)",
+			"challenge_id", ch.GetChallengeId(), "model", ch.GetModelId(), "err", err)
+		return
+	}
+	sum := sha256.Sum256([]byte(text))
+	resp := &tunnelv1.ChallengeResponse{
+		ChallengeId:      ch.GetChallengeId(),
+		Output:           text,
+		OutputSha256:     hex.EncodeToString(sum[:]),
+		CompletionTokens: uint32(usage.CompletionTokens),
+	}
+	if el := time.Since(start).Seconds(); el > 0 {
+		resp.TokensPerSec = float64(usage.CompletionTokens) / el
 	}
 	_ = ss.send(&tunnelv1.NodeMessage{Msg: &tunnelv1.NodeMessage_ChallengeResponse{ChallengeResponse: resp}})
 }
