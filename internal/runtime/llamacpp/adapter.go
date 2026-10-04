@@ -6,14 +6,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/teraflock/flockd/internal/decision"
 	"github.com/teraflock/flockd/internal/memory"
 	rt "github.com/teraflock/flockd/internal/runtime"
 )
@@ -167,6 +170,9 @@ func (a *Adapter) Load(ctx context.Context, m rt.ModelSpec, res rt.ResourceBudge
 	}
 	a.record(sel)
 	bin, buildID := sel.Path, sel.BuildID
+	if err := checkBuildSupports(buildID, m); err != nil {
+		return nil, err
+	}
 	port, err := ephemeralPort()
 	if err != nil {
 		return nil, err
@@ -180,6 +186,8 @@ func (a *Adapter) Load(ctx context.Context, m rt.ModelSpec, res rt.ResourceBudge
 		return nil, err
 	}
 	return &instance{
+		batchIsContext: m.Decision && slices.Contains(args, "--ubatch-size"),
+
 		spec:    m,
 		buildID: buildID,
 		sup:     sup,
@@ -222,7 +230,23 @@ func (a *Adapter) serverArgs(m rt.ModelSpec, res rt.ResourceBudget, port int) []
 	if ctxLen > 0 {
 		args = append(args, "--ctx-size", strconv.Itoa(ctxLen))
 	}
-	if m.Embeddings {
+	switch {
+	case m.Decision:
+		// Typed decision model (/v1/systemone). No --embeddings: the
+		// server recognises the architecture and enables what it needs
+		// itself. Laya-family (Laya, Julia) and Clef evaluate a whole
+		// prompt in ONE batch, so it must fit --ubatch-size; llama-server's
+		// default (512) answers any longer prompt with a 500. The longest
+		// prompt a slot can take is its share of --ctx-size (n_ctx_slot =
+		// ctx-size / parallel), so that is the batch size: enough for
+		// every admissible prompt, without sizing the batch buffers for
+		// the context of all slots together. Causal decision models that
+		// take a prompt in several batches (Kev) keep the defaults.
+		if ctxLen > 0 && decisionNeedsWholeBatch(m) {
+			batch := strconv.Itoa(decisionBatch(ctxLen, slots))
+			args = append(args, "--batch-size", batch, "--ubatch-size", batch)
+		}
+	case m.Embeddings:
 		args = append(args, "--embeddings")
 	}
 	if m.MmprojPath != "" {
@@ -244,7 +268,93 @@ func (a *Adapter) serverArgs(m rt.ModelSpec, res rt.ResourceBudget, port int) []
 	return args
 }
 
+// multiBatchDecisionFamilies are the decision model families (catalog
+// `family`) llama-server evaluates like any causal model, a batch at a
+// time: they need no --ubatch-size and must not be given a context-sized
+// one (Kev serves a 65,536-token window). Verified against llama.cpp
+// b11382: Kev-4B answers a 3,011-token prompt at the default batch of
+// 512, while Laya and Julia-1 answer anything over 512 tokens with a 500.
+// A family not listed here gets the whole-prompt batch: over-allocating
+// works, under-allocating does not.
+var multiBatchDecisionFamilies = map[string]bool{"kev": true}
+
+func decisionNeedsWholeBatch(m rt.ModelSpec) bool {
+	return m.Decision && !multiBatchDecisionFamilies[strings.ToLower(m.Family)]
+}
+
+// decisionBatch is the batch size for a decision model: one slot's context
+// (rounded up, so it is never below llama-server's n_ctx_slot).
+func decisionBatch(ctxLen, slots int) int {
+	slots = max(slots, 1)
+	return (ctxLen + slots - 1) / slots
+}
+
+// MinDecisionTag is the first upstream llama.cpp build tag that serves
+// decision models (POST /v1/systemone; ggml-org/llama.cpp#29818 and
+// #29831 for Clef). The runtimes pin moves from b9892 to at least this.
+const MinDecisionTag = 11382
+
+// buildTag extracts the upstream build number from a teraflock/runtimes
+// build id (`llamacpp-<tag>-<n>`, tag = `b<number>`: "llamacpp-b9892-4"
+// -> 9892). ok is false for anything else — a configured local binary
+// ("local-binary"), the mock, a format this daemon does not know.
+func buildTag(buildID string) (tag int, ok bool) {
+	rest, found := strings.CutPrefix(buildID, "llamacpp-b")
+	if !found {
+		return 0, false
+	}
+	digits, _, found := strings.Cut(rest, "-")
+	if !found || digits == "" {
+		return 0, false
+	}
+	for _, c := range digits {
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+	}
+	n, err := strconv.Atoi(digits)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// checkBuildSupports refuses a model the given runtime build cannot
+// serve. Today that is one rule: a decision model needs llama.cpp >=
+// b11382. A build id whose tag cannot be read (an operator's own
+// llama_server_path) is not refused: the daemon cannot know, and the
+// load itself fails on a binary that is too old (unknown architecture).
+func checkBuildSupports(buildID string, m rt.ModelSpec) error {
+	if !m.Decision {
+		return nil
+	}
+	if tag, ok := buildTag(buildID); ok && tag < MinDecisionTag {
+		return fmt.Errorf("%w: %s is a decision model and needs llama.cpp b%d or newer, this node runs %s",
+			rt.ErrRuntimeTooOld, m.ID, MinDecisionTag, buildID)
+	}
+	return nil
+}
+
+// SupportsModel implements runtime.ModelSupporter: it resolves the
+// runtime build this node runs (cached after boot) and reports whether it
+// can serve m, so a decision model is refused before anything is
+// downloaded when the build predates decision support.
+func (a *Adapter) SupportsModel(ctx context.Context, m rt.ModelSpec) error {
+	if !m.Decision {
+		return nil
+	}
+	sel, err := a.Fetcher.EnsureSelection(ctx, a.chain()...)
+	if err != nil {
+		return err
+	}
+	return checkBuildSupports(sel.BuildID, m)
+}
+
 type instance struct {
+	// batchIsContext: a decision model started with --ubatch-size equal
+	// to a slot's context (see overBatch).
+	batchIsContext bool
+
 	spec    rt.ModelSpec
 	buildID string
 	sup     *supervisor
@@ -256,6 +366,8 @@ func (i *instance) Complete(ctx context.Context, req rt.CompletionRequest) (rt.T
 	switch req.Kind {
 	case rt.KindEmbedding:
 		return i.embed(ctx, req)
+	case rt.KindDecision:
+		return i.decide(ctx, req)
 	case rt.KindChat, rt.KindCompletion:
 		return i.generate(ctx, req)
 	default:
@@ -439,6 +551,88 @@ func (i *instance) embed(ctx context.Context, req rt.CompletionRequest) (rt.Toke
 	ch <- rt.Chunk{Done: true, Embeddings: vecs, Usage: &rt.Usage{PromptTokens: er.Usage.PromptTokens}}
 	close(ch)
 	return rt.NewChanStream(ch, nil), nil
+}
+
+// decide answers a typed decision request with llama-server's
+// POST /v1/systemone. The body is built in list order (decision.RuntimeBody
+// — never a marshalled map) and the answers come back in question order.
+// A 400 is the runtime rejecting the input itself (too many options for
+// the model, a prompt over the slot's context): *rt.InvalidInputError, so
+// nothing retries it on another node. Any other status — 501 for a model
+// that is not a decision model, 500s — is an ordinary error.
+func (i *instance) decide(ctx context.Context, req rt.CompletionRequest) (rt.TokenStream, error) {
+	if !i.spec.Decision {
+		return nil, fmt.Errorf("llamacpp: %s is not a decision model", i.spec.ID)
+	}
+	body, err := decision.RuntimeBody(req.Decision)
+	if err != nil {
+		return nil, err
+	}
+	const path = "/v1/systemone"
+	hreq, err := http.NewRequestWithContext(ctx, http.MethodPost, i.baseURL+path, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("llamacpp: build request: %w", err)
+	}
+	hreq.Header.Set("Content-Type", "application/json")
+	resp, err := i.client.Do(hreq)
+	if err != nil {
+		return nil, fmt.Errorf("llamacpp: %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	if err != nil {
+		return nil, fmt.Errorf("llamacpp: %s: read response: %w", path, err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		msg := runtimeErrorMessage(raw)
+		if resp.StatusCode == http.StatusBadRequest {
+			return nil, &rt.InvalidInputError{Msg: msg}
+		}
+		if i.overBatch(resp.StatusCode, msg) {
+			// llama-server's advice ("increase the physical batch size")
+			// is for whoever runs the server, not for the caller.
+			return nil, &rt.InvalidInputError{Msg: "input is larger than the model's context: " + msg}
+		}
+		return nil, fmt.Errorf("llamacpp: %s: status %s: %s", path, resp.Status, msg)
+	}
+	answers, usage, err := decision.ParseRuntimeResponse(raw, req.Decision)
+	if err != nil {
+		return nil, fmt.Errorf("llamacpp: %s: %w", path, err)
+	}
+	ch := make(chan rt.Chunk, 1)
+	ch <- rt.Chunk{Done: true, Decision: answers, Usage: &rt.Usage{PromptTokens: usage.PromptTokens}}
+	close(ch)
+	return rt.NewChanStream(ch, nil), nil
+}
+
+// overBatch recognises llama-server's "input (N tokens) is too large to
+// process. increase the physical batch size" — a 500, checked before the
+// context-size check that answers 400. The adapter starts a decision
+// model with the batch equal to a slot's context (serverArgs), so a
+// prompt over the batch is a prompt over the context: the input is too
+// long for this model on any node, not a server fault. Only trusted when
+// this adapter set the batch (batchIsContext).
+func (i *instance) overBatch(status int, msg string) bool {
+	return i.batchIsContext && status == http.StatusInternalServerError &&
+		strings.Contains(msg, "too large to process") && strings.Contains(msg, "batch size")
+}
+
+// runtimeErrorMessage extracts llama-server's `error.message`, falling
+// back to the (truncated) body.
+func runtimeErrorMessage(raw []byte) string {
+	var e struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(raw, &e) == nil && e.Error.Message != "" {
+		return e.Error.Message
+	}
+	msg := strings.TrimSpace(string(raw))
+	if len(msg) > 512 {
+		msg = msg[:512]
+	}
+	return msg
 }
 
 // postStream is post for the one caller that hands the response to a
