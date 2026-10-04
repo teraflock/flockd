@@ -81,6 +81,10 @@ type ModelEntry struct {
 	// that has already been routed to this instance.
 	inflight atomic.Int64
 	lastUsed atomic.Int64 // unix nanos of the most recent request start
+	// served is set once a request has started on this instance. It is
+	// not derived from lastUsed > LoadedAt: on a coarse clock (Windows,
+	// ~15 ms) a request can start in the same tick the model was loaded.
+	served atomic.Bool
 }
 
 // Usage is the per-model activity view idle unload and memory admission
@@ -89,6 +93,10 @@ type ModelEntry struct {
 type Usage struct {
 	LastUsed time.Time
 	Inflight int
+	// Served reports whether any request has started on the model since
+	// it was loaded; LastUsed is then that request's start, set before
+	// the request reaches the runtime, so a busy model always has it.
+	Served bool
 }
 
 // Engine implements tunnel.Engine and backs localapi.
@@ -264,7 +272,7 @@ func (e *Engine) Usage(id string) (Usage, bool) {
 	if !ok {
 		return Usage{}, false
 	}
-	return Usage{LastUsed: time.Unix(0, m.lastUsed.Load()), Inflight: int(m.inflight.Load())}, true
+	return Usage{LastUsed: time.Unix(0, m.lastUsed.Load()), Inflight: int(m.inflight.Load()), Served: m.served.Load()}, true
 }
 
 func (e *Engine) lookup(model string) (*ModelEntry, error) {
@@ -339,6 +347,7 @@ func (e *Engine) Complete(ctx context.Context, req rt.CompletionRequest) (rt.Tok
 		e.touch(entry.Spec.ID)
 	}
 	entry.lastUsed.Store(time.Now().UnixNano())
+	entry.served.Store(true)
 	e.stats.RequestStarted()
 
 	// Tracked from here: the request has passed admission and is about to

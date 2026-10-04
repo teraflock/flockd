@@ -944,8 +944,10 @@ components:
           type: string
           format: date-time
           description: >-
-            When the most recent request started; absent when the model
-            has served none since it was loaded.
+            When the most recent request started. Set the moment a
+            request starts, so it is always present while `inflight` > 0;
+            absent only when the model has served none since it was
+            loaded.
         idle_seconds:
           type: integer
           format: int64

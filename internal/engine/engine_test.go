@@ -325,6 +325,14 @@ func TestLiveRequestTracking(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// Served is a flag, not a clock comparison: it holds even when the
+	// request started in the same clock tick the model was loaded.
+	if u, _ := e.Usage("chat"); !u.Served || u.Inflight != 1 {
+		t.Fatalf("usage of a busy model = %+v", u)
+	}
+	if u, _ := e.Usage("laya"); u.Served {
+		t.Fatalf("a model that served nothing reports Served: %+v", u)
+	}
 	in := tr.InFlight()
 	if len(in) != 1 || in[0].Model != "chat" || in[0].Kind != "chat" || in[0].Origin != "mesh" || in[0].Tokens != 2 {
 		t.Fatalf("in flight mid-stream = %+v", in)

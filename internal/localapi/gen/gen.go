@@ -621,7 +621,7 @@ type ModelActivity struct {
 	// Kind What the model is for (catalog flags).
 	Kind ModelActivityKind `json:"kind"`
 
-	// LastRequestAt When the most recent request started; absent when the model has served none since it was loaded.
+	// LastRequestAt When the most recent request started. Set the moment a request starts, so it is always present while `inflight` > 0; absent only when the model has served none since it was loaded.
 	LastRequestAt *time.Time `json:"last_request_at,omitempty"`
 	Model         string     `json:"model"`
 }

@@ -679,7 +679,7 @@ export interface components {
             };
             /**
              * Format: date-time
-             * @description When the most recent request started; absent when the model has served none since it was loaded.
+             * @description When the most recent request started. Set the moment a request starts, so it is always present while `inflight` > 0; absent only when the model has served none since it was loaded.
              */
             last_request_at?: string;
             /**

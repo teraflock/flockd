@@ -32,7 +32,9 @@ func (s *Server) nodeActivity(now time.Time) gen.NodeActivity {
 			row.Inflight, row.InflightByKind = c.Total, c.ByKind
 		}
 		last := m.LoadedAt
-		if u, ok := s.deps.Engine.Usage(m.Spec.ID); ok && u.LastUsed.After(m.LoadedAt) {
+		// Set when a request STARTS (before it reaches the runtime), so
+		// a model with anything in flight always has it.
+		if u, ok := s.deps.Engine.Usage(m.Spec.ID); ok && u.Served {
 			t := u.LastUsed
 			row.LastRequestAt, last = &t, t
 		}
