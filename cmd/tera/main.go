@@ -590,6 +590,8 @@ func cmdLimits() *cobra.Command {
 		retention  int
 		idleUnload int
 		setAny     bool
+		maxConc    int
+		maxCtx     int
 	)
 	c := &cobra.Command{
 		Use:   "limits",
@@ -606,8 +608,21 @@ func cmdLimits() *cobra.Command {
 			setAny = cmd.Flags().Changed("serve") || cmd.Flags().Changed("serve-on-battery") ||
 				cmd.Flags().Changed("max-temp") || cmd.Flags().Changed("schedule") ||
 				cmd.Flags().Changed("max-disk-mb") || cmd.Flags().Changed("max-ram-mb") ||
-				cmd.Flags().Changed("retention-days") || cmd.Flags().Changed("idle-unload")
+				cmd.Flags().Changed("retention-days") || cmd.Flags().Changed("idle-unload") ||
+				cmd.Flags().Changed("max-concurrent") || cmd.Flags().Changed("max-context")
+			// PUT only what changes: the daemon keeps every omitted
+			// optional field, and a field that is sent moves into
+			// limits.toml, where it overrides config.toml from then on.
+			lim.Settings = nil
+			lim.MaxConcurrent, lim.MaxContext, lim.MinContext, lim.ContextLength = nil, nil, nil, nil
+			lim.MaxVramPercent, lim.Exclude, lim.DefaultModel, lim.RequireAuthV1, lim.LogLevel = nil, nil, nil, nil, nil
 			if setAny {
+				if cmd.Flags().Changed("max-concurrent") {
+					lim.MaxConcurrent = &maxConc
+				}
+				if cmd.Flags().Changed("max-context") {
+					lim.MaxContext = &maxCtx
+				}
 				if cmd.Flags().Changed("max-disk-mb") {
 					lim.MaxDiskMb = &maxDisk
 				}
@@ -658,6 +673,32 @@ func cmdLimits() *cobra.Command {
 			if lim.IdleUnloadSeconds != nil {
 				fmt.Printf("  idle unload        %ds (0 = never)\n", *lim.IdleUnloadSeconds)
 			}
+			// The rest (flockd#55), from the daemon's own metadata: value,
+			// what the daemon is really running with, how a change applies.
+			if lim.Settings != nil {
+				shown := map[string]bool{"serve_policy": true, "idle_after_seconds": true, "yield_grace_seconds": true,
+					"serve_on_battery": true, "max_temp_celsius": true, "schedule": true, "mesh_managed": true,
+					"max_disk_mb": true, "retention_days": true, "max_ram_mb": true, "idle_unload_seconds": true}
+				for _, m := range *lim.Settings {
+					if shown[m.Key] {
+						continue
+					}
+					line := fmt.Sprintf("  %-18s %v", strings.ReplaceAll(m.Key, "_", " "), m.Configured)
+					var notes []string
+					if m.ZeroMeans != nil {
+						notes = append(notes, "0 = "+*m.ZeroMeans)
+					}
+					if m.PendingRestart {
+						notes = append(notes, fmt.Sprintf("running with %v until the daemon restarts", m.Effective))
+					} else if m.Effective != nil {
+						notes = append(notes, fmt.Sprintf("now %v", m.Effective))
+					}
+					if len(notes) > 0 {
+						line += " " + styleDim.Render("("+strings.Join(notes, "; ")+")")
+					}
+					fmt.Println(line)
+				}
+			}
 			return nil
 		},
 	}
@@ -666,6 +707,8 @@ func cmdLimits() *cobra.Command {
 	c.Flags().Int64Var(&maxRAM, "max-ram-mb", 0, "memory budget for loaded models in MB (0 = auto)")
 	c.Flags().IntVar(&retention, "retention-days", 0, "evict unpinned models unused for N days (0 = never)")
 	c.Flags().IntVar(&idleUnload, "idle-unload", 0, "unload idle models after N seconds (0 = never)")
+	c.Flags().IntVar(&maxConc, "max-concurrent", 0, "most concurrent requests (slots) per model (0 = auto); idle models are restarted to apply it")
+	c.Flags().IntVar(&maxCtx, "max-context", 0, "largest context per request in tokens (0 = the model's window); applied like --max-concurrent")
 	c.Flags().BoolVar(&battery, "serve-on-battery", false, "allow serving on battery")
 	c.Flags().Float64Var(&maxTemp, "max-temp", 90, "thermal pause threshold °C (0 disables)")
 	c.Flags().StringSliceVar(&schedule, "schedule", nil, "serving windows, e.g. 22:00-08:00")

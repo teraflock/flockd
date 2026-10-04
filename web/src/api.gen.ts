@@ -884,13 +884,20 @@ export interface components {
             escrow_credits: number;
             note: string;
         };
+        /** @description The operator's settings. GET returns every field plus `settings` (metadata for each: tier, how a change is applied, default, range, configured vs effective value). PUT takes the same object: the six required fields always, any other field only when it changes (omitted = unchanged); `settings` is ignored on PUT. The whole PUT is validated before anything is applied. Values persist in `<data_dir>/limits.toml`, which overrides `config.toml`. */
         Limits: {
-            /** @description always | idle-only | scheduled */
+            /** @description always | idle-only | scheduled. When this machine serves the mesh. `idle-only`: only while you are away from the keyboard and mouse. `scheduled`: only inside the schedule windows. `always`: whenever it is on. */
             serve_policy: string;
+            /** @description With `idle-only`, how long keyboard and mouse must be quiet before the node starts serving. 0 on PUT = unchanged. */
             idle_after_seconds: number;
+            /** @description When you come back to the machine, how long a request in flight may run on before it is cancelled. 0 on PUT = unchanged. */
             yield_grace_seconds: number;
+            /** @description Serve while running on battery power. */
             serve_on_battery: boolean;
-            /** Format: double */
+            /**
+             * Format: double
+             * @description Pause serving above this temperature; 0 disables the check.
+             */
             max_temp_celsius: number;
             /** @description Daily serving windows for serve_policy=scheduled, one per entry, each "HH:MM-HH:MM" in the node's local time on a 24-hour clock (the hour may be one or two digits, the minute must be two — Go's "15:04" layout). The end is exclusive: "09:00-17:00" serves 09:00 through 16:59. A start later than its end wraps overnight ("22:00-08:00"); "22:00-00:00" runs to midnight; a window whose start equals its end matches nothing, so a full day is ["00:00-12:00", "12:00-00:00"]. The same windows apply every day (there is no day-of-week syntax) and an empty list never serves. An entry the daemon can't parse fails the whole PUT with 400; reads return windows normalised to zero-padded "HH:MM-HH:MM". */
             schedule: string[];
@@ -910,6 +917,73 @@ export interface components {
             max_ram_mb?: number;
             /** @description Unload a loaded model after this long without a request (0 = never; default model exempt). Omitted on PUT = unchanged. */
             idle_unload_seconds?: number;
+            /** @description Most requests one model serves at once (`budget.max_concurrent`): the ceiling on a model's slots and on mesh dispatches to this node. 0 = auto (16 with a GPU or unified memory, 2 on CPU). Every slot holds its own context in memory, so fewer slots leave room for more models. Applied by restarting idle models; a busy one changes at its next load. Omitted on PUT = unchanged. */
+            max_concurrent?: number;
+            /** @description Largest context, in tokens, a single request gets (`runtime.max_context`); 0 = the model's own window. Memory per model grows with slots x context. 0, or 1024 and up. Applied like `max_concurrent`. Omitted on PUT = unchanged. */
+            max_context?: number;
+            /** @description Smallest context a request is given (`runtime.min_context`): when memory is short the node gives up slots before going below it. 0 = 8192; otherwise 256 and up, and not above `max_context`. Applied like `max_concurrent`. Omitted on PUT = unchanged. */
+            min_context?: number;
+            /** @description Pin every request's context to exactly this many tokens (`runtime.context_length`), for every model, decision models included; 0 = plan it from memory (recommended). 256 and up. Applied like `max_concurrent`. Omitted on PUT = unchanged. */
+            context_length?: number;
+            /** @description Share of GPU memory models may use (`budget.max_vram_percent`): sizes the automatic memory budget on discrete GPUs and how many layers are offloaded. Takes effect after a daemon restart. Omitted on PUT = unchanged. */
+            max_vram_percent?: number;
+            /** @description Model ids the mesh may never place on this node (`models.exclude`). Applies to the next placement; a model already placed stays until evicted. Omitted on PUT = unchanged. */
+            exclude?: string[];
+            /** @description Model loaded when the daemon starts (`models.default`); empty or `none` = load nothing and serve what the mesh places. Takes effect after a daemon restart (use `POST /api/v1/models/{id}/default` to switch now). Omitted on PUT = unchanged. */
+            default_model?: string;
+            /** @description Require the bearer token on the local inference routes (`/v1/*`) too (`local_api.require_auth_v1`). Off, any program on this machine can use the loaded models without a key. Applied immediately. Omitted on PUT = unchanged. */
+            require_auth_v1?: boolean;
+            /**
+             * @description Daemon log verbosity (`log.level`). Takes effect after a daemon restart. Omitted on PUT = unchanged.
+             * @enum {string}
+             */
+            log_level?: "debug" | "info" | "warn" | "error";
+            /** @description One entry per field above, in display order: everything an app needs to render the setting. Returned by GET and PUT; ignored when sent. */
+            readonly settings?: components["schemas"]["LimitSetting"][];
+        };
+        /** @description Metadata and current state of one Limits field. */
+        LimitSetting: {
+            /** @description The field's name in Limits (`max_concurrent`). */
+            key: string;
+            /** @description The same setting in config.toml (`budget.max_concurrent`). */
+            config_key: string;
+            /** @description Short label. */
+            title: string;
+            /** @description Help text (the field's description, in one paragraph). */
+            description: string;
+            /**
+             * @description `common`: show by default. `advanced`: show under an Advanced section.
+             * @enum {string}
+             */
+            tier: "common" | "advanced";
+            /**
+             * @description How the daemon applies a change. `live`: immediately. `reload`: by restarting the runtimes of idle loaded models right away; a model with a request in flight keeps its layout until its next load. `restart`: saved now, used from the next daemon start (`pending_restart` is true until then).
+             * @enum {string}
+             */
+            apply: "live" | "reload" | "restart";
+            /**
+             * @description How to edit the value.
+             * @enum {string}
+             */
+            type: "boolean" | "integer" | "number" | "string" | "enum" | "string_list";
+            /** @description Unit of an integer or number: seconds, MB, tokens, days, percent, °C, slots. */
+            unit?: string;
+            /** @description Smallest accepted value (integer and number types). */
+            min?: number;
+            /** @description Largest accepted value; absent = unbounded. */
+            max?: number;
+            /** @description The accepted values of an `enum`. */
+            options?: string[];
+            /** @description What the value 0 means when it is special ("auto", "never", "unlimited"). */
+            zero_means?: string;
+            /** @description The built-in default (the value's own JSON type). */
+            default: unknown;
+            /** @description The value as set (config.toml, limits.toml or this API): what GET returns in the field itself. */
+            configured: unknown;
+            /** @description Present when the daemon is running with something other than `configured`: an `auto` (0) resolved for this machine (`max_concurrent` 0 -> 16), or the previous value of a `restart` setting whose change is pending. */
+            effective?: unknown;
+            /** @description A change is saved but the daemon must restart to use it. */
+            pending_restart: boolean;
         };
         ActivityEvent: {
             /** Format: date-time */

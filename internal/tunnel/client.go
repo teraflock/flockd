@@ -181,6 +181,16 @@ func (c *Client) SendModelState(m *typesv1.ModelState) error {
 	}})
 }
 
+// SetMaxConcurrent changes the operator's dispatch concurrency ceiling on
+// a running client (budget.max_concurrent edited through the limits API).
+// It applies to the next dispatch; the coordinator learns the new ceiling
+// from the next session's Hello.
+func (c *Client) SetMaxConcurrent(n int) {
+	c.mu.Lock()
+	c.o.MaxConcurrent = n
+	c.mu.Unlock()
+}
+
 // EffectiveMaxConcurrent is min(operator cap, coordinator cap), 0 = none.
 func (c *Client) EffectiveMaxConcurrent() int {
 	c.mu.Lock()

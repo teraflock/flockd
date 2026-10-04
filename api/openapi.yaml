@@ -1236,17 +1236,45 @@ components:
 
     Limits:
       type: object
+      description: >-
+        The operator's settings. GET returns every field plus `settings`
+        (metadata for each: tier, how a change is applied, default, range,
+        configured vs effective value). PUT takes the same object: the six
+        required fields always, any other field only when it changes
+        (omitted = unchanged); `settings` is ignored on PUT. The whole PUT
+        is validated before anything is applied. Values persist in
+        `<data_dir>/limits.toml`, which overrides `config.toml`.
       required:
         [serve_policy, idle_after_seconds, yield_grace_seconds,
          serve_on_battery, max_temp_celsius, schedule]
       properties:
         serve_policy:
           type: string
-          description: always | idle-only | scheduled
-        idle_after_seconds: { type: integer }
-        yield_grace_seconds: { type: integer }
-        serve_on_battery: { type: boolean }
-        max_temp_celsius: { type: number, format: double }
+          description: >-
+            always | idle-only | scheduled. When this machine serves the mesh. `idle-only`: only while you
+            are away from the keyboard and mouse. `scheduled`: only inside
+            the schedule windows. `always`: whenever it is on.
+        idle_after_seconds:
+          type: integer
+          minimum: 1
+          description: >-
+            With `idle-only`, how long keyboard and mouse must be quiet
+            before the node starts serving. 0 on PUT = unchanged.
+        yield_grace_seconds:
+          type: integer
+          minimum: 1
+          description: >-
+            When you come back to the machine, how long a request in
+            flight may run on before it is cancelled. 0 on PUT = unchanged.
+        serve_on_battery:
+          type: boolean
+          description: Serve while running on battery power.
+        max_temp_celsius:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 110
+          description: Pause serving above this temperature; 0 disables the check.
         schedule:
           type: array
           items: { type: string }
@@ -1272,27 +1300,186 @@ components:
         max_disk_mb:
           type: integer
           format: int64
+          minimum: 0
           description: >
             Model store budget (`models.max_disk_mb`); 0 = unlimited. LRU
             eviction of unpinned models keeps the store under it. Omitted
             on PUT = unchanged.
         retention_days:
           type: integer
+          minimum: 0
           description: >
             Evict unpinned models not used for this many days (0 = never).
             Omitted on PUT = unchanged.
         max_ram_mb:
           type: integer
           format: int64
+          minimum: 0
           description: >
             Memory budget for loaded models (`budget.max_ram_mb`); 0 = auto
             (about half of physical memory on unified-memory machines, the
             GPU budget on discrete GPUs). Omitted on PUT = unchanged.
         idle_unload_seconds:
           type: integer
+          minimum: 0
           description: >
             Unload a loaded model after this long without a request
             (0 = never; default model exempt). Omitted on PUT = unchanged.
+        max_concurrent:
+          type: integer
+          minimum: 0
+          maximum: 64
+          description: >
+            Most requests one model serves at once (`budget.max_concurrent`):
+            the ceiling on a model's slots and on mesh dispatches to this
+            node. 0 = auto (16 with a GPU or unified memory, 2 on CPU).
+            Every slot holds its own context in memory, so fewer slots
+            leave room for more models. Applied by restarting idle models;
+            a busy one changes at its next load. Omitted on PUT = unchanged.
+        max_context:
+          type: integer
+          minimum: 0
+          maximum: 1048576
+          description: >
+            Largest context, in tokens, a single request gets
+            (`runtime.max_context`); 0 = the model's own window. Memory per
+            model grows with slots x context. 0, or 1024 and up. Applied
+            like `max_concurrent`. Omitted on PUT = unchanged.
+        min_context:
+          type: integer
+          minimum: 0
+          maximum: 1048576
+          description: >
+            Smallest context a request is given (`runtime.min_context`):
+            when memory is short the node gives up slots before going
+            below it. 0 = 8192; otherwise 256 and up, and not above
+            `max_context`. Applied like `max_concurrent`. Omitted on PUT =
+            unchanged.
+        context_length:
+          type: integer
+          minimum: 0
+          maximum: 1048576
+          description: >
+            Pin every request's context to exactly this many tokens
+            (`runtime.context_length`), for every model, decision models
+            included; 0 = plan it from memory (recommended). 256 and up.
+            Applied like `max_concurrent`. Omitted on PUT = unchanged.
+        max_vram_percent:
+          type: integer
+          minimum: 1
+          maximum: 100
+          description: >
+            Share of GPU memory models may use (`budget.max_vram_percent`):
+            sizes the automatic memory budget on discrete GPUs and how
+            many layers are offloaded. Takes effect after a daemon
+            restart. Omitted on PUT = unchanged.
+        exclude:
+          type: array
+          maxItems: 256
+          items: { type: string }
+          description: >
+            Model ids the mesh may never place on this node
+            (`models.exclude`). Applies to the next placement; a model
+            already placed stays until evicted. Omitted on PUT = unchanged.
+        default_model:
+          type: string
+          description: >
+            Model loaded when the daemon starts (`models.default`); empty
+            or `none` = load nothing and serve what the mesh places. Takes
+            effect after a daemon restart (use `POST
+            /api/v1/models/{id}/default` to switch now). Omitted on PUT =
+            unchanged.
+        require_auth_v1:
+          type: boolean
+          description: >
+            Require the bearer token on the local inference routes
+            (`/v1/*`) too (`local_api.require_auth_v1`). Off, any program
+            on this machine can use the loaded models without a key.
+            Applied immediately. Omitted on PUT = unchanged.
+        log_level:
+          type: string
+          enum: [debug, info, warn, error]
+          description: >
+            Daemon log verbosity (`log.level`). Takes effect after a
+            daemon restart. Omitted on PUT = unchanged.
+        settings:
+          type: array
+          readOnly: true
+          description: >-
+            One entry per field above, in display order: everything an app
+            needs to render the setting. Returned by GET and PUT; ignored
+            when sent.
+          items: { $ref: "#/components/schemas/LimitSetting" }
+
+    LimitSetting:
+      type: object
+      description: Metadata and current state of one Limits field.
+      required:
+        [key, config_key, title, description, tier, apply, type, default,
+         configured, pending_restart]
+      properties:
+        key:
+          type: string
+          description: The field's name in Limits (`max_concurrent`).
+        config_key:
+          type: string
+          description: The same setting in config.toml (`budget.max_concurrent`).
+        title:
+          type: string
+          description: Short label.
+        description:
+          type: string
+          description: Help text (the field's description, in one paragraph).
+        tier:
+          type: string
+          enum: [common, advanced]
+          description: >-
+            `common`: show by default. `advanced`: show under an Advanced
+            section.
+        apply:
+          type: string
+          enum: [live, reload, restart]
+          description: >-
+            How the daemon applies a change. `live`: immediately. `reload`:
+            by restarting the runtimes of idle loaded models right away; a
+            model with a request in flight keeps its layout until its next
+            load. `restart`: saved now, used from the next daemon start
+            (`pending_restart` is true until then).
+        type:
+          type: string
+          enum: [boolean, integer, number, string, enum, string_list]
+          description: How to edit the value.
+        unit:
+          type: string
+          description: "Unit of an integer or number: seconds, MB, tokens, days, percent, °C, slots."
+        min:
+          type: number
+          description: Smallest accepted value (integer and number types).
+        max:
+          type: number
+          description: Largest accepted value; absent = unbounded.
+        options:
+          type: array
+          items: { type: string }
+          description: The accepted values of an `enum`.
+        zero_means:
+          type: string
+          description: What the value 0 means when it is special ("auto", "never", "unlimited").
+        default:
+          description: The built-in default (the value's own JSON type).
+        configured:
+          description: >-
+            The value as set (config.toml, limits.toml or this API): what
+            GET returns in the field itself.
+        effective:
+          description: >-
+            Present when the daemon is running with something other than
+            `configured`: an `auto` (0) resolved for this machine
+            (`max_concurrent` 0 -> 16), or the previous value of a
+            `restart` setting whose change is pending.
+        pending_restart:
+          type: boolean
+          description: A change is saved but the daemon must restart to use it.
 
     ActivityEvent:
       type: object

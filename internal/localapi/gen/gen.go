@@ -32,6 +32,99 @@ func (e EarningsSource) Valid() bool {
 	}
 }
 
+// Defines values for LimitSettingApply.
+const (
+	Live    LimitSettingApply = "live"
+	Reload  LimitSettingApply = "reload"
+	Restart LimitSettingApply = "restart"
+)
+
+// Valid indicates whether the value is a known member of the LimitSettingApply enum.
+func (e LimitSettingApply) Valid() bool {
+	switch e {
+	case Live:
+		return true
+	case Reload:
+		return true
+	case Restart:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for LimitSettingTier.
+const (
+	Advanced LimitSettingTier = "advanced"
+	Common   LimitSettingTier = "common"
+)
+
+// Valid indicates whether the value is a known member of the LimitSettingTier enum.
+func (e LimitSettingTier) Valid() bool {
+	switch e {
+	case Advanced:
+		return true
+	case Common:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for LimitSettingType.
+const (
+	Boolean    LimitSettingType = "boolean"
+	Enum       LimitSettingType = "enum"
+	Integer    LimitSettingType = "integer"
+	Number     LimitSettingType = "number"
+	String     LimitSettingType = "string"
+	StringList LimitSettingType = "string_list"
+)
+
+// Valid indicates whether the value is a known member of the LimitSettingType enum.
+func (e LimitSettingType) Valid() bool {
+	switch e {
+	case Boolean:
+		return true
+	case Enum:
+		return true
+	case Integer:
+		return true
+	case Number:
+		return true
+	case String:
+		return true
+	case StringList:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for LimitsLogLevel.
+const (
+	LimitsLogLevelDebug LimitsLogLevel = "debug"
+	LimitsLogLevelError LimitsLogLevel = "error"
+	LimitsLogLevelInfo  LimitsLogLevel = "info"
+	LimitsLogLevelWarn  LimitsLogLevel = "warn"
+)
+
+// Valid indicates whether the value is a known member of the LimitsLogLevel enum.
+func (e LimitsLogLevel) Valid() bool {
+	switch e {
+	case LimitsLogLevelDebug:
+		return true
+	case LimitsLogLevelError:
+		return true
+	case LimitsLogLevelInfo:
+		return true
+	case LimitsLogLevelWarn:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ModelActivityKind.
 const (
 	ModelActivityKindChat      ModelActivityKind = "chat"
@@ -365,34 +458,134 @@ type InflightRequest struct {
 	Tokens int `json:"tokens"`
 }
 
-// Limits defines model for Limits.
+// LimitSetting Metadata and current state of one Limits field.
+type LimitSetting struct {
+	// Apply How the daemon applies a change. `live`: immediately. `reload`: by restarting the runtimes of idle loaded models right away; a model with a request in flight keeps its layout until its next load. `restart`: saved now, used from the next daemon start (`pending_restart` is true until then).
+	Apply LimitSettingApply `json:"apply"`
+
+	// ConfigKey The same setting in config.toml (`budget.max_concurrent`).
+	ConfigKey string `json:"config_key"`
+
+	// Configured The value as set (config.toml, limits.toml or this API): what GET returns in the field itself.
+	Configured interface{} `json:"configured"`
+
+	// Default The built-in default (the value's own JSON type).
+	Default interface{} `json:"default"`
+
+	// Description Help text (the field's description, in one paragraph).
+	Description string `json:"description"`
+
+	// Effective Present when the daemon is running with something other than `configured`: an `auto` (0) resolved for this machine (`max_concurrent` 0 -> 16), or the previous value of a `restart` setting whose change is pending.
+	Effective interface{} `json:"effective,omitempty"`
+
+	// Key The field's name in Limits (`max_concurrent`).
+	Key string `json:"key"`
+
+	// Max Largest accepted value; absent = unbounded.
+	Max *float32 `json:"max,omitempty"`
+
+	// Min Smallest accepted value (integer and number types).
+	Min *float32 `json:"min,omitempty"`
+
+	// Options The accepted values of an `enum`.
+	Options *[]string `json:"options,omitempty"`
+
+	// PendingRestart A change is saved but the daemon must restart to use it.
+	PendingRestart bool `json:"pending_restart"`
+
+	// Tier `common`: show by default. `advanced`: show under an Advanced section.
+	Tier LimitSettingTier `json:"tier"`
+
+	// Title Short label.
+	Title string `json:"title"`
+
+	// Type How to edit the value.
+	Type LimitSettingType `json:"type"`
+
+	// Unit Unit of an integer or number: seconds, MB, tokens, days, percent, °C, slots.
+	Unit *string `json:"unit,omitempty"`
+
+	// ZeroMeans What the value 0 means when it is special ("auto", "never", "unlimited").
+	ZeroMeans *string `json:"zero_means,omitempty"`
+}
+
+// LimitSettingApply How the daemon applies a change. `live`: immediately. `reload`: by restarting the runtimes of idle loaded models right away; a model with a request in flight keeps its layout until its next load. `restart`: saved now, used from the next daemon start (`pending_restart` is true until then).
+type LimitSettingApply string
+
+// LimitSettingTier `common`: show by default. `advanced`: show under an Advanced section.
+type LimitSettingTier string
+
+// LimitSettingType How to edit the value.
+type LimitSettingType string
+
+// Limits The operator's settings. GET returns every field plus `settings` (metadata for each: tier, how a change is applied, default, range, configured vs effective value). PUT takes the same object: the six required fields always, any other field only when it changes (omitted = unchanged); `settings` is ignored on PUT. The whole PUT is validated before anything is applied. Values persist in `<data_dir>/limits.toml`, which overrides `config.toml`.
 type Limits struct {
+	// ContextLength Pin every request's context to exactly this many tokens (`runtime.context_length`), for every model, decision models included; 0 = plan it from memory (recommended). 256 and up. Applied like `max_concurrent`. Omitted on PUT = unchanged.
+	ContextLength *int `json:"context_length,omitempty"`
+
+	// DefaultModel Model loaded when the daemon starts (`models.default`); empty or `none` = load nothing and serve what the mesh places. Takes effect after a daemon restart (use `POST /api/v1/models/{id}/default` to switch now). Omitted on PUT = unchanged.
+	DefaultModel *string `json:"default_model,omitempty"`
+
+	// Exclude Model ids the mesh may never place on this node (`models.exclude`). Applies to the next placement; a model already placed stays until evicted. Omitted on PUT = unchanged.
+	Exclude *[]string `json:"exclude,omitempty"`
+
+	// IdleAfterSeconds With `idle-only`, how long keyboard and mouse must be quiet before the node starts serving. 0 on PUT = unchanged.
 	IdleAfterSeconds int `json:"idle_after_seconds"`
 
 	// IdleUnloadSeconds Unload a loaded model after this long without a request (0 = never; default model exempt). Omitted on PUT = unchanged.
 	IdleUnloadSeconds *int `json:"idle_unload_seconds,omitempty"`
 
+	// LogLevel Daemon log verbosity (`log.level`). Takes effect after a daemon restart. Omitted on PUT = unchanged.
+	LogLevel *LimitsLogLevel `json:"log_level,omitempty"`
+
+	// MaxConcurrent Most requests one model serves at once (`budget.max_concurrent`): the ceiling on a model's slots and on mesh dispatches to this node. 0 = auto (16 with a GPU or unified memory, 2 on CPU). Every slot holds its own context in memory, so fewer slots leave room for more models. Applied by restarting idle models; a busy one changes at its next load. Omitted on PUT = unchanged.
+	MaxConcurrent *int `json:"max_concurrent,omitempty"`
+
+	// MaxContext Largest context, in tokens, a single request gets (`runtime.max_context`); 0 = the model's own window. Memory per model grows with slots x context. 0, or 1024 and up. Applied like `max_concurrent`. Omitted on PUT = unchanged.
+	MaxContext *int `json:"max_context,omitempty"`
+
 	// MaxDiskMb Model store budget (`models.max_disk_mb`); 0 = unlimited. LRU eviction of unpinned models keeps the store under it. Omitted on PUT = unchanged.
 	MaxDiskMb *int64 `json:"max_disk_mb,omitempty"`
 
 	// MaxRamMb Memory budget for loaded models (`budget.max_ram_mb`); 0 = auto (about half of physical memory on unified-memory machines, the GPU budget on discrete GPUs). Omitted on PUT = unchanged.
-	MaxRamMb       *int64  `json:"max_ram_mb,omitempty"`
+	MaxRamMb *int64 `json:"max_ram_mb,omitempty"`
+
+	// MaxTempCelsius Pause serving above this temperature; 0 disables the check.
 	MaxTempCelsius float64 `json:"max_temp_celsius"`
+
+	// MaxVramPercent Share of GPU memory models may use (`budget.max_vram_percent`): sizes the automatic memory budget on discrete GPUs and how many layers are offloaded. Takes effect after a daemon restart. Omitted on PUT = unchanged.
+	MaxVramPercent *int `json:"max_vram_percent,omitempty"`
 
 	// MeshManaged Let the mesh place models on this node (download, load, and evict what it placed) inside `models.max_disk_mb`, minus your pinned and excluded models. Off means the node serves only what you installed. Omitted on PUT = unchanged.
 	MeshManaged *bool `json:"mesh_managed,omitempty"`
+
+	// MinContext Smallest context a request is given (`runtime.min_context`): when memory is short the node gives up slots before going below it. 0 = 8192; otherwise 256 and up, and not above `max_context`. Applied like `max_concurrent`. Omitted on PUT = unchanged.
+	MinContext *int `json:"min_context,omitempty"`
+
+	// RequireAuthV1 Require the bearer token on the local inference routes (`/v1/*`) too (`local_api.require_auth_v1`). Off, any program on this machine can use the loaded models without a key. Applied immediately. Omitted on PUT = unchanged.
+	RequireAuthV1 *bool `json:"require_auth_v1,omitempty"`
 
 	// RetentionDays Evict unpinned models not used for this many days (0 = never). Omitted on PUT = unchanged.
 	RetentionDays *int `json:"retention_days,omitempty"`
 
 	// Schedule Daily serving windows for serve_policy=scheduled, one per entry, each "HH:MM-HH:MM" in the node's local time on a 24-hour clock (the hour may be one or two digits, the minute must be two — Go's "15:04" layout). The end is exclusive: "09:00-17:00" serves 09:00 through 16:59. A start later than its end wraps overnight ("22:00-08:00"); "22:00-00:00" runs to midnight; a window whose start equals its end matches nothing, so a full day is ["00:00-12:00", "12:00-00:00"]. The same windows apply every day (there is no day-of-week syntax) and an empty list never serves. An entry the daemon can't parse fails the whole PUT with 400; reads return windows normalised to zero-padded "HH:MM-HH:MM".
-	Schedule       []string `json:"schedule"`
-	ServeOnBattery bool     `json:"serve_on_battery"`
+	Schedule []string `json:"schedule"`
 
-	// ServePolicy always | idle-only | scheduled
-	ServePolicy       string `json:"serve_policy"`
-	YieldGraceSeconds int    `json:"yield_grace_seconds"`
+	// ServeOnBattery Serve while running on battery power.
+	ServeOnBattery bool `json:"serve_on_battery"`
+
+	// ServePolicy always | idle-only | scheduled. When this machine serves the mesh. `idle-only`: only while you are away from the keyboard and mouse. `scheduled`: only inside the schedule windows. `always`: whenever it is on.
+	ServePolicy string `json:"serve_policy"`
+
+	// Settings One entry per field above, in display order: everything an app needs to render the setting. Returned by GET and PUT; ignored when sent.
+	Settings *[]LimitSetting `json:"settings,omitempty"`
+
+	// YieldGraceSeconds When you come back to the machine, how long a request in flight may run on before it is cancelled. 0 on PUT = unchanged.
+	YieldGraceSeconds int `json:"yield_grace_seconds"`
 }
+
+// LimitsLogLevel Daemon log verbosity (`log.level`). Takes effect after a daemon restart. Omitted on PUT = unchanged.
+type LimitsLogLevel string
 
 // LogEntry defines model for LogEntry.
 type LogEntry struct {

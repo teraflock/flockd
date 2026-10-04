@@ -100,6 +100,12 @@ func run() error {
 	if *standalone {
 		cfg.Tunnel.Standalone = true
 	}
+	// Which settings limits.toml already holds, so a save through the
+	// limits API carries them forward.
+	overlayExtra, err := config.LoadLimitsExtra(cfg.DataDir)
+	if err != nil {
+		return err
+	}
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
@@ -220,6 +226,10 @@ func run() error {
 	if maxConc <= 0 {
 		maxConc = memory.DefaultSlots(hw)
 	}
+	// slotCap is the resolved ceiling as it stands now: the limits API can
+	// change budget.max_concurrent on a running daemon (flockd#55).
+	var slotCap atomic.Int64
+	slotCap.Store(int64(maxConc))
 	budget := rt.ResourceBudget{
 		MaxVRAMPercent: cfg.Budget.MaxVRAMPercent,
 		MaxRAMMB:       cfg.Budget.MaxRAMMB,
@@ -362,13 +372,17 @@ func run() error {
 	// decline everything with a reason so the coordinator backs off.
 	var meshManaged atomic.Bool
 	meshManaged.Store(cfg.Models.MeshManaged)
+	// models.exclude is live-editable too.
+	var exclude atomic.Pointer[[]string]
+	initialExclude := slices.Clone(cfg.Models.Exclude)
+	exclude.Store(&initialExclude)
 	asg := &assign.Service{
 		Ops: ops, Mgr: mgr, Eng: eng, Events: hub, Activity: act, Log: log,
 		OnBattery: func() bool { return gov.Power().OnBattery },
 		Policy: func() assign.Policy {
 			return assign.Policy{
 				MeshManaged: meshManaged.Load(),
-				Exclude:     slices.Clone(cfg.Models.Exclude),
+				Exclude:     slices.Clone(*exclude.Load()),
 				Pinned:      slices.Clone(cfg.Models.Pin),
 			}
 		},
@@ -415,7 +429,7 @@ func run() error {
 			return err
 		}
 		tctx, cancel := context.WithCancel(ctx)
-		client, err := startTunnel(tctx, cfg, dialer, cfg.Tunnel.CoordinatorAddr, creds.CoordinatorPubKey, creds.NodeID, identity, hw, gov, stats, eng, mgr, ops, asg, upd, budget, log)
+		client, err := startTunnel(tctx, cfg, dialer, cfg.Tunnel.CoordinatorAddr, creds.CoordinatorPubKey, creds.NodeID, identity, hw, gov, stats, eng, mgr, ops, asg, upd, &slotCap, log)
 		if err != nil {
 			cancel()
 			return err
@@ -441,7 +455,7 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		if _, err := startTunnel(ctx, cfg, coord.Dialer(), coord.Addr(), coord.PubKey(), creds.NodeID, identity, hw, gov, stats, eng, mgr, ops, asg, upd, budget, log); err != nil {
+		if _, err := startTunnel(ctx, cfg, coord.Dialer(), coord.Addr(), coord.PubKey(), creds.NodeID, identity, hw, gov, stats, eng, mgr, ops, asg, upd, &slotCap, log); err != nil {
 			return err
 		}
 		nodeID = creds.NodeID
@@ -584,6 +598,43 @@ func run() error {
 		Update:        upd,
 		RequireAuthV1: cfg.LocalAPI.RequireAuthV1,
 		Token:         token,
+		Settings: localapi.SettingsDeps{
+			Boot: localapi.SettingsValues{
+				MaxConcurrent: cfg.Budget.MaxConcurrent, MaxVRAMPercent: cfg.Budget.MaxVRAMPercent,
+				MaxContext: cfg.Runtime.MaxContext, MinContext: cfg.Runtime.MinContext, ContextLength: cfg.Runtime.ContextLength,
+				Exclude: slices.Clone(cfg.Models.Exclude), DefaultModel: cfg.Models.Default, LogLevel: cfg.Log.Level,
+			},
+			Overlay: overlayExtra,
+			SetExclude: func(ids []string) {
+				exclude.Store(&ids)
+				log.Info("models.exclude changed", "exclude", ids)
+			},
+			// Slots and context: later loads plan with the new limits, the
+			// mesh dispatch cap follows the slot ceiling, and loaded
+			// models that are idle are restarted now so the change shows
+			// without a daemon restart (busy ones at their next load).
+			ApplyPlan: func(l modelops.PlanLimits) {
+				resolved := l.MaxConcurrent
+				if resolved <= 0 {
+					resolved = memory.DefaultSlots(hw)
+				}
+				slotCap.Store(int64(resolved))
+				mesh.mu.Lock()
+				client := mesh.client
+				mesh.mu.Unlock()
+				if client != nil {
+					client.SetMaxConcurrent(resolved)
+				}
+				if ops == nil {
+					return
+				}
+				ops.SetPlanLimits(l)
+				go func() {
+					reloaded, busy := ops.ReloadStale(ctx)
+					log.Info("plan limits applied", "reloaded", reloaded, "busy_until_next_load", busy)
+				}()
+			},
+		},
 	})
 	log.Info("flockd ready",
 		"local_api", "http://"+cfg.LocalAPI.Listen,
@@ -700,17 +751,21 @@ func reportRuntimeBuild(hw *typesv1.CapabilityProfile, inst rt.Instance, log *sl
 // startTunnel runs the session client in the background. nodeID must be the
 // coordinator-assigned ID from enrollment — the session is rejected
 // otherwise.
-func startTunnel(ctx context.Context, cfg config.Config, dialer tunnel.Dialer, addr string, coordKey []byte, nodeID string, _ *enroll.Identity, hw *typesv1.CapabilityProfile, gov *governor.Governor, stats *telemetry.Stats, eng *engine.Engine, _ *models.Manager, ops *modelops.Service, asg *assign.Service, upd *update.Checker, budget rt.ResourceBudget, log *slog.Logger) (*tunnel.Client, error) {
-	protoBudget := &typesv1.ResourceBudget{
-		MaxVramPercent: uint32(cfg.Budget.MaxVRAMPercent),
-		MaxRamMb:       uint64(max(cfg.Budget.MaxRAMMB, 0)),
-		// The resolved ceiling, never the raw 0 of "auto": this is the
-		// most the coordinator may set max_concurrent_requests to.
-		MaxConcurrentRequests: uint32(budget.MaxConcurrent),
-		MaxDiskMb:             uint64(max(cfg.Models.MaxDiskMB, 0)),
-		ServeOnBattery:        cfg.Governor.ServeOnBattery,
-		MaxTempCelsius:        uint32(cfg.Governor.MaxTempCelsius),
-		ServePolicy:           cfg.Governor.ServePolicy,
+func startTunnel(ctx context.Context, cfg config.Config, dialer tunnel.Dialer, addr string, coordKey []byte, nodeID string, _ *enroll.Identity, hw *typesv1.CapabilityProfile, gov *governor.Governor, stats *telemetry.Stats, eng *engine.Engine, _ *models.Manager, ops *modelops.Service, asg *assign.Service, upd *update.Checker, slotCap *atomic.Int64, log *slog.Logger) (*tunnel.Client, error) {
+	// Built per session: the slot ceiling can change under a running
+	// daemon, and the coordinator reads it from the Hello.
+	protoBudget := func() *typesv1.ResourceBudget {
+		return &typesv1.ResourceBudget{
+			MaxVramPercent: uint32(cfg.Budget.MaxVRAMPercent),
+			MaxRamMb:       uint64(max(cfg.Budget.MaxRAMMB, 0)),
+			// The resolved ceiling, never the raw 0 of "auto": this is the
+			// most the coordinator may set max_concurrent_requests to.
+			MaxConcurrentRequests: uint32(slotCap.Load()),
+			MaxDiskMb:             uint64(max(cfg.Models.MaxDiskMB, 0)),
+			ServeOnBattery:        cfg.Governor.ServeOnBattery,
+			MaxTempCelsius:        uint32(cfg.Governor.MaxTempCelsius),
+			ServePolicy:           cfg.Governor.ServePolicy,
+		}
 	}
 	// ready / cached / assigned / downloading, each with its origin; see
 	// assign.ModelStates for the contract.
@@ -742,7 +797,7 @@ func startTunnel(ctx context.Context, cfg config.Config, dialer tunnel.Dialer, a
 		CoordinatorPubKey: coordKey,
 		Engine:            eng,
 		Admit:             gov,
-		MaxConcurrent:     budget.MaxConcurrent,
+		MaxConcurrent:     int(slotCap.Load()),
 		HeartbeatInterval: cfg.Tunnel.HeartbeatInterval,
 		ReconnectMin:      cfg.Tunnel.ReconnectMin,
 		ReconnectMax:      cfg.Tunnel.ReconnectMax,
@@ -753,7 +808,7 @@ func startTunnel(ctx context.Context, cfg config.Config, dialer tunnel.Dialer, a
 				DaemonVersion: version,
 				Capability:    hw,
 				Models:        modelStates(),
-				Budget:        protoBudget,
+				Budget:        protoBudget(),
 			}
 		},
 		Heartbeat: func() *tunnelv1.Heartbeat {

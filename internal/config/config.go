@@ -299,8 +299,6 @@ func Load(path string) (Config, error) {
 	if err := k.Unmarshal("", &cfg); err != nil {
 		return cfg, fmt.Errorf("config: unmarshal: %w", err)
 	}
-	cfg.Models.Default = NormalizeDefaultModel(cfg.Models.Default)
-
 	// Live-edited limits (PUT /api/v1/limits) persist in a daemon-owned
 	// overlay so the operator's config.toml — comments and all — is never
 	// rewritten by the API. The overlay is the operator's most recent
@@ -314,6 +312,7 @@ func Load(path string) (Config, error) {
 			return cfg, fmt.Errorf("config: unmarshal %s: %w", overlay, err)
 		}
 	}
+	cfg.Models.Default = NormalizeDefaultModel(cfg.Models.Default)
 
 	if err := cfg.Validate(); err != nil {
 		return cfg, err
@@ -336,34 +335,152 @@ type LiveLimits struct {
 	MaxRAMMB      int64
 }
 
+// LimitsExtra are the settings the limits API exposes beyond the original
+// governor / store / memory knobs (flockd#55). A nil field is "not set
+// through the API": it is not written to the overlay, so config.toml (or
+// the built-in default) keeps deciding it. Once set it lives in
+// limits.toml, which overrides config.toml.
+type LimitsExtra struct {
+	MaxConcurrent  *int      // budget.max_concurrent
+	MaxVRAMPercent *int      // budget.max_vram_percent
+	MaxContext     *int      // runtime.max_context
+	MinContext     *int      // runtime.min_context
+	ContextLength  *int      // runtime.context_length
+	Exclude        *[]string // models.exclude
+	DefaultModel   *string   // models.default ("" = none)
+	RequireAuthV1  *bool     // local_api.require_auth_v1
+	LogLevel       *string   // log.level
+}
+
+// Bounds of the settings the limits API accepts. The config file is held
+// to the looser Validate; these keep an app from writing a value that
+// makes the node useless.
+const (
+	MaxConcurrentLimit = 64
+	MinContextFloor    = 256
+	MaxContextLimit    = 1 << 20
+	MaxExcludeEntries  = 256
+)
+
+// LogLevels are the accepted log.level values.
+var LogLevels = []string{"debug", "info", "warn", "error"}
+
+// LoadLimitsExtra reports which LimitsExtra keys the overlay holds, with
+// their values, so a later SaveLimits carries them forward. A missing
+// overlay is an empty LimitsExtra.
+func LoadLimitsExtra(dataDir string) (LimitsExtra, error) {
+	var e LimitsExtra
+	path := LimitsPath(dataDir)
+	if _, err := os.Stat(path); err != nil {
+		return e, nil
+	}
+	k := koanf.New(".")
+	if err := k.Load(file.Provider(path), toml.Parser()); err != nil {
+		return e, fmt.Errorf("config: load %s: %w", path, err)
+	}
+	intKey := func(key string) *int {
+		if !k.Exists(key) {
+			return nil
+		}
+		v := k.Int(key)
+		return &v
+	}
+	e.MaxConcurrent = intKey("budget.max_concurrent")
+	e.MaxVRAMPercent = intKey("budget.max_vram_percent")
+	e.MaxContext = intKey("runtime.max_context")
+	e.MinContext = intKey("runtime.min_context")
+	e.ContextLength = intKey("runtime.context_length")
+	if k.Exists("models.exclude") {
+		v := k.Strings("models.exclude")
+		if v == nil {
+			v = []string{}
+		}
+		e.Exclude = &v
+	}
+	if k.Exists("models.default") {
+		v := NormalizeDefaultModel(k.String("models.default"))
+		e.DefaultModel = &v
+	}
+	if k.Exists("local_api.require_auth_v1") {
+		v := k.Bool("local_api.require_auth_v1")
+		e.RequireAuthV1 = &v
+	}
+	if k.Exists("log.level") {
+		v := k.String("log.level")
+		e.LogLevel = &v
+	}
+	return e, nil
+}
+
+func tomlStrings(vals []string) string {
+	var b strings.Builder
+	b.WriteString("[")
+	for i, w := range vals {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		fmt.Fprintf(&b, "%q", w)
+	}
+	b.WriteString("]")
+	return b.String()
+}
+
 // SaveLimits persists live-edited limits to the overlay file that Load
 // applies on the next start. Only the operator-facing limit knobs are
 // written; poll_interval and the rest stay wherever the operator set them.
-func SaveLimits(dataDir string, g Governor, l LiveLimits) error {
+// Of extra, only the fields that are set are written.
+func SaveLimits(dataDir string, g Governor, l LiveLimits, extra LimitsExtra) error {
 	var b strings.Builder
 	b.WriteString("# Written by flockd when limits change via the API or app.\n")
-	b.WriteString("# These override [governor], [models] and [budget] in config.toml; delete this file to undo.\n\n")
+	b.WriteString("# These override the same keys in config.toml; delete this file to undo.\n\n")
 	b.WriteString("[governor]\n")
 	fmt.Fprintf(&b, "serve_policy = %q\n", g.ServePolicy)
 	fmt.Fprintf(&b, "idle_after = %q\n", g.IdleAfter.String())
 	fmt.Fprintf(&b, "yield_grace = %q\n", g.YieldGrace.String())
 	fmt.Fprintf(&b, "serve_on_battery = %t\n", g.ServeOnBattery)
 	fmt.Fprintf(&b, "max_temp_celsius = %g\n", g.MaxTempCelsius)
-	b.WriteString("schedule = [")
-	for i, w := range g.Schedule {
-		if i > 0 {
-			b.WriteString(", ")
-		}
-		fmt.Fprintf(&b, "%q", w)
-	}
-	b.WriteString("]\n")
+	fmt.Fprintf(&b, "schedule = %s\n", tomlStrings(g.Schedule))
 	b.WriteString("\n[models]\n")
 	fmt.Fprintf(&b, "mesh_managed = %t\n", l.MeshManaged)
 	fmt.Fprintf(&b, "max_disk_mb = %d\n", l.MaxDiskMB)
 	fmt.Fprintf(&b, "retention_days = %d\n", l.RetentionDays)
 	fmt.Fprintf(&b, "idle_unload_s = %d\n", l.IdleUnloadS)
+	if extra.Exclude != nil {
+		fmt.Fprintf(&b, "exclude = %s\n", tomlStrings(*extra.Exclude))
+	}
+	if extra.DefaultModel != nil {
+		v := *extra.DefaultModel
+		if v == "" {
+			v = NoDefaultModel
+		}
+		fmt.Fprintf(&b, "default = %q\n", v)
+	}
 	b.WriteString("\n[budget]\n")
 	fmt.Fprintf(&b, "max_ram_mb = %d\n", l.MaxRAMMB)
+	if extra.MaxConcurrent != nil {
+		fmt.Fprintf(&b, "max_concurrent = %d\n", *extra.MaxConcurrent)
+	}
+	if extra.MaxVRAMPercent != nil {
+		fmt.Fprintf(&b, "max_vram_percent = %d\n", *extra.MaxVRAMPercent)
+	}
+	if extra.MaxContext != nil || extra.MinContext != nil || extra.ContextLength != nil {
+		b.WriteString("\n[runtime]\n")
+		if extra.MaxContext != nil {
+			fmt.Fprintf(&b, "max_context = %d\n", *extra.MaxContext)
+		}
+		if extra.MinContext != nil {
+			fmt.Fprintf(&b, "min_context = %d\n", *extra.MinContext)
+		}
+		if extra.ContextLength != nil {
+			fmt.Fprintf(&b, "context_length = %d\n", *extra.ContextLength)
+		}
+	}
+	if extra.RequireAuthV1 != nil {
+		fmt.Fprintf(&b, "\n[local_api]\nrequire_auth_v1 = %t\n", *extra.RequireAuthV1)
+	}
+	if extra.LogLevel != nil {
+		fmt.Fprintf(&b, "\n[log]\nlevel = %q\n", *extra.LogLevel)
+	}
 
 	tmp := LimitsPath(dataDir) + ".tmp"
 	if err := os.WriteFile(tmp, []byte(b.String()), 0o600); err != nil {

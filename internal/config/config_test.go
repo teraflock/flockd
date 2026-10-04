@@ -107,7 +107,7 @@ func TestLimitsOverlayRoundTrip(t *testing.T) {
 		ServeOnBattery: true,
 		MaxTempCelsius: 85,
 		Schedule:       []string{"22:00-08:00"},
-	}, LiveLimits{MeshManaged: false, MaxDiskMB: 12345, RetentionDays: 14, IdleUnloadS: 600, MaxRAMMB: 8192}); err != nil {
+	}, LiveLimits{MeshManaged: false, MaxDiskMB: 12345, RetentionDays: 14, IdleUnloadS: 600, MaxRAMMB: 8192}, LimitsExtra{}); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err = Load(cfgPath)
@@ -301,5 +301,77 @@ func TestDefaultModelNoneMeansNothing(t *testing.T) {
 	}
 	if cfg.Models.Default != "" {
 		t.Fatalf("models.default = %q after \"none\", want empty", cfg.Models.Default)
+	}
+}
+
+// The flockd#55 settings ride the overlay only once they were set through
+// the API: an unset one leaves config.toml in charge, a set one overrides
+// it, and LoadLimitsExtra reports exactly which are held.
+func TestLimitsExtraOverlay(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.toml")
+	toml := "data_dir = \"" + filepath.ToSlash(dir) + "\"\n" +
+		"[budget]\nmax_concurrent = 4\n[runtime]\nmax_context = 4096\n[models]\nexclude = [\"a\"]\ndefault = \"from-file\"\n"
+	if err := os.WriteFile(cfgPath, []byte(toml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	g := Default().Governor
+	g.Schedule = []string{}
+	ll := LiveLimits{MeshManaged: true, MaxDiskMB: 1}
+
+	// Nothing set through the API: config.toml decides, the overlay holds none.
+	if err := SaveLimits(dir, g, ll, LimitsExtra{}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Budget.MaxConcurrent != 4 || cfg.Runtime.MaxContext != 4096 || cfg.Models.Default != "from-file" || len(cfg.Models.Exclude) != 1 {
+		t.Fatalf("config.toml values lost: %+v %+v %+v", cfg.Budget, cfg.Runtime, cfg.Models)
+	}
+	if e, err := LoadLimitsExtra(dir); err != nil || e != (LimitsExtra{}) {
+		t.Fatalf("empty overlay extra = %+v %v", e, err)
+	}
+
+	// Set through the API: limits.toml overrides config.toml.
+	two, ctx, minCtx, pin, vram := 2, 8192, 2048, 0, 70
+	none, auth, lvl := "", true, "debug"
+	ex := []string{}
+	extra := LimitsExtra{MaxConcurrent: &two, MaxContext: &ctx, MinContext: &minCtx, ContextLength: &pin,
+		MaxVRAMPercent: &vram, Exclude: &ex, DefaultModel: &none, RequireAuthV1: &auth, LogLevel: &lvl}
+	if err := SaveLimits(dir, g, ll, extra); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Budget.MaxConcurrent != 2 || cfg.Budget.MaxVRAMPercent != 70 || cfg.Runtime.MaxContext != 8192 ||
+		cfg.Runtime.MinContext != 2048 || cfg.Runtime.ContextLength != 0 || len(cfg.Models.Exclude) != 0 ||
+		cfg.Models.Default != "" || !cfg.LocalAPI.RequireAuthV1 || cfg.Log.Level != "debug" {
+		t.Fatalf("overlay did not override: %+v %+v %+v %+v %+v", cfg.Budget, cfg.Runtime, cfg.Models, cfg.LocalAPI, cfg.Log)
+	}
+	got, err := LoadLimitsExtra(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.MaxConcurrent == nil || *got.MaxConcurrent != 2 || got.MaxContext == nil || *got.MaxContext != 8192 ||
+		got.MinContext == nil || *got.MinContext != 2048 || got.ContextLength == nil || *got.ContextLength != 0 ||
+		got.MaxVRAMPercent == nil || *got.MaxVRAMPercent != 70 || got.Exclude == nil || len(*got.Exclude) != 0 ||
+		got.DefaultModel == nil || *got.DefaultModel != "" || got.RequireAuthV1 == nil || !*got.RequireAuthV1 ||
+		got.LogLevel == nil || *got.LogLevel != "debug" {
+		t.Fatalf("LoadLimitsExtra = %+v", got)
+	}
+	// A partial set carries only what it holds.
+	if err := SaveLimits(dir, g, ll, LimitsExtra{MaxConcurrent: &two}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = LoadLimitsExtra(dir)
+	if got.MaxConcurrent == nil || got.MaxContext != nil || got.Exclude != nil || got.LogLevel != nil {
+		t.Fatalf("partial overlay = %+v", got)
+	}
+	if e, err := LoadLimitsExtra(t.TempDir()); err != nil || e != (LimitsExtra{}) {
+		t.Fatalf("no overlay file = %+v %v", e, err)
 	}
 }

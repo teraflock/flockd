@@ -35,6 +35,10 @@ type loadInfo struct {
 	// its estimate on top of the sample; clocks are too coarse on some
 	// platforms (Windows ~15 ms) to compare timestamps for this.
 	VRAMSeq uint64
+	// Limits is the plan limits the layout was planned under, and Slots /
+	// CtxPerSlot the layout itself (--parallel, --ctx-size / parallel).
+	Limits            PlanLimits
+	Slots, CtxPerSlot int
 }
 
 // MemorySnapshot is the /api/v1/status memory view and the heartbeat's

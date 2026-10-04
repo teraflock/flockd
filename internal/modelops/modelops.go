@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -112,6 +113,10 @@ type Service struct {
 	catalogTried time.Time
 	downloads    map[string]context.CancelFunc
 	loading      map[string]bool
+	// plan is the live plan limits once SetPlanLimits has been called
+	// (planSet); before that the exported fields above are read.
+	plan    PlanLimits
+	planSet bool
 	// starting is the models whose runtime is starting right now (the
 	// Loader.Load call), and since when.
 	starting map[string]time.Time
@@ -436,6 +441,9 @@ func (s *Service) LoadInstanceOrigin(ctx context.Context, id, origin string) (rt
 			fileBytes = int64(pspec.GetSizeBytes())
 		}
 	}
+	// One snapshot of the operator's plan limits for the whole load: they
+	// can change under a running daemon (PUT /api/v1/limits).
+	lim := s.PlanLimits()
 	// Slots and context are planned from the memory budget (flockd#46):
 	// admission is asked for room for the smallest layout the operator
 	// accepts (the per-slot floor on one slot), and once idle models have
@@ -444,8 +452,8 @@ func (s *Service) LoadInstanceOrigin(ctx context.Context, id, origin string) (rt
 	// plan's, so admission and the launch arguments cannot disagree.
 	in := memory.PlanInput{
 		FileBytes: fileBytes, MinRAMMB: int64(pspec.GetMinRamMb()),
-		Window: spec.ContextLength, Slots: s.slotCeiling(),
-		MinCtx: s.MinContext, MaxCtx: s.MaxContext, CtxPin: s.ContextLength,
+		Window: spec.ContextLength, Slots: lim.slots(s.Hardware),
+		MinCtx: lim.MinContext, MaxCtx: lim.MaxContext, CtxPin: lim.ContextLength,
 	}
 	// The GGUF header says exactly what a context token costs and, for a
 	// local model with no catalog entry, how long the training window is.
@@ -484,6 +492,7 @@ func (s *Service) LoadInstanceOrigin(ctx context.Context, id, origin string) (rt
 	plan := memory.PlanContext(in)
 	estimate := plan.EstimateMB
 	res := s.Budget
+	res.MaxConcurrent = lim.slots(s.Hardware)
 	res.Slots, res.ContextTokens = plan.Slots, plan.TotalCtx
 	s.log().Info("context plan", "model", id, "slots", plan.Slots, "ctx_per_slot", plan.CtxPerSlot,
 		"ctx_total", plan.TotalCtx, "kv_kb_per_token", in.KVBytesPerToken/1024,
@@ -511,7 +520,8 @@ func (s *Service) LoadInstanceOrigin(ctx context.Context, id, origin string) (rt
 	if s.loads == nil {
 		s.loads = map[string]*loadInfo{}
 	}
-	s.loads[id] = &loadInfo{Origin: origin, EstimateMB: estimate, LoadedAt: time.Now(), VRAMSeq: s.vramSampleSeq}
+	s.loads[id] = &loadInfo{Origin: origin, EstimateMB: estimate, LoadedAt: time.Now(), VRAMSeq: s.vramSampleSeq,
+		Limits: lim, Slots: plan.Slots, CtxPerSlot: plan.CtxPerSlot}
 	s.mu.Unlock()
 	s.Eng.Register(spec, inst)
 	if s.OnLoaded != nil {
@@ -540,13 +550,119 @@ func (s *Service) CheckRuntime(ctx context.Context, m models.CatalogModel) error
 	return sup.SupportsModel(ctx, rt.ModelSpec{ID: m.ID, Embeddings: m.Embeddings, Decision: m.Decision})
 }
 
-// slotCeiling is the most slots a load may plan: the operator's
-// budget.max_concurrent, or the hardware default when that is 0 (auto).
-func (s *Service) slotCeiling() int {
-	if s.Budget.MaxConcurrent > 0 {
-		return s.Budget.MaxConcurrent
+// PlanLimits are the operator's inputs to the context plan: the slot
+// ceiling and the per-slot context bounds. They are the settings that
+// decide a runtime's launch arguments, so changing one takes a reload of
+// the model to show.
+type PlanLimits struct {
+	// MaxConcurrent is budget.max_concurrent as configured: the slot
+	// ceiling, 0 = auto by accelerator class.
+	MaxConcurrent int
+	// MaxContext, MinContext and ContextLength are runtime.max_context,
+	// min_context and context_length.
+	MaxContext, MinContext, ContextLength int
+}
+
+// slots resolves the ceiling: the operator's number, or the hardware
+// default when it is 0 (auto).
+func (l PlanLimits) slots(hw *typesv1.CapabilityProfile) int {
+	if l.MaxConcurrent > 0 {
+		return l.MaxConcurrent
 	}
-	return memory.DefaultSlots(s.Hardware)
+	return memory.DefaultSlots(hw)
+}
+
+// PlanLimits returns the limits the next load plans with.
+func (s *Service) PlanLimits() PlanLimits {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.planSet {
+		// Constructed with the plain fields (startup, tests): adopt them.
+		// Budget.MaxConcurrent there is already resolved, never 0.
+		return PlanLimits{MaxConcurrent: s.Budget.MaxConcurrent, MaxContext: s.MaxContext,
+			MinContext: s.MinContext, ContextLength: s.ContextLength}
+	}
+	return s.plan
+}
+
+// SetPlanLimits changes the limits for every later load. Models already
+// loaded keep their layout until they are reloaded (ReloadStale).
+func (s *Service) SetPlanLimits(l PlanLimits) {
+	s.mu.Lock()
+	s.plan, s.planSet = l, true
+	s.mu.Unlock()
+	s.log().Info("plan limits changed", "max_concurrent", l.MaxConcurrent, "max_context", l.MaxContext,
+		"min_context", l.MinContext, "context_length", l.ContextLength)
+}
+
+// SlotCeiling is the resolved slot ceiling of the current plan limits.
+func (s *Service) SlotCeiling() int { return s.PlanLimits().slots(s.Hardware) }
+
+// Layout is the slot and context layout a loaded model runs with.
+type Layout struct {
+	Slots, CtxPerSlot int
+	// Stale: the plan limits changed since this model was loaded; it
+	// picks the new ones up when it is next loaded.
+	Stale bool
+}
+
+// Layouts reports the layout of every loaded model.
+func (s *Service) Layouts() map[string]Layout {
+	cur := s.PlanLimits()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]Layout, len(s.loads))
+	for id, li := range s.loads {
+		out[id] = Layout{Slots: li.Slots, CtxPerSlot: li.CtxPerSlot, Stale: li.Limits != cur}
+	}
+	return out
+}
+
+// ReloadStale applies changed plan limits to the models that are loaded:
+// each one whose layout was planned under other limits and that has
+// nothing in flight is unloaded and loaded again (a runtime restart: the
+// weights are on disk, so seconds). A busy model is left alone — never
+// interrupt a request for a setting — and picks the limits up at its next
+// load. The default model stays the default. It returns the ids reloaded
+// and the ids skipped because they were busy.
+func (s *Service) ReloadStale(ctx context.Context) (reloaded, busy []string) {
+	def := s.Eng.DefaultModel()
+	var stale []string
+	for id, l := range s.Layouts() {
+		if l.Stale {
+			stale = append(stale, id)
+		}
+	}
+	sort.Strings(stale)
+	for _, id := range stale {
+		s.mu.Lock()
+		origin := models.OriginOperator
+		if li, ok := s.loads[id]; ok && li.Origin != "" {
+			origin = li.Origin
+		}
+		s.mu.Unlock()
+		err := s.unload(ctx, id, unloadOpts{actor: activity.ActorDaemon, reason: "settings changed", idleOnly: true, reloading: true})
+		if errors.Is(err, engine.ErrBusy) {
+			busy = append(busy, id)
+			continue
+		}
+		if err != nil {
+			continue // unloaded by someone else meanwhile
+		}
+		if _, err := s.LoadInstanceOrigin(ctx, id, origin); err != nil {
+			s.log().Warn("reload after a settings change failed; model left unloaded", "model", id, "err", err)
+			s.Activity.Record(activity.KindUnloaded, activity.ActorDaemon, id, "unloaded "+id+": reload after a settings change failed", err.Error())
+			if s.OnUnloaded != nil {
+				s.OnUnloaded(id)
+			}
+			continue
+		}
+		reloaded = append(reloaded, id)
+	}
+	if def != "" && s.Eng.DefaultModel() != def {
+		_ = s.Eng.SetDefault(def) // gone if its reload failed
+	}
+	return reloaded, busy
 }
 
 // Loading reports whether a load of id is in progress (download, admission
@@ -605,6 +721,9 @@ type unloadOpts struct {
 	// removing suppresses the unloaded activity row and the OnUnloaded
 	// (`cached`) hook: the artifact is being deleted, not kept warm.
 	removing bool
+	// reloading suppresses the same two: the model is coming straight
+	// back (ReloadStale), so the coordinator is not told it went `cached`.
+	reloading bool
 }
 
 func (s *Service) unload(ctx context.Context, id string, o unloadOpts) error {
@@ -627,7 +746,7 @@ func (s *Service) unload(ctx context.Context, id string, o unloadOpts) error {
 	}
 	s.log().Info("model unloaded", "model", id, "actor", o.actor, "reason", o.reason)
 	s.Events.Publish("models_changed", map[string]string{"model": id, "change": "unloaded"})
-	if o.removing {
+	if o.removing || o.reloading {
 		return nil
 	}
 	s.Activity.Record(activity.KindUnloaded, o.actor, id, "unloaded "+id, o.reason)

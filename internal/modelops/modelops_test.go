@@ -430,3 +430,102 @@ func TestCatalogPeriodicRefreshAndStaleOnFailure(t *testing.T) {
 		t.Fatalf("an invalid catalog replaced the good one: %v %v", cat, err)
 	}
 }
+
+// Changing the plan limits on a running daemon (PUT /api/v1/limits:
+// max_concurrent, max_context) reloads the loaded models that are idle
+// with the new layout, never one with a request in flight, and without
+// telling the coordinator the model went away.
+func TestSetPlanLimitsReloadsIdleModels(t *testing.T) {
+	blobs := map[string][]byte{"idle-model": []byte("gguf idle"), "busy-model": []byte("gguf busy")}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(blobs[filepath.Base(r.URL.Path)])
+	}))
+	t.Cleanup(srv.Close)
+	dir := t.TempDir()
+	cat := "models:\n"
+	for id, b := range blobs {
+		cat += fmt.Sprintf("  - id: %s\n    sha256: %s\n    artifact_url: %s/%s\n    size_bytes: %d\n    context_length: 32768\n", id, shaOf(b), srv.URL, id, len(b))
+	}
+	catPath := filepath.Join(dir, "catalog.yaml")
+	if err := os.WriteFile(catPath, []byte(cat), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mgr, err := models.NewManager(filepath.Join(dir, "models"), 0, quietLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng := engine.New(nil, nil, nil)
+	loader := &captureLoader{mock: rt.NewMockRuntime(5)}
+	var cached []string
+	svc := &Service{Mgr: mgr, Eng: eng, Loader: loader, Budget: rt.ResourceBudget{MaxConcurrent: 16},
+		MaxContext: 16384, MinContext: 8192, Log: quietLog(), ManifestPath: catPath,
+		OnUnloaded: func(id string) { cached = append(cached, id) }}
+	ctx := context.Background()
+	for _, id := range []string{"busy-model", "idle-model"} {
+		if err := svc.Load(ctx, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := eng.SetDefault("idle-model"); err != nil {
+		t.Fatal(err)
+	}
+	if l := svc.Layouts(); l["idle-model"] != (Layout{Slots: 16, CtxPerSlot: 16384}) || l["busy-model"].Stale {
+		t.Fatalf("layouts at load = %+v", l)
+	}
+	if got := svc.PlanLimits(); got != (PlanLimits{MaxConcurrent: 16, MaxContext: 16384, MinContext: 8192}) || svc.SlotCeiling() != 16 {
+		t.Fatalf("initial plan limits = %+v", got)
+	}
+
+	// One model is mid-request.
+	ts, err := eng.Complete(ctx, rt.CompletionRequest{Model: "busy-model", Kind: rt.KindChat, Params: rt.GenerationParams{Seed: 1, MaxTokens: 400}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ts.Recv(); err != nil {
+		t.Fatal(err)
+	}
+
+	svc.SetPlanLimits(PlanLimits{MaxConcurrent: 4, MaxContext: 8192, MinContext: 8192})
+	if l := svc.Layouts(); !l["idle-model"].Stale || !l["busy-model"].Stale {
+		t.Fatalf("layouts after the change = %+v", l)
+	}
+	reloaded, busy := svc.ReloadStale(ctx)
+	if fmt.Sprint(reloaded) != "[idle-model]" || fmt.Sprint(busy) != "[busy-model]" {
+		t.Fatalf("reloaded=%v busy=%v", reloaded, busy)
+	}
+	l := svc.Layouts()
+	if l["idle-model"] != (Layout{Slots: 4, CtxPerSlot: 8192}) {
+		t.Fatalf("idle model layout = %+v, want 4 x 8192", l["idle-model"])
+	}
+	if l["busy-model"] != (Layout{Slots: 16, CtxPerSlot: 16384, Stale: true}) {
+		t.Fatalf("busy model layout = %+v, want its old one, stale", l["busy-model"])
+	}
+	if loader.lastBudget.Slots != 4 || loader.lastBudget.ContextTokens != 4*8192 || loader.lastBudget.MaxConcurrent != 4 {
+		t.Fatalf("reload budget = %+v", loader.lastBudget)
+	}
+	if eng.DefaultModel() != "idle-model" {
+		t.Fatalf("default after reload = %q", eng.DefaultModel())
+	}
+	if len(cached) != 0 {
+		t.Fatalf("a reload reported the model as unloaded/cached: %v", cached)
+	}
+	// The in-flight request was not disturbed.
+	if _, err := ts.Recv(); err != nil {
+		t.Fatalf("in-flight request broken by the reload: %v", err)
+	}
+	_ = ts.Close()
+
+	// Once idle, the next pass picks it up; a pass with nothing stale does nothing.
+	reloaded, busy = svc.ReloadStale(ctx)
+	if fmt.Sprint(reloaded) != "[busy-model]" || len(busy) != 0 {
+		t.Fatalf("second pass: reloaded=%v busy=%v", reloaded, busy)
+	}
+	if reloaded, busy = svc.ReloadStale(ctx); len(reloaded) != 0 || len(busy) != 0 {
+		t.Fatalf("third pass: reloaded=%v busy=%v", reloaded, busy)
+	}
+	// 0 = auto resolves by hardware (no GPU known here: the CPU default).
+	svc.SetPlanLimits(PlanLimits{MaxContext: 8192})
+	if svc.SlotCeiling() != 2 {
+		t.Fatalf("auto ceiling = %d", svc.SlotCeiling())
+	}
+}

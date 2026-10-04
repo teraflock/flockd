@@ -249,3 +249,60 @@ login_url = "https://teraflock.ai/claim"   # browser page opened by `tera login`
   The tarball is verified against `sha256` before anything is unpacked;
   the daemon extracts `llama-server`, `LICENSE.llama.cpp` and `BUILDINFO`
   into `data_dir/runtimes/<runtime_build_id>/`.
+
+## Settings and the limits API
+
+The desktop app, the dashboard and `tera limits` never write `config.toml`:
+they change settings through `GET/PUT /api/v1/limits`, which persists what
+was changed in `<data_dir>/limits.toml`. **`limits.toml` overrides
+`config.toml`** for the keys it holds (delete the file to undo); a key never
+changed through the API stays with `config.toml`. `GET /api/v1/limits`
+returns, per setting, its tier, how a change is applied, default, range and
+configured vs effective value (`settings[]`).
+
+Apply modes: **live** = immediately; **reload** = idle loaded models are
+restarted with the new layout right away, a model with a request in flight
+at its next load; **restart** = saved, used from the next daemon start.
+
+| config key | limits field | tier | apply |
+|---|---|---|---|
+| `governor.serve_policy` | `serve_policy` | common | live |
+| `governor.schedule` | `schedule` | common | live |
+| `governor.idle_after` | `idle_after_seconds` | common | live |
+| `governor.serve_on_battery` | `serve_on_battery` | common | live |
+| `governor.max_temp_celsius` | `max_temp_celsius` | common | live |
+| `models.mesh_managed` | `mesh_managed` | common | live |
+| `models.max_disk_mb` | `max_disk_mb` | common | live |
+| `budget.max_ram_mb` | `max_ram_mb` | common | live |
+| `budget.max_concurrent` | `max_concurrent` | common | reload |
+| `models.idle_unload_s` | `idle_unload_seconds` | common | live |
+| `governor.yield_grace` | `yield_grace_seconds` | advanced | live |
+| `models.retention_days` | `retention_days` | advanced | live |
+| `runtime.max_context` | `max_context` | advanced | reload |
+| `runtime.min_context` | `min_context` | advanced | reload |
+| `runtime.context_length` | `context_length` | advanced | reload |
+| `budget.max_vram_percent` | `max_vram_percent` | advanced | restart |
+| `models.exclude` | `exclude` | advanced | live |
+| `models.default` | `default_model` | advanced | restart |
+| `local_api.require_auth_v1` | `require_auth_v1` | advanced | live |
+| `log.level` | `log_level` | advanced | restart |
+
+`models.pin` is edited per model (`POST /api/v1/models/{id}/pin`), not here.
+
+File-only, on purpose:
+
+| config key | why it is not in the app |
+|---|---|
+| `data_dir` | moves identity, token, models and this very overlay; a wrong value strands the node |
+| `local_api.listen` | the app talks to this address; a bad bind locks it out, a public one exposes the node |
+| `tunnel.coordinator_addr`, `tunnel.standalone` | which mesh the node belongs to; a wrong value takes it off the mesh |
+| `tunnel.insecure`, `tunnel.insecure_skip_verify`, `tunnel.ca_cert` | transport security of the mesh session |
+| `tunnel.heartbeat_interval`, `tunnel.reconnect_min`, `tunnel.reconnect_max` | protocol tuning; the coordinator overrides the heartbeat anyway |
+| `runtime.kind` | `mock` serves fake output |
+| `runtime.llama_server_path`, `runtime.artifact_manifest_url` | which binary the node executes |
+| `runtime.artifact_signing_key`, `runtime.require_signature` | what the node trusts enough to execute |
+| `runtime.mock_tokens_per_sec` | test knob |
+| `models.manifest_path`, `models.manifest_url` | which catalog (artifact URLs and hashes) the node trusts |
+| `enroll.login_url`, `update.feed_url` | where login and update checks go |
+| `governor.poll_interval` | sampling plumbing: no operator value, and a tiny one burns CPU |
+| `log.format`, `log.file` | consumed by the service manager and log tooling |

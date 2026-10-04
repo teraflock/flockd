@@ -18,6 +18,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/teraflock/flockd/internal/activity"
@@ -85,8 +87,12 @@ type Deps struct {
 	// Update is the version checker (status.update, POST /update/check).
 	// May be nil.
 	Update *update.Checker
-	// RequireAuthV1 extends bearer auth to the OpenAI /v1 endpoints.
+	// RequireAuthV1 extends bearer auth to the OpenAI /v1 endpoints (the
+	// value at startup; the limits API can switch it on a running daemon).
 	RequireAuthV1 bool
+	// Settings wires the settings the limits API exposes beyond the
+	// governor, store and memory knobs (flockd#55).
+	Settings SettingsDeps
 	// Token authenticates /api/v1 (and /v1 when RequireAuthV1).
 	Token string
 }
@@ -126,6 +132,14 @@ type Server struct {
 	mux   *http.ServeMux
 	srv   *http.Server
 	start time.Time
+
+	// requireAuthV1 is local_api.require_auth_v1, live.
+	requireAuthV1 atomic.Bool
+	// setMu guards cur (the settings as configured now, pending restart
+	// changes included) and overlay (which of them limits.toml holds).
+	setMu   sync.Mutex
+	cur     SettingsValues
+	overlay config.LimitsExtra
 }
 
 // New assembles routes.
@@ -134,6 +148,11 @@ func New(deps Deps) *Server {
 		deps.Log = slog.Default()
 	}
 	s := &Server{deps: deps, mux: http.NewServeMux(), start: time.Now()}
+	s.cur = deps.Settings.Boot.normalized()
+	s.cur.RequireAuthV1 = deps.RequireAuthV1
+	s.deps.Settings.Boot = s.cur
+	s.overlay = deps.Settings.Overlay
+	s.requireAuthV1.Store(deps.RequireAuthV1)
 
 	// OpenAI-compatible surface.
 	s.mux.HandleFunc("GET /v1/models", s.authV1(s.handleListModels))
@@ -293,7 +312,7 @@ func (s *Server) authAPIOpts(next http.HandlerFunc, allowQuery bool) http.Handle
 // so OPENAI_BASE_URL works with any placeholder api key).
 func (s *Server) authV1(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.deps.RequireAuthV1 && !s.checkToken(r) {
+		if s.requireAuthV1.Load() && !s.checkToken(r) {
 			writeOpenAIError(w, http.StatusUnauthorized, "invalid_request_error", "missing or invalid bearer token")
 			return
 		}
