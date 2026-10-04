@@ -150,6 +150,7 @@ func (c *Client) decisionChallenge(ctx context.Context, ss *sessionStream, ch *t
 		ID:       "challenge-" + ch.GetChallengeId(),
 		Model:    ch.GetModelId(), // a decision model is rarely the node default
 		Kind:     rt.KindDecision,
+		Origin:   "challenge",
 		Decision: decisionInputFromProto(ch.GetDecision()),
 	})
 	if err != nil {

@@ -215,6 +215,29 @@ type ClientInterface interface {
 	// Corresponds with POST /api/v1/models/{id}/unload (the `UnloadModel` operationId).
 	UnloadModel(ctx context.Context, id ModelID, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetRequests What the node is doing right now, and what it did recently
+	//
+	// The live activity view: per loaded model the requests in flight,
+	// every in-flight request (kind, origin, elapsed, tokens so far),
+	// model operations that use the machine without a request (a runtime
+	// starting, a download), and the last finished requests (a bounded
+	// in-memory list of the last 200, newest first) — enough to answer "what was
+	// that GPU spike two minutes ago".
+	//
+	// Facts only, never content: no prompt, no output, no error text and
+	// no identifier from outside the node (`id` is a counter local to
+	// this daemon process, there to match `request_started` /
+	// `request_finished` events). A request appears once it has passed
+	// admission and reached the runtime; one refused before that (node
+	// yielded, unknown model) did no work and is not listed.
+	//
+	// Live updates: the `request_started` and `request_finished` SSE
+	// events carry the same objects, and every `status` event carries
+	// `activity` (the `models` and `operations` parts).
+	//
+	// Corresponds with GET /api/v1/requests (the `GetRequests` operationId).
+	GetRequests(ctx context.Context, params *GetRequestsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetStatus Node status snapshot
 	//
 	// Corresponds with GET /api/v1/status (the `GetStatus` operationId).
@@ -533,6 +556,39 @@ func (c *Client) PinModel(ctx context.Context, id ModelID, body PinModelJSONRequ
 // Corresponds with POST /api/v1/models/{id}/unload (the `UnloadModel` operationId).
 func (c *Client) UnloadModel(ctx context.Context, id ModelID, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUnloadModelRequest(c.Server, id)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// GetRequests What the node is doing right now, and what it did recently
+//
+// The live activity view: per loaded model the requests in flight,
+// every in-flight request (kind, origin, elapsed, tokens so far),
+// model operations that use the machine without a request (a runtime
+// starting, a download), and the last finished requests (a bounded
+// in-memory list of the last 200, newest first) — enough to answer "what was
+// that GPU spike two minutes ago".
+//
+// Facts only, never content: no prompt, no output, no error text and
+// no identifier from outside the node (`id` is a counter local to
+// this daemon process, there to match `request_started` /
+// `request_finished` events). A request appears once it has passed
+// admission and reached the runtime; one refused before that (node
+// yielded, unknown model) did no work and is not listed.
+//
+// Live updates: the `request_started` and `request_finished` SSE
+// events carry the same objects, and every `status` event carries
+// `activity` (the `models` and `operations` parts).
+//
+// Corresponds with GET /api/v1/requests (the `GetRequests` operationId).
+func (c *Client) GetRequests(ctx context.Context, params *GetRequestsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetRequestsRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -1161,6 +1217,60 @@ func NewUnloadModelRequest(server string, id ModelID) (*http.Request, error) {
 	return req, nil
 }
 
+// NewGetRequestsRequest constructs an http.Request for the GetRequests method
+func NewGetRequestsRequest(server string, params *GetRequestsParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/requests")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		// queryValues collects non-styled parameters (passthrough, JSON)
+		// that are safe to round-trip through url.Values.Encode().
+		queryValues := queryURL.Query()
+		// rawQueryFragments collects pre-encoded query fragments from
+		// styled parameters, preserving literal commas as delimiters
+		// per the OpenAPI spec (e.g. "color=blue,black,brown").
+		var rawQueryFragments []string
+
+		if params.Recent != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "recent", *params.Recent, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if encoded := queryValues.Encode(); encoded != "" {
+			rawQueryFragments = append(rawQueryFragments, encoded)
+		}
+		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewGetStatusRequest constructs an http.Request for the GetStatus method
 func NewGetStatusRequest(server string) (*http.Request, error) {
 	var err error
@@ -1409,6 +1519,31 @@ type ClientWithResponsesInterface interface {
 	//
 	// Corresponds with POST /api/v1/models/{id}/unload (the `UnloadModel` operationId).
 	UnloadModelWithResponse(ctx context.Context, id ModelID, reqEditors ...RequestEditorFn) (*UnloadModelResponse, error)
+
+	// GetRequestsWithResponse What the node is doing right now, and what it did recently
+	//
+	// The live activity view: per loaded model the requests in flight,
+	// every in-flight request (kind, origin, elapsed, tokens so far),
+	// model operations that use the machine without a request (a runtime
+	// starting, a download), and the last finished requests (a bounded
+	// in-memory list of the last 200, newest first) — enough to answer "what was
+	// that GPU spike two minutes ago".
+	//
+	// Facts only, never content: no prompt, no output, no error text and
+	// no identifier from outside the node (`id` is a counter local to
+	// this daemon process, there to match `request_started` /
+	// `request_finished` events). A request appears once it has passed
+	// admission and reached the runtime; one refused before that (node
+	// yielded, unknown model) did no work and is not listed.
+	//
+	// Live updates: the `request_started` and `request_finished` SSE
+	// events carry the same objects, and every `status` event carries
+	// `activity` (the `models` and `operations` parts).
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /api/v1/requests (the `GetRequests` operationId).
+	GetRequestsWithResponse(ctx context.Context, params *GetRequestsParams, reqEditors ...RequestEditorFn) (*GetRequestsResponse, error)
 
 	// GetStatusWithResponse Node status snapshot
 	//
@@ -2377,6 +2512,54 @@ func (r UnloadModelResponse) ContentType() string {
 	return ""
 }
 
+type GetRequestsResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *RequestActivity
+	// JSON401 the response for an HTTP 401 `application/json` response
+	JSON401 *Unauthorized
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r GetRequestsResponse) GetJSON200() *RequestActivity {
+	return r.JSON200
+}
+
+// GetJSON401 returns the response for an HTTP 401 `application/json` response
+func (r GetRequestsResponse) GetJSON401() *Unauthorized {
+	return r.JSON401
+}
+
+// GetBody returns the raw response body bytes
+func (r GetRequestsResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r GetRequestsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetRequestsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetRequestsResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type GetStatusResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -2743,6 +2926,37 @@ func (c *ClientWithResponses) UnloadModelWithResponse(ctx context.Context, id Mo
 		return nil, err
 	}
 	return ParseUnloadModelResponse(rsp)
+}
+
+// GetRequestsWithResponse What the node is doing right now, and what it did recently
+//
+// The live activity view: per loaded model the requests in flight,
+// every in-flight request (kind, origin, elapsed, tokens so far),
+// model operations that use the machine without a request (a runtime
+// starting, a download), and the last finished requests (a bounded
+// in-memory list of the last 200, newest first) — enough to answer "what was
+// that GPU spike two minutes ago".
+//
+// Facts only, never content: no prompt, no output, no error text and
+// no identifier from outside the node (`id` is a counter local to
+// this daemon process, there to match `request_started` /
+// `request_finished` events). A request appears once it has passed
+// admission and reached the runtime; one refused before that (node
+// yielded, unknown model) did no work and is not listed.
+//
+// Live updates: the `request_started` and `request_finished` SSE
+// events carry the same objects, and every `status` event carries
+// `activity` (the `models` and `operations` parts).
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /api/v1/requests (the `GetRequests` operationId).
+func (c *ClientWithResponses) GetRequestsWithResponse(ctx context.Context, params *GetRequestsParams, reqEditors ...RequestEditorFn) (*GetRequestsResponse, error) {
+	rsp, err := c.GetRequests(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetRequestsResponse(rsp)
 }
 
 // GetStatusWithResponse Node status snapshot
@@ -3477,6 +3691,39 @@ func ParseUnloadModelResponse(rsp *http.Response) (*UnloadModelResponse, error) 
 			return nil, err
 		}
 		response.JSON501 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetRequestsResponse parses an HTTP response from a GetRequestsWithResponse call
+func ParseGetRequestsResponse(rsp *http.Response) (*GetRequestsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetRequestsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RequestActivity
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest Unauthorized
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON401 = &dest
 
 	}
 

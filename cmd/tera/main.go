@@ -55,7 +55,7 @@ func main() {
 
 	root.AddCommand(
 		cmdUp(), cmdDown(), cmdStatus(), cmdLogin(), cmdUnenroll(), cmdModels(), cmdLimits(),
-		cmdEarnings(), cmdRedeem(), cmdDashboard(), cmdLogs(), cmdChat(), cmdMCP(), cmdToken(), cmdVersion(), cmdUninstall(),
+		cmdEarnings(), cmdRedeem(), cmdDashboard(), cmdLogs(), cmdTop(), cmdChat(), cmdMCP(), cmdToken(), cmdVersion(), cmdUninstall(),
 	)
 
 	if err := root.Execute(); err != nil {
@@ -327,6 +327,9 @@ func cmdStatus() *cobra.Command {
 			fmt.Printf("  model      %s (%d loaded)\n", st.DefaultModel, st.ModelsLoaded)
 			fmt.Printf("  tok/s(1m)  %.1f   in-flight %d   total reqs %d\n",
 				st.Stats.TokensPerSec1m, st.Inflight, st.Stats.TotalRequests)
+			// What it is doing right now, per model (`tera top` for the
+			// live view with every request).
+			fmt.Printf("  now        %s\n", nowLine(st.Activity))
 			if st.Hardware != nil {
 				gpus := make([]string, 0, len(st.Hardware.Gpus))
 				for _, g := range st.Hardware.Gpus {

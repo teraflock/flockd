@@ -32,6 +32,114 @@ func (e EarningsSource) Valid() bool {
 	}
 }
 
+// Defines values for ModelActivityKind.
+const (
+	ModelActivityKindChat      ModelActivityKind = "chat"
+	ModelActivityKindDecision  ModelActivityKind = "decision"
+	ModelActivityKindEmbedding ModelActivityKind = "embedding"
+)
+
+// Valid indicates whether the value is a known member of the ModelActivityKind enum.
+func (e ModelActivityKind) Valid() bool {
+	switch e {
+	case ModelActivityKindChat:
+		return true
+	case ModelActivityKindDecision:
+		return true
+	case ModelActivityKindEmbedding:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ModelOperationOp.
+const (
+	Downloading ModelOperationOp = "downloading"
+	Loading     ModelOperationOp = "loading"
+)
+
+// Valid indicates whether the value is a known member of the ModelOperationOp enum.
+func (e ModelOperationOp) Valid() bool {
+	switch e {
+	case Downloading:
+		return true
+	case Loading:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for RequestKind.
+const (
+	RequestKindChat       RequestKind = "chat"
+	RequestKindCompletion RequestKind = "completion"
+	RequestKindDecision   RequestKind = "decision"
+	RequestKindEmbedding  RequestKind = "embedding"
+)
+
+// Valid indicates whether the value is a known member of the RequestKind enum.
+func (e RequestKind) Valid() bool {
+	switch e {
+	case RequestKindChat:
+		return true
+	case RequestKindCompletion:
+		return true
+	case RequestKindDecision:
+		return true
+	case RequestKindEmbedding:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for RequestOrigin.
+const (
+	Challenge RequestOrigin = "challenge"
+	Local     RequestOrigin = "local"
+	Mesh      RequestOrigin = "mesh"
+)
+
+// Valid indicates whether the value is a known member of the RequestOrigin enum.
+func (e RequestOrigin) Valid() bool {
+	switch e {
+	case Challenge:
+		return true
+	case Local:
+		return true
+	case Mesh:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for RequestOutcome.
+const (
+	RequestOutcomeCancelled    RequestOutcome = "cancelled"
+	RequestOutcomeError        RequestOutcome = "error"
+	RequestOutcomeInvalidInput RequestOutcome = "invalid_input"
+	RequestOutcomeOk           RequestOutcome = "ok"
+)
+
+// Valid indicates whether the value is a known member of the RequestOutcome enum.
+func (e RequestOutcome) Valid() bool {
+	switch e {
+	case RequestOutcomeCancelled:
+		return true
+	case RequestOutcomeError:
+		return true
+	case RequestOutcomeInvalidInput:
+		return true
+	case RequestOutcomeOk:
+		return true
+	default:
+		return false
+	}
+}
+
 // ActivityEvent defines model for ActivityEvent.
 type ActivityEvent struct {
 	// Actor mesh | operator | daemon
@@ -191,6 +299,28 @@ type Error struct {
 	} `json:"error"`
 }
 
+// FinishedRequest A request that ended. No content.
+type FinishedRequest struct {
+	// CompletionTokens Generated tokens: the runtime's usage figure, or the count streamed before a cancellation. 0 for embeddings and decisions.
+	CompletionTokens int    `json:"completion_tokens"`
+	DurationMs       int64  `json:"duration_ms"`
+	Id               string `json:"id"`
+
+	// Kind What the request asks of the model.
+	Kind  RequestKind `json:"kind"`
+	Model string      `json:"model"`
+
+	// Origin Who asked. `local`: this machine's local API (`/v1/*`). `mesh`: a coordinator dispatch — a customer request or a canary; a node cannot tell the two apart, by design. `challenge`: a fingerprint challenge from the coordinator.
+	Origin RequestOrigin `json:"origin"`
+
+	// Outcome `ok`: ran to completion. `cancelled`: stopped by the caller, the coordinator, a deadline or the governor (operator back at the machine). `invalid_input`: the runtime rejected the input itself (prompt over the model's context, too many options). `error`: anything else.
+	Outcome RequestOutcome `json:"outcome"`
+
+	// PromptTokens 0 when the runtime reported no usage (cancelled, failed).
+	PromptTokens int       `json:"prompt_tokens"`
+	StartedAt    time.Time `json:"started_at"`
+}
+
 // Gpu defines model for Gpu.
 type Gpu struct {
 	Accel         string `json:"accel"`
@@ -214,6 +344,25 @@ type Hardware struct {
 type Health struct {
 	Ok      bool   `json:"ok"`
 	Version string `json:"version"`
+}
+
+// InflightRequest A request a runtime is serving right now. No content.
+type InflightRequest struct {
+	ElapsedMs int64 `json:"elapsed_ms"`
+
+	// Id Local to this daemon process (`r<counter>`); matches the `request_finished` event and the FinishedRequest row.
+	Id string `json:"id"`
+
+	// Kind What the request asks of the model.
+	Kind  RequestKind `json:"kind"`
+	Model string      `json:"model"`
+
+	// Origin Who asked. `local`: this machine's local API (`/v1/*`). `mesh`: a coordinator dispatch — a customer request or a canary; a node cannot tell the two apart, by design. `challenge`: a fingerprint challenge from the coordinator.
+	Origin    RequestOrigin `json:"origin"`
+	StartedAt time.Time     `json:"started_at"`
+
+	// Tokens Tokens generated so far (reasoning included). Always 0 for embeddings and decisions, which generate nothing.
+	Tokens int `json:"tokens"`
 }
 
 // Limits defines model for Limits.
@@ -265,10 +414,50 @@ type Memory struct {
 	UsedMb   int64 `json:"used_mb"`
 }
 
+// ModelActivity One loaded model, and what it is doing.
+type ModelActivity struct {
+	// IdleSeconds Present while nothing is in flight: seconds since the last request started (since the load when there was none).
+	IdleSeconds *int64 `json:"idle_seconds,omitempty"`
+
+	// Inflight Requests this model's runtime is serving right now.
+	Inflight int `json:"inflight"`
+
+	// InflightByKind The same, by RequestKind (only kinds that are in flight).
+	InflightByKind map[string]int `json:"inflight_by_kind"`
+
+	// Kind What the model is for (catalog flags).
+	Kind ModelActivityKind `json:"kind"`
+
+	// LastRequestAt When the most recent request started; absent when the model has served none since it was loaded.
+	LastRequestAt *time.Time `json:"last_request_at,omitempty"`
+	Model         string     `json:"model"`
+}
+
+// ModelActivityKind What the model is for (catalog flags).
+type ModelActivityKind string
+
 // ModelList defines model for ModelList.
 type ModelList struct {
 	Models []ModelRow `json:"models"`
 }
+
+// ModelOperation Work on a model that uses the machine without a request: `loading` (a runtime starting: weights read into memory, GPU warm-up) or `downloading`.
+type ModelOperation struct {
+	Model string           `json:"model"`
+	Op    ModelOperationOp `json:"op"`
+
+	// ReceivedBytes Present for `downloading`.
+	ReceivedBytes *int64 `json:"received_bytes,omitempty"`
+
+	// StartedAt Present for `loading`.
+	StartedAt *time.Time `json:"started_at,omitempty"`
+
+	// TotalBytes Present for `downloading`.
+	TotalBytes *int64 `json:"total_bytes,omitempty"`
+}
+
+// ModelOperationOp defines model for ModelOperation.Op.
+type ModelOperationOp string
 
 // ModelRow defines model for ModelRow.
 type ModelRow struct {
@@ -306,6 +495,13 @@ type ModelRow struct {
 	State string `json:"state"`
 }
 
+// NodeActivity The "now" summary carried by every Status.
+type NodeActivity struct {
+	// Models Every loaded model, sorted by id.
+	Models     []ModelActivity  `json:"models"`
+	Operations []ModelOperation `json:"operations"`
+}
+
 // Ok defines model for Ok.
 type Ok struct {
 	Ok bool `json:"ok"`
@@ -315,6 +511,29 @@ type Ok struct {
 type PinRequest struct {
 	Pinned bool `json:"pinned"`
 }
+
+// RequestActivity defines model for RequestActivity.
+type RequestActivity struct {
+	// Inflight Oldest first.
+	Inflight []InflightRequest `json:"inflight"`
+	Models   []ModelActivity   `json:"models"`
+
+	// Now The daemon's clock when the snapshot was taken.
+	Now        time.Time        `json:"now"`
+	Operations []ModelOperation `json:"operations"`
+
+	// Recent Newest first; at most 200 are kept.
+	Recent []FinishedRequest `json:"recent"`
+}
+
+// RequestKind What the request asks of the model.
+type RequestKind string
+
+// RequestOrigin Who asked. `local`: this machine's local API (`/v1/*`). `mesh`: a coordinator dispatch — a customer request or a canary; a node cannot tell the two apart, by design. `challenge`: a fingerprint challenge from the coordinator.
+type RequestOrigin string
+
+// RequestOutcome `ok`: ran to completion. `cancelled`: stopped by the caller, the coordinator, a deadline or the governor (operator back at the machine). `invalid_input`: the runtime rejected the input itself (prompt over the model's context, too many options). `error`: anything else.
+type RequestOutcome string
 
 // Stats defines model for Stats.
 type Stats struct {
@@ -328,6 +547,9 @@ type Stats struct {
 
 // Status defines model for Status.
 type Status struct {
+	// Activity The "now" summary carried by every Status.
+	Activity NodeActivity `json:"activity"`
+
 	// CertExpiresAt Client-certificate expiry; present when enrolled.
 	CertExpiresAt *time.Time `json:"cert_expires_at,omitempty"`
 
@@ -410,6 +632,12 @@ type GetLogsParams struct {
 	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
+// GetRequestsParams defines parameters for GetRequests.
+type GetRequestsParams struct {
+	// Recent Max finished requests to return (default 50; 0 = none).
+	Recent *int `form:"recent,omitempty" json:"recent,omitempty"`
+}
+
 // EnrollNodeJSONRequestBody defines body for EnrollNode for application/json ContentType.
 type EnrollNodeJSONRequestBody = EnrollRequest
 
@@ -469,6 +697,9 @@ type ServerInterface interface {
 	// UnloadModel Unload a model from the runtime (the artifact stays cached)
 	// (POST /api/v1/models/{id}/unload)
 	UnloadModel(w http.ResponseWriter, r *http.Request, id ModelID)
+	// GetRequests What the node is doing right now, and what it did recently
+	// (GET /api/v1/requests)
+	GetRequests(w http.ResponseWriter, r *http.Request, params GetRequestsParams)
 	// GetStatus Node status snapshot
 	// (GET /api/v1/status)
 	GetStatus(w http.ResponseWriter, r *http.Request)
@@ -845,6 +1076,39 @@ func (siw *ServerInterfaceWrapper) UnloadModel(w http.ResponseWriter, r *http.Re
 	handler.ServeHTTP(w, r)
 }
 
+// GetRequests operation middleware
+func (siw *ServerInterfaceWrapper) GetRequests(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params GetRequestsParams
+
+	// ------------- Optional query parameter "recent" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "recent", r.URL.Query(), &params.Recent, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "recent"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "recent", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetRequests(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // GetStatus operation middleware
 func (siw *ServerInterfaceWrapper) GetStatus(w http.ResponseWriter, r *http.Request) {
 
@@ -1010,6 +1274,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/logs", wrapper.GetLogs)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/enroll", wrapper.EnrollNode)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/activity", wrapper.GetActivity)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/requests", wrapper.GetRequests)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/update/check", wrapper.CheckUpdate)
 
 	return m

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/teraflock/flockd/internal/governor"
+	"github.com/teraflock/flockd/internal/live"
 	rt "github.com/teraflock/flockd/internal/runtime"
 	"github.com/teraflock/flockd/internal/telemetry"
 )
@@ -95,6 +96,8 @@ type Engine struct {
 	admit Admitter
 	stats *telemetry.Stats
 	touch func(modelID string) // models.Manager LRU recency hook, may be nil
+	// reqs is the live view: requests in flight and recently finished.
+	reqs *live.Tracker
 
 	mu        sync.RWMutex
 	models    map[string]*ModelEntry
@@ -110,7 +113,41 @@ func New(admit Admitter, stats *telemetry.Stats, touch func(string)) *Engine {
 		admit:  admit,
 		stats:  stats,
 		touch:  touch,
+		reqs:   live.New(0),
 		models: map[string]*ModelEntry{},
+	}
+}
+
+// Requests is the live request tracker: what is running on the runtimes
+// right now and what ran recently (GET /api/v1/requests). Set its Events
+// hub before serving to get request_started / request_finished events.
+func (e *Engine) Requests() *live.Tracker { return e.reqs }
+
+// kindName is the live-view name of a request kind.
+func kindName(k rt.Kind) string {
+	switch k {
+	case rt.KindCompletion:
+		return live.KindCompletion
+	case rt.KindEmbedding:
+		return live.KindEmbedding
+	case rt.KindDecision:
+		return live.KindDecision
+	default:
+		return live.KindChat
+	}
+}
+
+// outcomeOf is the live-view outcome of a request that ended with err.
+func outcomeOf(err error) string {
+	switch {
+	case err == nil:
+		return live.OutcomeOK
+	case rt.IsInvalidInput(err):
+		return live.OutcomeInvalidInput
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return live.OutcomeCancelled
+	default:
+		return live.OutcomeError
 	}
 }
 
@@ -304,14 +341,18 @@ func (e *Engine) Complete(ctx context.Context, req rt.CompletionRequest) (rt.Tok
 	entry.lastUsed.Store(time.Now().UnixNano())
 	e.stats.RequestStarted()
 
+	// Tracked from here: the request has passed admission and is about to
+	// use the runtime. What was refused before this point did no work.
+	h := e.reqs.Start(entry.Spec.ID, kindName(req.Kind), req.Origin)
 	stream, err := entry.Instance.Complete(runCtx, req)
 	if err != nil {
+		h.Finish(outcomeOf(err), 0, 0)
 		entry.inflight.Add(-1)
 		e.stats.RequestFinished()
 		release()
 		return nil, err
 	}
-	return &meteredStream{inner: stream, eng: e, entry: entry, release: release}, nil
+	return &meteredStream{inner: stream, eng: e, entry: entry, release: release, live: h, outcome: live.OutcomeCancelled}, nil
 }
 
 // Health proxies the default (or named) instance health.
@@ -332,10 +373,21 @@ type meteredStream struct {
 	release func()
 	once    sync.Once
 	usage   rt.Usage
+	// live is the request's row in the live view. outcome is what it ends
+	// as: "cancelled" until the stream says otherwise — a stream closed
+	// before its final chunk was abandoned by the caller.
+	live     *live.Handle
+	outcome  string
+	gotUsage bool
 }
 
 func (s *meteredStream) finish() {
 	s.once.Do(func() {
+		completion := -1 // no usage chunk: the streamed count stands
+		if s.gotUsage {
+			completion = s.usage.CompletionTokens
+		}
+		s.live.Finish(s.outcome, s.usage.PromptTokens, completion)
 		s.entry.inflight.Add(-1)
 		s.eng.stats.RequestFinished()
 		s.eng.stats.RecordRequest(s.usage.CompletionTokens, int64(s.usage.CompletionTokens)*payoutMicroPerToken)
@@ -348,14 +400,25 @@ func (s *meteredStream) Recv() (rt.Chunk, error) {
 	if err != nil {
 		if errors.Is(err, io.EOF) {
 			s.finish()
+		} else {
+			s.outcome = outcomeOf(err)
 		}
 		return c, err
 	}
 	if c.TokenCount > 0 {
 		s.eng.stats.RecordTokens(c.TokenCount)
+		s.live.AddTokens(c.TokenCount)
 	}
 	if c.Usage != nil {
-		s.usage = *c.Usage
+		s.usage, s.gotUsage = *c.Usage, true
+	}
+	switch {
+	case c.Err != "" || c.FinishReason == "error":
+		s.outcome = live.OutcomeError
+	case c.FinishReason == "cancelled":
+		s.outcome = live.OutcomeCancelled
+	case c.Done:
+		s.outcome = live.OutcomeOK
 	}
 	return c, nil
 }

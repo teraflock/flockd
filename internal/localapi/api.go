@@ -46,6 +46,7 @@ func (s *Server) status() gen.Status {
 		DefaultModel:  s.deps.Engine.DefaultModel(),
 		ModelsLoaded:  len(s.deps.Engine.Models()),
 		Stats:         statsToGen(s.deps.Engine.Stats().Snapshot()),
+		Activity:      s.nodeActivity(time.Now()),
 	}
 	if m := s.deps.Mesh; m != nil {
 		ms := m()

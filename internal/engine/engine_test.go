@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -283,5 +284,118 @@ func TestDefaultIsAlwaysAChatModel(t *testing.T) {
 	loadMock(t, e, rt.ModelSpec{ID: "chat-c"})
 	if d := e.DefaultModel(); d != "chat-c" {
 		t.Fatalf("default = %q, want chat-c", d)
+	}
+}
+
+// failingInstance fails every request the way the runtime does.
+type failingInstance struct {
+	rt.Instance
+	err error
+}
+
+func (f failingInstance) Complete(context.Context, rt.CompletionRequest) (rt.TokenStream, error) {
+	return nil, f.err
+}
+
+// The engine feeds the live view: a request is in flight from the moment
+// it reaches the runtime, counts its tokens as they stream, and lands in
+// the recent ring with an outcome — and what was refused before the
+// runtime never appears.
+func TestLiveRequestTracking(t *testing.T) {
+	e := New(nil, nil, nil)
+	inst, err := rt.NewMockRuntime(200).Load(context.Background(), rt.ModelSpec{ID: "chat"}, rt.ResourceBudget{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.Register(rt.ModelSpec{ID: "chat"}, inst)
+	loadMock(t, e, rt.ModelSpec{ID: "laya", Decision: true})
+	e.Register(rt.ModelSpec{ID: "broken"}, failingInstance{err: errors.New("boom: the prompt was 'secret'")})
+	e.Register(rt.ModelSpec{ID: "picky", Decision: true}, failingInstance{err: &rt.InvalidInputError{Msg: "too long"}})
+	tr := e.Requests()
+	ctx := context.Background()
+
+	// A streaming chat from the mesh: in flight while it streams.
+	ts, err := e.Complete(ctx, rt.CompletionRequest{Model: "chat", Kind: rt.KindChat, Origin: "mesh",
+		Messages: []rt.Message{{Role: "user", Content: "hello"}}, Params: rt.GenerationParams{Seed: 1, MaxTokens: 6}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if _, err := ts.Recv(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	in := tr.InFlight()
+	if len(in) != 1 || in[0].Model != "chat" || in[0].Kind != "chat" || in[0].Origin != "mesh" || in[0].Tokens != 2 {
+		t.Fatalf("in flight mid-stream = %+v", in)
+	}
+	if c := tr.CountsByModel()["chat"]; c.Total != 1 || c.ByKind["chat"] != 1 {
+		t.Fatalf("counts = %+v", c)
+	}
+	if _, _, _, err := rt.Drain(ts); err != nil {
+		t.Fatal(err)
+	}
+	if len(tr.InFlight()) != 0 {
+		t.Fatal("still in flight after the stream ended")
+	}
+	rec := tr.Recent(0)
+	if len(rec) != 1 || rec[0].Outcome != "ok" || rec[0].CompletionTokens == 0 || rec[0].PromptTokens == 0 || rec[0].ID != in[0].ID {
+		t.Fatalf("finished chat = %+v", rec)
+	}
+
+	// A stream abandoned by the caller is cancelled, with the tokens it
+	// got to.
+	ts, err = e.Complete(ctx, rt.CompletionRequest{Model: "chat", Kind: rt.KindCompletion, Prompt: "p", Params: rt.GenerationParams{Seed: 1, MaxTokens: 50}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ts.Recv(); err != nil {
+		t.Fatal(err)
+	}
+	_ = ts.Close()
+	if r := tr.Recent(1)[0]; r.Outcome != "cancelled" || r.Kind != "completion" || r.Origin != "local" || r.CompletionTokens != 1 {
+		t.Fatalf("abandoned stream = %+v", r)
+	}
+
+	// A decision: no tokens generated, prompt tokens from usage.
+	ts, err = e.Complete(ctx, rt.CompletionRequest{Model: "laya", Kind: rt.KindDecision, Origin: "challenge", Decision: &rt.DecisionInput{
+		StateJSON: `"some state"`, Questions: []rt.DecisionQuestion{{ID: "a", Type: rt.DecisionNoul, InstructionsJSON: `"q"`}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if _, err := ts.Recv(); err != nil {
+			break
+		}
+	}
+	if r := tr.Recent(1)[0]; r.Outcome != "ok" || r.Kind != "decision" || r.Origin != "challenge" || r.CompletionTokens != 0 || r.PromptTokens == 0 {
+		t.Fatalf("decision = %+v", r)
+	}
+
+	// Runtime failures: an outcome word, never the error text.
+	if _, err := e.Complete(ctx, rt.CompletionRequest{Model: "broken", Kind: rt.KindChat}); err == nil {
+		t.Fatal("no error")
+	}
+	if r := tr.Recent(1)[0]; r.Outcome != "error" || r.Model != "broken" {
+		t.Fatalf("runtime error = %+v", r)
+	}
+	if _, err := e.Complete(ctx, rt.CompletionRequest{Model: "picky", Kind: rt.KindDecision}); !rt.IsInvalidInput(err) {
+		t.Fatal("want invalid input")
+	}
+	if r := tr.Recent(1)[0]; r.Outcome != "invalid_input" {
+		t.Fatalf("invalid input = %+v", r)
+	}
+	raw, _ := json.Marshal(tr.Recent(0))
+	if strings.Contains(string(raw), "secret") || strings.Contains(string(raw), "hello") || strings.Contains(string(raw), "boom") {
+		t.Fatalf("request content or error text in the ring: %s", raw)
+	}
+
+	// Refused before the runtime (unknown model, chat on a decision
+	// model): did no work, not listed.
+	before := len(tr.Recent(0))
+	_, _ = e.Complete(ctx, rt.CompletionRequest{Model: "nope", Kind: rt.KindChat})
+	_, _ = e.Complete(ctx, rt.CompletionRequest{Model: "laya", Kind: rt.KindChat})
+	if len(tr.Recent(0)) != before || len(tr.InFlight()) != 0 {
+		t.Fatal("a request refused before the runtime was tracked")
 	}
 }

@@ -639,6 +639,7 @@ func (c *Client) handleChallenge(ctx context.Context, ss *sessionStream, ch *tun
 	req := rt.CompletionRequest{
 		ID:     "challenge-" + ch.GetChallengeId(),
 		Model:  ch.GetModelId(), // "" = node default
+		Origin: "challenge",
 		Kind:   rt.KindCompletion,
 		Prompt: ch.GetPrompt(),
 		Params: paramsFromProto(ch.GetParams()),
@@ -675,6 +676,7 @@ func toRuntimeRequest(d *tunnelv1.DispatchRequest) rt.CompletionRequest {
 		ID:     d.GetRequestId(),
 		Model:  d.GetModelId(),
 		Params: paramsFromProto(d.GetParams()),
+		Origin: "mesh",
 	}
 	switch d.GetKind() {
 	case typesv1.RequestKind_REQUEST_KIND_COMPLETION:

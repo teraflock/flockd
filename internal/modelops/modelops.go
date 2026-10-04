@@ -112,7 +112,10 @@ type Service struct {
 	catalogTried time.Time
 	downloads    map[string]context.CancelFunc
 	loading      map[string]bool
-	loads        map[string]*loadInfo
+	// starting is the models whose runtime is starting right now (the
+	// Loader.Load call), and since when.
+	starting map[string]time.Time
+	loads    map[string]*loadInfo
 	// Last VRAM sample (discrete GPUs); zero time = never sampled.
 	vramUsedMB    int64
 	vramSampledAt time.Time
@@ -486,8 +489,22 @@ func (s *Service) LoadInstanceOrigin(ctx context.Context, id, origin string) (rt
 		"ctx_total", plan.TotalCtx, "kv_kb_per_token", in.KVBytesPerToken/1024,
 		"decision", spec.Decision, "encoder_mb_per_token", in.EncoderMBPerToken, "estimate_mb", estimate,
 		"used_mb", in.UsedMB, "budget_mb", in.BudgetMB, "squeezed", plan.Squeezed)
+	// Starting the runtime reads the weights into memory and warms the
+	// GPU with no request in sight: make that visible (live activity view,
+	// `models_changed {change: loading}`) for as long as it takes.
+	s.mu.Lock()
+	if s.starting == nil {
+		s.starting = map[string]time.Time{}
+	}
+	s.starting[id] = time.Now()
+	s.mu.Unlock()
+	s.Events.Publish("models_changed", map[string]string{"model": id, "change": "loading"})
 	inst, err := s.Loader.Load(ctx, spec, res)
+	s.mu.Lock()
+	delete(s.starting, id)
+	s.mu.Unlock()
 	if err != nil {
+		s.Events.Publish("models_changed", map[string]string{"model": id, "change": "load_failed"})
 		return nil, err
 	}
 	s.mu.Lock()
@@ -538,6 +555,18 @@ func (s *Service) Loading(id string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.loading[id]
+}
+
+// Starting lists the models whose runtime is starting right now (weights
+// being read into memory), with when each start began.
+func (s *Service) Starting() map[string]time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]time.Time, len(s.starting))
+	for id, at := range s.starting {
+		out[id] = at
+	}
+	return out
 }
 
 func (s *Service) loadedInstance(id string) (rt.Instance, bool) {

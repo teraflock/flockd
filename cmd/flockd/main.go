@@ -209,6 +209,8 @@ func run() error {
 		}
 	}
 	eng := engine.New(gov, stats, touch)
+	// Live activity: request_started / request_finished on the event bus.
+	eng.Requests().Events = hub
 
 	// The slot ceiling: the operator's number, or the hardware default
 	// (flockd#46). It is the per-model --parallel ceiling, the dispatch

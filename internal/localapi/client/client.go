@@ -390,6 +390,20 @@ func (c *Client) Activity(ctx context.Context) (gen.ActivityList, error) {
 	return value(c, nil, r.StatusCode(), r.Body, r.JSON200)
 }
 
+// Requests is GET /api/v1/requests: what is in flight on each model and
+// the last `recent` finished requests (< 0 = the daemon's default).
+func (c *Client) Requests(ctx context.Context, recent int) (gen.RequestActivity, error) {
+	params := &gen.GetRequestsParams{}
+	if recent >= 0 {
+		params.Recent = &recent
+	}
+	r, err := c.Mgmt.GetRequestsWithResponse(ctx, params)
+	if err != nil {
+		return gen.RequestActivity{}, err
+	}
+	return value(c, nil, r.StatusCode(), r.Body, r.JSON200)
+}
+
 // PinModel is POST /api/v1/models/{id}/pin.
 func (c *Client) PinModel(ctx context.Context, id string, pinned bool) error {
 	r, err := c.Mgmt.PinModelWithResponse(ctx, id, gen.PinRequest{Pinned: pinned})

@@ -282,6 +282,42 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/requests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * What the node is doing right now, and what it did recently
+         * @description The live activity view: per loaded model the requests in flight,
+         *     every in-flight request (kind, origin, elapsed, tokens so far),
+         *     model operations that use the machine without a request (a runtime
+         *     starting, a download), and the last finished requests (a bounded
+         *     in-memory list of the last 200, newest first) — enough to answer "what was
+         *     that GPU spike two minutes ago".
+         *
+         *     Facts only, never content: no prompt, no output, no error text and
+         *     no identifier from outside the node (`id` is a counter local to
+         *     this daemon process, there to match `request_started` /
+         *     `request_finished` events). A request appears once it has passed
+         *     admission and reached the runtime; one refused before that (node
+         *     yielded, unknown model) did no work and is not listed.
+         *
+         *     Live updates: the `request_started` and `request_finished` SSE
+         *     events carry the same objects, and every `status` event carries
+         *     `activity` (the `models` and `operations` parts).
+         */
+        get: operations["getRequests"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/update/check": {
         parameters: {
             query?: never;
@@ -317,8 +353,13 @@ export interface paths {
          *     - `model_progress`: `{model, received_bytes, total_bytes}` during
          *       downloads (throttled).
          *     - `models_changed`: `{model, change}` where change is
-         *       downloaded|loaded|unloaded|default, or `{change: catalog}`
-         *       when a refreshed catalog differs from the one held.
+         *       downloaded|loading|loaded|load_failed|unloaded|default, or
+         *       `{change: catalog}` when a refreshed catalog differs from the one
+         *       held. `loading` is a runtime starting (weights being read into
+         *       memory); it ends with `loaded` or `load_failed`.
+         *     - `request_started`: one InflightRequest when a request reaches a
+         *       runtime (`elapsed_ms` 0, `tokens` 0).
+         *     - `request_finished`: one FinishedRequest when it ends (same `id`).
          *     - `model_assignment`: `{model, state, error}` as a coordinator
          *       placement moves through assigned|downloading|ready|cached|
          *       declined|failed|evicted.
@@ -497,6 +538,7 @@ export interface components {
             /** Format: int64 */
             uptime_seconds: number;
             default_model: string;
+            activity: components["schemas"]["NodeActivity"];
             models_loaded: number;
             inflight: number;
             on_battery: boolean;
@@ -575,6 +617,116 @@ export interface components {
             inflight: number;
             /** Format: int64 */
             earned_microcredits: number;
+        };
+        /**
+         * @description What the request asks of the model.
+         * @enum {string}
+         */
+        RequestKind: "chat" | "completion" | "embedding" | "decision";
+        /**
+         * @description Who asked. `local`: this machine's local API (`/v1/*`). `mesh`: a coordinator dispatch — a customer request or a canary; a node cannot tell the two apart, by design. `challenge`: a fingerprint challenge from the coordinator.
+         * @enum {string}
+         */
+        RequestOrigin: "local" | "mesh" | "challenge";
+        /**
+         * @description `ok`: ran to completion. `cancelled`: stopped by the caller, the coordinator, a deadline or the governor (operator back at the machine). `invalid_input`: the runtime rejected the input itself (prompt over the model's context, too many options). `error`: anything else.
+         * @enum {string}
+         */
+        RequestOutcome: "ok" | "error" | "cancelled" | "invalid_input";
+        /** @description A request a runtime is serving right now. No content. */
+        InflightRequest: {
+            /** @description Local to this daemon process (`r<counter>`); matches the `request_finished` event and the FinishedRequest row. */
+            id: string;
+            model: string;
+            kind: components["schemas"]["RequestKind"];
+            origin: components["schemas"]["RequestOrigin"];
+            /** Format: date-time */
+            started_at: string;
+            /** Format: int64 */
+            elapsed_ms: number;
+            /** @description Tokens generated so far (reasoning included). Always 0 for embeddings and decisions, which generate nothing. */
+            tokens: number;
+        };
+        /** @description A request that ended. No content. */
+        FinishedRequest: {
+            id: string;
+            model: string;
+            kind: components["schemas"]["RequestKind"];
+            origin: components["schemas"]["RequestOrigin"];
+            /** Format: date-time */
+            started_at: string;
+            /** Format: int64 */
+            duration_ms: number;
+            /** @description 0 when the runtime reported no usage (cancelled, failed). */
+            prompt_tokens: number;
+            /** @description Generated tokens: the runtime's usage figure, or the count streamed before a cancellation. 0 for embeddings and decisions. */
+            completion_tokens: number;
+            outcome: components["schemas"]["RequestOutcome"];
+        };
+        /** @description One loaded model, and what it is doing. */
+        ModelActivity: {
+            model: string;
+            /**
+             * @description What the model is for (catalog flags).
+             * @enum {string}
+             */
+            kind: "chat" | "embedding" | "decision";
+            /** @description Requests this model's runtime is serving right now. */
+            inflight: number;
+            /** @description The same, by RequestKind (only kinds that are in flight). */
+            inflight_by_kind: {
+                [key: string]: number;
+            };
+            /**
+             * Format: date-time
+             * @description When the most recent request started; absent when the model has served none since it was loaded.
+             */
+            last_request_at?: string;
+            /**
+             * Format: int64
+             * @description Present while nothing is in flight: seconds since the last request started (since the load when there was none).
+             */
+            idle_seconds?: number;
+        };
+        /** @description Work on a model that uses the machine without a request: `loading` (a runtime starting: weights read into memory, GPU warm-up) or `downloading`. */
+        ModelOperation: {
+            model: string;
+            /** @enum {string} */
+            op: "loading" | "downloading";
+            /**
+             * Format: date-time
+             * @description Present for `loading`.
+             */
+            started_at?: string;
+            /**
+             * Format: int64
+             * @description Present for `downloading`.
+             */
+            received_bytes?: number;
+            /**
+             * Format: int64
+             * @description Present for `downloading`.
+             */
+            total_bytes?: number;
+        };
+        /** @description The "now" summary carried by every Status. */
+        NodeActivity: {
+            /** @description Every loaded model, sorted by id. */
+            models: components["schemas"]["ModelActivity"][];
+            operations: components["schemas"]["ModelOperation"][];
+        };
+        RequestActivity: {
+            /**
+             * Format: date-time
+             * @description The daemon's clock when the snapshot was taken.
+             */
+            now: string;
+            models: components["schemas"]["ModelActivity"][];
+            operations: components["schemas"]["ModelOperation"][];
+            /** @description Oldest first. */
+            inflight: components["schemas"]["InflightRequest"][];
+            /** @description Newest first; at most 200 are kept. */
+            recent: components["schemas"]["FinishedRequest"][];
         };
         ModelRow: {
             id: string;
@@ -1392,6 +1544,30 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ActivityList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    getRequests: {
+        parameters: {
+            query?: {
+                /** @description Max finished requests to return (default 50; 0 = none). */
+                recent?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description In-flight and recent requests. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RequestActivity"];
                 };
             };
             401: components["responses"]["Unauthorized"];

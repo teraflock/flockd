@@ -779,7 +779,7 @@ func TestDecisionDispatch(t *testing.T) {
 
 	// What the runtime was given: kind, model, and the input in wire order.
 	req := <-eng.reqs
-	if req.Kind != rt.KindDecision || req.Model != "mock-decision" || req.Decision == nil {
+	if req.Kind != rt.KindDecision || req.Model != "mock-decision" || req.Decision == nil || req.Origin != "mesh" {
 		t.Fatalf("runtime request = %+v", req)
 	}
 	in := req.Decision
@@ -876,7 +876,7 @@ func TestDecisionChallenge(t *testing.T) {
 		t.Fatalf("decision challenge carries text fields: %v", r1)
 	}
 	checkDecisionAnswers(t, r1.GetAnswers())
-	if req := <-eng.reqs; req.Kind != rt.KindDecision || req.Model != "mock-decision" {
+	if req := <-eng.reqs; req.Kind != rt.KindDecision || req.Model != "mock-decision" || req.Origin != "challenge" {
 		t.Fatalf("challenge ran as %+v, want a decision on the challenged model", req)
 	}
 	// Same probe, same probabilities: what the coordinator's tolerance
@@ -942,7 +942,7 @@ func TestChallengeRunsOnTheNamedModel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if req := <-rec.reqs; req.Model != "chat-other" || req.Kind != rt.KindCompletion {
+	if req := <-rec.reqs; req.Model != "chat-other" || req.Kind != rt.KindCompletion || req.Origin != "challenge" {
 		t.Fatalf("challenge ran as %+v, want a completion on chat-other", req)
 	}
 	sum := sha256.Sum256([]byte(r.GetOutput()))

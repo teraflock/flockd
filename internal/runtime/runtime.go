@@ -191,6 +191,11 @@ type CompletionRequest struct {
 	// Chunk carrying Decision answers (in question order) and Usage.
 	Decision *DecisionInput
 	Params   GenerationParams
+	// Origin says who asked, for the live activity view only: "local"
+	// (the local API; also what "" means), "mesh" (a coordinator
+	// dispatch) or "challenge" (a fingerprint probe). The runtime
+	// ignores it.
+	Origin string
 }
 
 // Chunk is one streamed unit. For KindEmbedding a single final chunk
