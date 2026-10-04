@@ -50,6 +50,7 @@ type Coordinator struct {
 	reqSeq      int
 	pending     map[string]chan *tunnelv1.TokenChunk
 	pendingEmb  map[string]chan *tunnelv1.EmbeddingResult
+	pendingDec  map[string]chan *tunnelv1.DecisionResult
 	pendingCh   map[string]chan *tunnelv1.ChallengeResponse
 	// lastVerifier is the pkce_verifier of the most recent Enroll, so tests
 	// can check the daemon forwards it (the fake does not validate it).
@@ -98,6 +99,7 @@ func New() (*Coordinator, error) {
 		enrolled:   map[string]bool{},
 		pending:    map[string]chan *tunnelv1.TokenChunk{},
 		pendingEmb: map[string]chan *tunnelv1.EmbeddingResult{},
+		pendingDec: map[string]chan *tunnelv1.DecisionResult{},
 		pendingCh:  map[string]chan *tunnelv1.ChallengeResponse{},
 		acks:       map[string]chan *tunnelv1.DispatchAck{},
 		sessionUp:  make(chan struct{}),
@@ -265,6 +267,12 @@ func (c *Coordinator) handleNodeMessage(msg *tunnelv1.NodeMessage) {
 			ch <- m.EmbeddingResult
 			close(ch)
 			delete(c.pendingEmb, m.EmbeddingResult.GetRequestId())
+		}
+	case *tunnelv1.NodeMessage_DecisionResult:
+		if ch, ok := c.pendingDec[m.DecisionResult.GetRequestId()]; ok {
+			ch <- m.DecisionResult
+			close(ch)
+			delete(c.pendingDec, m.DecisionResult.GetRequestId())
 		}
 	case *tunnelv1.NodeMessage_ChallengeResponse:
 		if ch, ok := c.pendingCh[m.ChallengeResponse.GetChallengeId()]; ok {
@@ -448,6 +456,64 @@ func (c *Coordinator) DispatchEmbedding(modelID string, input []string) (<-chan 
 		return nil, err
 	}
 	return ch, nil
+}
+
+// DispatchDecision drives a kind=DECISION request: a signed dispatch
+// carrying the DecisionInput, answered by one DecisionResult.
+func (c *Coordinator) DispatchDecision(modelID string, input *typesv1.DecisionInput) (<-chan *tunnelv1.DecisionResult, error) {
+	sess, err := c.sessionOrErr()
+	if err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	c.reqSeq++
+	id := fmt.Sprintf("req-%d", c.reqSeq)
+	ch := make(chan *tunnelv1.DecisionResult, 1)
+	c.pendingDec[id] = ch
+	c.acks[id] = make(chan *tunnelv1.DispatchAck, 1)
+	c.mu.Unlock()
+
+	d := &tunnelv1.DispatchRequest{
+		RequestId: id,
+		ModelId:   modelID,
+		Kind:      typesv1.RequestKind_REQUEST_KIND_DECISION,
+		Decision:  input,
+	}
+	if err := tunnel.SignDispatch(c.signPriv, d); err != nil {
+		return nil, err
+	}
+	if err := sess.send(&tunnelv1.CoordinatorMessage{Msg: &tunnelv1.CoordinatorMessage_Dispatch{Dispatch: d}}); err != nil {
+		return nil, err
+	}
+	return ch, nil
+}
+
+// ChallengeDecision sends a decision fingerprint probe (Challenge.decision)
+// and waits for the response, whose `answers` carry the result.
+func (c *Coordinator) ChallengeDecision(ctx context.Context, modelID string, input *typesv1.DecisionInput) (*tunnelv1.ChallengeResponse, error) {
+	sess, err := c.sessionOrErr()
+	if err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	c.reqSeq++
+	id := fmt.Sprintf("chal-%d", c.reqSeq)
+	ch := make(chan *tunnelv1.ChallengeResponse, 1)
+	c.pendingCh[id] = ch
+	c.mu.Unlock()
+
+	err = sess.send(&tunnelv1.CoordinatorMessage{Msg: &tunnelv1.CoordinatorMessage_Challenge{
+		Challenge: &tunnelv1.Challenge{ChallengeId: id, ModelId: modelID, Decision: input},
+	}})
+	if err != nil {
+		return nil, err
+	}
+	select {
+	case resp := <-ch:
+		return resp, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // Cancel pushes a CancelRequest for an in-flight dispatch.

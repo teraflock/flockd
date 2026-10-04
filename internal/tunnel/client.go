@@ -511,6 +511,11 @@ func (c *Client) runDispatch(ctx context.Context, ss *sessionStream, d *tunnelv1
 	id := d.GetRequestId()
 	req := toRuntimeRequest(d)
 
+	if req.Kind == rt.KindDecision {
+		c.runDecision(ctx, ss, req)
+		return
+	}
+
 	stream, err := c.o.Engine.Complete(ctx, req)
 	if err != nil {
 		c.sendError(ss, d, err)
@@ -602,6 +607,10 @@ func (c *Client) handleCancel(cr *tunnelv1.CancelRequest) {
 // output hash the coordinator compares against the private expected set
 // (SPEC §2.2).
 func (c *Client) handleChallenge(ctx context.Context, ss *sessionStream, ch *tunnelv1.Challenge) {
+	if ch.GetDecision() != nil {
+		c.decisionChallenge(ctx, ss, ch)
+		return
+	}
 	req := rt.CompletionRequest{
 		ID:     "challenge-" + ch.GetChallengeId(),
 		Kind:   rt.KindCompletion,
@@ -639,6 +648,9 @@ func toRuntimeRequest(d *tunnelv1.DispatchRequest) rt.CompletionRequest {
 	case typesv1.RequestKind_REQUEST_KIND_EMBEDDING:
 		req.Kind = rt.KindEmbedding
 		req.EmbeddingInput = d.GetEmbeddingInput()
+	case typesv1.RequestKind_REQUEST_KIND_DECISION:
+		req.Kind = rt.KindDecision
+		req.Decision = decisionInputFromProto(d.GetDecision())
 	default:
 		req.Kind = rt.KindChat
 		for _, m := range d.GetMessages() {

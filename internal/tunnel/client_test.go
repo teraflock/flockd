@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"io"
 	"log/slog"
 	"strings"
@@ -680,5 +681,221 @@ func TestUnknownCoordinatorMessageIgnored(t *testing.T) {
 	}
 	if n := h.client.Sessions(); n != 1 {
 		t.Fatalf("sessions = %d: the unknown message caused a reconnect", n)
+	}
+}
+
+// decisionProto is a wire DecisionInput with option keys deliberately out
+// of alphabetical order.
+func decisionProto() *typesv1.DecisionInput {
+	return &typesv1.DecisionInput{
+		StateJson: `"payouts failing for 3 days"`,
+		Questions: []*typesv1.DecisionQuestion{
+			{Id: "team", Type: typesv1.DecisionQuestionType_DECISION_QUESTION_TYPE_CHOICE, InstructionsJson: `"Which team?"`,
+				Options: []*typesv1.DecisionOption{{Key: "technical"}, {Key: "billing", DescriptionJson: `"Payments"`}, {Key: "account"}}},
+			{Id: "urgency", Type: typesv1.DecisionQuestionType_DECISION_QUESTION_TYPE_SCORE, InstructionsJson: `"How urgent?"`,
+				Options: []*typesv1.DecisionOption{{Key: "0", DescriptionJson: `"can wait"`}, {Key: "1", DescriptionJson: `"now"`}}},
+			{Id: "escalate", Type: typesv1.DecisionQuestionType_DECISION_QUESTION_TYPE_NOUL, InstructionsJson: `"Escalate?"`},
+		},
+	}
+}
+
+// decisionEngine serves decisions from a mock decision model and records
+// the runtime requests it was given; fail, when set, is returned instead.
+type decisionEngine struct {
+	inst rt.Instance
+	fail error
+	reqs chan rt.CompletionRequest
+}
+
+func (e *decisionEngine) Complete(ctx context.Context, req rt.CompletionRequest) (rt.TokenStream, error) {
+	e.reqs <- req
+	if e.fail != nil {
+		return nil, e.fail
+	}
+	return e.inst.Complete(ctx, req)
+}
+
+func newDecisionHarness(t *testing.T, fail error) (*harness, *decisionEngine) {
+	t.Helper()
+	inst, err := rt.NewMockRuntime(0).Load(context.Background(), rt.ModelSpec{ID: "mock-decision", Decision: true}, rt.ResourceBudget{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng := &decisionEngine{inst: inst, fail: fail, reqs: make(chan rt.CompletionRequest, 4)}
+	return newHarness(t, func(o *tunnel.Options) { o.Engine = eng }), eng
+}
+
+func checkDecisionAnswers(t *testing.T, answers []*typesv1.DecisionAnswer) {
+	t.Helper()
+	if len(answers) != 3 {
+		t.Fatalf("answers = %d, want 3", len(answers))
+	}
+	team, urgency, escalate := answers[0], answers[1], answers[2]
+	if team.GetQuestionId() != "team" || team.GetType() != typesv1.DecisionQuestionType_DECISION_QUESTION_TYPE_CHOICE || team.GetChoice() == "" {
+		t.Fatalf("answer 0 = %v", team)
+	}
+	p := team.GetProbabilities()
+	if len(p) != 3 || p[0].GetKey() != "technical" || p[1].GetKey() != "billing" || p[2].GetKey() != "account" {
+		t.Fatalf("choice probabilities not in option order: %v", p)
+	}
+	if sum := p[0].GetProbability() + p[1].GetProbability() + p[2].GetProbability(); sum < 0.999999 || sum > 1.000001 {
+		t.Fatalf("choice probabilities sum to %v", sum)
+	}
+	if urgency.GetQuestionId() != "urgency" || urgency.GetType() != typesv1.DecisionQuestionType_DECISION_QUESTION_TYPE_SCORE ||
+		len(urgency.GetProbabilities()) != 2 || urgency.GetProbabilities()[0].GetKey() != "0" || urgency.GetProbabilities()[1].GetKey() != "1" {
+		t.Fatalf("answer 1 = %v", urgency)
+	}
+	if escalate.GetQuestionId() != "escalate" || escalate.GetType() != typesv1.DecisionQuestionType_DECISION_QUESTION_TYPE_NOUL ||
+		len(escalate.GetProbabilities()) != 0 {
+		t.Fatalf("answer 2 = %v", escalate)
+	}
+}
+
+func TestDecisionDispatch(t *testing.T) {
+	h, eng := newDecisionHarness(t, nil)
+	ch, err := h.coord.DispatchDecision("mock-decision", decisionProto())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var res *tunnelv1.DecisionResult
+	select {
+	case res = <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no decision result")
+	}
+	if res.GetError() != "" || res.GetInvalidInput() {
+		t.Fatalf("result error=%q invalid_input=%v", res.GetError(), res.GetInvalidInput())
+	}
+	if res.GetRequestId() == "" {
+		t.Fatal("result has no request id")
+	}
+	checkDecisionAnswers(t, res.GetAnswers())
+	if u := res.GetUsage(); u.GetPromptTokens() == 0 || u.GetCompletionTokens() != 0 {
+		t.Fatalf("usage = %v, want prompt tokens only", u)
+	}
+
+	// What the runtime was given: kind, model, and the input in wire order.
+	req := <-eng.reqs
+	if req.Kind != rt.KindDecision || req.Model != "mock-decision" || req.Decision == nil {
+		t.Fatalf("runtime request = %+v", req)
+	}
+	in := req.Decision
+	if in.StateJSON != `"payouts failing for 3 days"` || len(in.Questions) != 3 {
+		t.Fatalf("runtime input = %+v", in)
+	}
+	q := in.Questions[0]
+	if q.ID != "team" || q.Type != rt.DecisionChoice || q.InstructionsJSON != `"Which team?"` || len(q.Options) != 3 ||
+		q.Options[0] != (rt.DecisionOption{Key: "technical"}) ||
+		q.Options[1] != (rt.DecisionOption{Key: "billing", DescriptionJSON: `"Payments"`}) ||
+		q.Options[2] != (rt.DecisionOption{Key: "account"}) {
+		t.Fatalf("choice question = %+v", q)
+	}
+	if in.Questions[1].Type != rt.DecisionScore || in.Questions[2].Type != rt.DecisionNoul {
+		t.Fatalf("question types = %v %v", in.Questions[1].Type, in.Questions[2].Type)
+	}
+}
+
+func TestDecisionDispatchInvalidInput(t *testing.T) {
+	// The runtime rejected the input itself (llama-server 400): the result
+	// says so, so the coordinator does not retry it on another node.
+	h, _ := newDecisionHarness(t, &rt.InvalidInputError{Msg: "input (3028 tokens) is larger than the max context size (2048 tokens)"})
+	ch, err := h.coord.DispatchDecision("mock-decision", decisionProto())
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case res := <-ch:
+		if !res.GetInvalidInput() || !strings.Contains(res.GetError(), "larger than the max context size") || len(res.GetAnswers()) != 0 {
+			t.Fatalf("result = %v", res)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no decision result")
+	}
+}
+
+func TestDecisionDispatchRuntimeError(t *testing.T) {
+	// Anything else (501 not a decision model, a crash) is an ordinary
+	// error: retryable elsewhere, invalid_input stays false. It must
+	// still come back as a DecisionResult, not a TokenChunk.
+	h, _ := newDecisionHarness(t, errors.New("llamacpp: /v1/systemone: status 501 Not Implemented"))
+	ch, err := h.coord.DispatchDecision("mock-decision", decisionProto())
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case res := <-ch:
+		if res.GetInvalidInput() || !strings.Contains(res.GetError(), "501") {
+			t.Fatalf("result = %v", res)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no decision result")
+	}
+}
+
+func TestDecisionDispatchSignatureCoversInput(t *testing.T) {
+	// The dispatch signature is over the whole message, the decision
+	// payload included: changing one option after signing must fail.
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &tunnelv1.DispatchRequest{
+		RequestId: "req-1", ModelId: "laya",
+		Kind:     typesv1.RequestKind_REQUEST_KIND_DECISION,
+		Decision: decisionProto(),
+	}
+	if err := tunnel.SignDispatch(priv, d); err != nil {
+		t.Fatal(err)
+	}
+	if err := tunnel.VerifyDispatch(pub, d); err != nil {
+		t.Fatalf("signed decision dispatch does not verify: %v", err)
+	}
+	d.Decision.Questions[0].Options[0].Key = "tampered"
+	if err := tunnel.VerifyDispatch(pub, d); !errors.Is(err, tunnel.ErrBadSignature) {
+		t.Fatalf("tampered decision input verified: %v", err)
+	}
+	d.Decision.Questions[0].Options[0].Key = "technical"
+	d.Decision.Questions[0].Options[0], d.Decision.Questions[0].Options[1] = d.Decision.Questions[0].Options[1], d.Decision.Questions[0].Options[0]
+	if err := tunnel.VerifyDispatch(pub, d); !errors.Is(err, tunnel.ErrBadSignature) {
+		t.Fatalf("reordered options verified: %v", err)
+	}
+}
+
+func TestDecisionChallenge(t *testing.T) {
+	h, eng := newDecisionHarness(t, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	r1, err := h.coord.ChallengeDecision(ctx, "mock-decision", decisionProto())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r1.GetOutput() != "" || r1.GetOutputSha256() != "" || r1.GetCompletionTokens() != 0 {
+		t.Fatalf("decision challenge carries text fields: %v", r1)
+	}
+	checkDecisionAnswers(t, r1.GetAnswers())
+	if req := <-eng.reqs; req.Kind != rt.KindDecision || req.Model != "mock-decision" {
+		t.Fatalf("challenge ran as %+v, want a decision on the challenged model", req)
+	}
+	// Same probe, same probabilities: what the coordinator's tolerance
+	// comparison relies on.
+	r2, err := h.coord.ChallengeDecision(ctx, "mock-decision", decisionProto())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !proto.Equal(&tunnelv1.ChallengeResponse{Answers: r1.GetAnswers()}, &tunnelv1.ChallengeResponse{Answers: r2.GetAnswers()}) {
+		t.Fatalf("decision challenge not deterministic:\n%v\n%v", r1.GetAnswers(), r2.GetAnswers())
+	}
+}
+
+func TestDecisionChallengeFailureSendsEmptyResponse(t *testing.T) {
+	h, _ := newDecisionHarness(t, errors.New("model not loaded"))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	r, err := h.coord.ChallengeDecision(ctx, "mock-decision", decisionProto())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.GetChallengeId() == "" || len(r.GetAnswers()) != 0 {
+		t.Fatalf("response = %v", r)
 	}
 }
