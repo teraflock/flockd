@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -218,5 +219,69 @@ func TestDecisionModelRefusesGeneration(t *testing.T) {
 	}
 	if _, err := e.UnregisterIdle("laya"); err != nil {
 		t.Fatalf("model is not idle after refusals: %v", err)
+	}
+}
+
+func loadMock(t *testing.T, e *Engine, spec rt.ModelSpec) {
+	t.Helper()
+	inst, err := rt.NewMockRuntime(0).Load(context.Background(), spec, rt.ResourceBudget{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.Register(spec, inst)
+}
+
+// Only a chat model can be the default: it answers chat requests that
+// name no model. A decision or embedding model never becomes it — not by
+// being loaded first, not when the default is unloaded, not on request.
+func TestDefaultIsAlwaysAChatModel(t *testing.T) {
+	e := New(nil, nil, nil)
+	loadMock(t, e, rt.ModelSpec{ID: "kev-4b-q4_k_m", Decision: true})
+	loadMock(t, e, rt.ModelSpec{ID: "nomic-embed", Embeddings: true})
+	if d := e.DefaultModel(); d != "" {
+		t.Fatalf("default = %q with only decision and embedding models loaded", d)
+	}
+	// A request that names no model has nothing to fall back on.
+	_, err := e.Complete(context.Background(), rt.CompletionRequest{Kind: rt.KindChat})
+	if !errors.Is(err, ErrModelNotFound) || !strings.Contains(err.Error(), "no default chat model is loaded") {
+		t.Fatalf("chat with no default: %v", err)
+	}
+
+	loadMock(t, e, rt.ModelSpec{ID: "chat-a"})
+	time.Sleep(2 * time.Millisecond)
+	loadMock(t, e, rt.ModelSpec{ID: "chat-b"})
+	if d := e.DefaultModel(); d != "chat-a" {
+		t.Fatalf("default = %q, want the first chat model", d)
+	}
+
+	for _, id := range []string{"kev-4b-q4_k_m", "nomic-embed"} {
+		err := e.SetDefault(id)
+		if !errors.Is(err, ErrNotChatModel) {
+			t.Fatalf("SetDefault(%s) = %v, want ErrNotChatModel", id, err)
+		}
+	}
+	if err := e.SetDefault("kev-4b-q4_k_m"); !strings.Contains(err.Error(), "is a decision model") {
+		t.Fatalf("message = %v", err)
+	}
+	if d := e.DefaultModel(); d != "chat-a" {
+		t.Fatalf("a refused SetDefault changed the default to %q", d)
+	}
+
+	// Unloading the default hands over to the other chat model, then to
+	// nothing: the decision model that is still loaded is not a candidate.
+	e.Unregister("chat-a")
+	if d := e.DefaultModel(); d != "chat-b" {
+		t.Fatalf("default after unload = %q, want chat-b", d)
+	}
+	if _, err := e.UnregisterIdle("chat-b"); err != nil {
+		t.Fatal(err)
+	}
+	if d := e.DefaultModel(); d != "" {
+		t.Fatalf("default = %q with no chat model loaded", d)
+	}
+	// A chat model loaded later becomes the default again.
+	loadMock(t, e, rt.ModelSpec{ID: "chat-c"})
+	if d := e.DefaultModel(); d != "chat-c" {
+		t.Fatalf("default = %q, want chat-c", d)
 	}
 }

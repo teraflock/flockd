@@ -45,6 +45,19 @@ func (e *decisionModelError) Error() string {
 
 func (*decisionModelError) Unwrap() error { return ErrDecisionModel }
 
+// ErrNotChatModel is returned by SetDefault for a decision or embedding
+// model: the default answers chat requests that name no model, so only a
+// chat model can be it.
+var ErrNotChatModel = errors.New("engine: not a chat model")
+
+type notChatError struct{ msg string }
+
+func (e *notChatError) Error() string { return e.msg }
+func (*notChatError) Unwrap() error   { return ErrNotChatModel }
+
+// chatModel reports whether a model can be the default.
+func chatModel(spec rt.ModelSpec) bool { return !spec.Decision && !spec.Embeddings }
+
 // ErrBusy is returned by UnregisterIdle when the model has requests in
 // flight (or waiting in admission) and so must not be unloaded.
 var ErrBusy = errors.New("engine: model busy")
@@ -101,14 +114,17 @@ func New(admit Admitter, stats *telemetry.Stats, touch func(string)) *Engine {
 	}
 }
 
-// Register adds a loaded model; the first registered becomes the default.
+// Register adds a loaded model; the first chat model registered becomes
+// the default. A decision or embedding model never does: the default is
+// what answers a chat request that names no model, and with only such
+// models loaded there is simply no default.
 func (e *Engine) Register(spec rt.ModelSpec, inst rt.Instance) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	entry := &ModelEntry{Spec: spec, Instance: inst, LoadedAt: time.Now()}
 	entry.lastUsed.Store(entry.LoadedAt.UnixNano())
 	e.models[spec.ID] = entry
-	if e.defaultID == "" {
+	if e.defaultID == "" && chatModel(spec) {
 		e.defaultID = spec.ID
 	}
 }
@@ -148,10 +164,16 @@ func (e *Engine) UnregisterIdle(id string) (*ModelEntry, error) {
 func (e *Engine) removeLocked(id string) {
 	delete(e.models, id)
 	if e.defaultID == id {
+		// The longest-loaded chat model takes over; none = no default.
 		e.defaultID = ""
-		for mid := range e.models {
-			e.defaultID = mid
-			break
+		var oldest time.Time
+		for mid, m := range e.models {
+			if !chatModel(m.Spec) {
+				continue
+			}
+			if e.defaultID == "" || m.LoadedAt.Before(oldest) || (m.LoadedAt.Equal(oldest) && mid < e.defaultID) {
+				e.defaultID, oldest = mid, m.LoadedAt
+			}
 		}
 	}
 }
@@ -162,8 +184,15 @@ func (e *Engine) removeLocked(id string) {
 func (e *Engine) SetDefault(id string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if _, ok := e.models[id]; !ok {
+	m, ok := e.models[id]
+	if !ok {
 		return fmt.Errorf("%w: %q", ErrModelNotFound, id)
+	}
+	switch {
+	case m.Spec.Decision:
+		return &notChatError{fmt.Sprintf("%q is a decision model (served by /v1/systemone) and cannot be the default: the default answers chat requests that name no model", id)}
+	case m.Spec.Embeddings:
+		return &notChatError{fmt.Sprintf("%q is an embedding model and cannot be the default: the default answers chat requests that name no model", id)}
 	}
 	e.defaultID = id
 	return nil
@@ -210,9 +239,18 @@ func (e *Engine) lookup(model string) (*ModelEntry, error) {
 	}
 	m, ok := e.models[id]
 	if !ok {
-		return nil, fmt.Errorf("%w: %q", ErrModelNotFound, id)
+		return nil, notFound(id)
 	}
 	return m, nil
+}
+
+// notFound is ErrModelNotFound for id; an empty id means the request named
+// no model and there is no default to fall back on.
+func notFound(id string) error {
+	if id == "" {
+		return fmt.Errorf("%w: the request names no model and no default chat model is loaded", ErrModelNotFound)
+	}
+	return fmt.Errorf("%w: %q", ErrModelNotFound, id)
 }
 
 // acquire is lookup plus the in-flight increment, both under the read
@@ -227,7 +265,7 @@ func (e *Engine) acquire(model string) (*ModelEntry, error) {
 	}
 	m, ok := e.models[id]
 	if !ok {
-		return nil, fmt.Errorf("%w: %q", ErrModelNotFound, id)
+		return nil, notFound(id)
 	}
 	m.inflight.Add(1)
 	return m, nil

@@ -379,6 +379,9 @@ func run() error {
 		// is being written.
 		ops.OnUnloaded = asg.Unloaded
 		go ops.RunHousekeeping(ctx)
+		// A catalog promoted while the daemon runs is picked up without
+		// a restart (conditional refetch every few minutes).
+		go ops.RunCatalogRefresh(ctx, 0)
 	}
 
 	// ---- update check (plan 17 D.2) ----
@@ -636,7 +639,10 @@ func loadDefaultModel(ctx context.Context, cfg config.Config, hw *typesv1.Capabi
 		// GGUF in the hosted catalog and is only meaningful on the llamacpp
 		// path. Use a dedicated fixture id here so README/smoke examples
 		// (mock-8b-instruct) hold no matter what the config default is.
-		spec := rt.ModelSpec{ID: "mock-8b-instruct", ContextLength: 8192, Embeddings: true}
+		// A plain chat model as far as the catalog flags go (the mock
+		// answers embeddings whatever the spec says): only a chat model
+		// can be the node's default.
+		spec := rt.ModelSpec{ID: "mock-8b-instruct", ContextLength: 8192}
 		inst, err := mock.Load(ctx, spec, budget)
 		if err != nil {
 			return err
