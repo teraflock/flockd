@@ -407,3 +407,158 @@ func TestLiveRequestTracking(t *testing.T) {
 		t.Fatal("a request refused before the runtime was tracked")
 	}
 }
+
+func streamOn(t *testing.T, e *Engine, model string) rt.TokenStream {
+	t.Helper()
+	ts, err := e.Complete(context.Background(), rt.CompletionRequest{Model: model, Kind: rt.KindChat,
+		Messages: []rt.Message{{Role: "user", Content: "hi"}}, Params: rt.GenerationParams{Seed: 1, MaxTokens: 100000}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ts.Recv(); err != nil {
+		t.Fatal(err)
+	}
+	return ts
+}
+
+// The gate runs at most `slots` requests on an instance and holds the
+// rest; Replace (a resize) moves the waiters to the new instance while
+// the running ones finish where they are.
+func TestSlotGateAndReplace(t *testing.T) {
+	e := New(nil, nil, nil)
+	mock := rt.NewMockRuntime(100)
+	spec := rt.ModelSpec{ID: "chat"}
+	oldInst, _ := mock.Load(context.Background(), spec, rt.ResourceBudget{})
+	e.RegisterSlots(spec, oldInst, 2)
+
+	a, b := streamOn(t, e, "chat"), streamOn(t, e, "chat")
+	// Two more arrive: they wait at the gate, visible as demand, not yet
+	// in the live view (they have not reached the runtime).
+	type res struct {
+		ts  rt.TokenStream
+		err error
+	}
+	waiters := make(chan res, 2)
+	for range 2 {
+		go func() {
+			ts, err := e.Complete(context.Background(), rt.CompletionRequest{Model: "chat", Kind: rt.KindChat,
+				Messages: []rt.Message{{Role: "user", Content: "hi"}}, Params: rt.GenerationParams{Seed: 1, MaxTokens: 100000}})
+			waiters <- res{ts, err}
+		}()
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if now, _, _ := e.Demand("chat"); now == 4 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("waiters never counted as demand")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if n := len(e.Requests().InFlight()); n != 2 {
+		t.Fatalf("%d requests on a 2-slot instance", n)
+	}
+	select {
+	case r := <-waiters:
+		t.Fatalf("a request got past a full gate: %+v", r)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if _, peak, _ := e.Demand("chat"); peak != 4 {
+		t.Fatalf("peak demand = %d, want 4", peak)
+	}
+	// A waiter whose caller gives up leaves cleanly.
+	ctx, cancel := context.WithCancel(context.Background())
+	gaveUp := make(chan error, 1)
+	go func() {
+		_, err := e.Complete(ctx, rt.CompletionRequest{Model: "chat", Kind: rt.KindChat})
+		gaveUp <- err
+	}()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	if err := <-gaveUp; !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled waiter: %v", err)
+	}
+	if now, _, _ := e.Demand("chat"); now != 4 {
+		t.Fatalf("demand after a waiter gave up = %d, want 4", now)
+	}
+
+	// Resize: a 4-slot instance takes over. Both waiters start on it.
+	newInst, _ := mock.Load(context.Background(), spec, rt.ResourceBudget{})
+	old := e.Replace(spec, newInst, 4)
+	if old == nil || old.Instance != oldInst {
+		t.Fatal("Replace did not return the old entry")
+	}
+	var moved []rt.TokenStream
+	for range 2 {
+		r := <-waiters
+		if r.err != nil {
+			t.Fatalf("a waiter failed across the resize: %v", r.err)
+		}
+		if _, err := r.ts.Recv(); err != nil {
+			t.Fatal(err)
+		}
+		moved = append(moved, r.ts)
+	}
+	// The waiters left the old entry; the two that were running still
+	// hold it, and still run on the old instance.
+	if n := old.Draining(); n != 2 {
+		t.Fatalf("old entry holds %d requests, want the 2 that were running", n)
+	}
+	for _, ts := range []rt.TokenStream{a, b} {
+		if _, err := ts.Recv(); err != nil {
+			t.Fatalf("in-flight request broken by Replace: %v", err)
+		}
+	}
+	if e.DefaultModel() != "chat" || len(e.Models()) != 1 || e.Models()[0].Instance != newInst || e.Models()[0].Slots() != 4 {
+		t.Fatalf("after Replace: default=%q models=%d", e.DefaultModel(), len(e.Models()))
+	}
+	if u, _ := e.Usage("chat"); !u.Served || u.Inflight != 2 {
+		t.Fatalf("usage of the new entry = %+v", u)
+	}
+	// The old one drains as its requests end; the demand follows.
+	_ = a.Close()
+	_ = b.Close()
+	if old.Draining() != 0 {
+		t.Fatalf("old entry still holds %d", old.Draining())
+	}
+	if now, _, _ := e.Demand("chat"); now != 2 {
+		t.Fatalf("demand = %d, want the 2 on the new instance", now)
+	}
+	for _, ts := range moved {
+		_ = ts.Close()
+	}
+	if now, _, _ := e.Demand("chat"); now != 0 {
+		t.Fatalf("demand after everything ended = %d", now)
+	}
+	if _, peak, _ := e.Demand("chat"); peak != 0 {
+		t.Fatalf("peak did not reset: %d", peak)
+	}
+	// A slot is free again right away.
+	_ = streamOn(t, e, "chat").Close()
+
+	// Unloading a model fails its waiters instead of leaving them hanging.
+	e2 := New(nil, nil, nil)
+	inst2, _ := mock.Load(context.Background(), spec, rt.ResourceBudget{})
+	e2.RegisterSlots(spec, inst2, 1)
+	held := streamOn(t, e2, "chat")
+	stuck := make(chan error, 1)
+	go func() {
+		_, err := e2.Complete(context.Background(), rt.CompletionRequest{Model: "chat", Kind: rt.KindChat})
+		stuck <- err
+	}()
+	time.Sleep(20 * time.Millisecond)
+	e2.Unregister("chat")
+	select {
+	case err := <-stuck:
+		if !errors.Is(err, ErrModelNotFound) {
+			t.Fatalf("waiter on an unloaded model: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("waiter left hanging after the model was unloaded")
+	}
+	_ = held.Close()
+	if e.Replace(rt.ModelSpec{ID: "not-loaded"}, newInst, 2) != nil {
+		t.Fatal("Replace registered a model that was not loaded")
+	}
+}

@@ -81,10 +81,39 @@ type ModelEntry struct {
 	// that has already been routed to this instance.
 	inflight atomic.Int64
 	lastUsed atomic.Int64 // unix nanos of the most recent request start
+	// gate holds one token per request running on the runtime: at most
+	// slots at once (the instance's --parallel). nil = ungated. A request
+	// beyond that waits here, in the engine, instead of inside the
+	// runtime's own queue: there it is visible as demand, and it moves to
+	// the new instance when the model is resized (Replace).
+	gate  chan struct{}
+	slots int
+	// gone is closed when this entry stops being the model's instance
+	// (replaced or unregistered): waiters at the gate re-route.
+	gone chan struct{}
+	// load counts running + waiting requests for the model id; it is
+	// shared by the entries that succeed each other under Replace.
+	load *loadCounter
 	// served is set once a request has started on this instance. It is
 	// not derived from lastUsed > LoadedAt: on a coarse clock (Windows,
 	// ~15 ms) a request can start in the same tick the model was loaded.
 	served atomic.Bool
+}
+
+// loadCounter is a model's demand: requests running on its runtime plus
+// requests waiting for a slot, and the peak since the last Demand call.
+type loadCounter struct {
+	cur, peak atomic.Int64
+}
+
+func (l *loadCounter) add(n int64) {
+	v := l.cur.Add(n)
+	for {
+		p := l.peak.Load()
+		if v <= p || l.peak.CompareAndSwap(p, v) {
+			return
+		}
+	}
 }
 
 // Usage is the per-model activity view idle unload and memory admission
@@ -164,14 +193,73 @@ func outcomeOf(err error) string {
 // what answers a chat request that names no model, and with only such
 // models loaded there is simply no default.
 func (e *Engine) Register(spec rt.ModelSpec, inst rt.Instance) {
+	e.RegisterSlots(spec, inst, 0)
+}
+
+// RegisterSlots is Register for an instance that serves at most slots
+// requests at once (llama-server --parallel): the engine runs that many
+// on it and holds the rest at the gate. slots <= 0 = ungated.
+func (e *Engine) RegisterSlots(spec rt.ModelSpec, inst rt.Instance, slots int) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	entry := &ModelEntry{Spec: spec, Instance: inst, LoadedAt: time.Now()}
-	entry.lastUsed.Store(entry.LoadedAt.UnixNano())
-	e.models[spec.ID] = entry
+	e.models[spec.ID] = newEntry(spec, inst, slots, &loadCounter{})
 	if e.defaultID == "" && chatModel(spec) {
 		e.defaultID = spec.ID
 	}
+}
+
+func newEntry(spec rt.ModelSpec, inst rt.Instance, slots int, load *loadCounter) *ModelEntry {
+	entry := &ModelEntry{Spec: spec, Instance: inst, LoadedAt: time.Now(), gone: make(chan struct{}), load: load}
+	if slots > 0 {
+		entry.slots, entry.gate = slots, make(chan struct{}, slots)
+	}
+	entry.lastUsed.Store(entry.LoadedAt.UnixNano())
+	return entry
+}
+
+// Replace swaps a loaded model's instance for another (a resize: same
+// model, different slot count) without a moment in which the model is
+// not loaded. Requests running on the old instance finish there; requests
+// waiting for a slot, and every later one, go to the new instance. The
+// default model stays the default. It returns the old entry, which the
+// caller shuts down once Draining reports it idle; nil when the model was
+// not loaded (inst is then not registered).
+func (e *Engine) Replace(spec rt.ModelSpec, inst rt.Instance, slots int) *ModelEntry {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	old, ok := e.models[spec.ID]
+	if !ok {
+		return nil
+	}
+	entry := newEntry(spec, inst, slots, old.load)
+	entry.LoadedAt = old.LoadedAt
+	entry.lastUsed.Store(old.lastUsed.Load())
+	entry.served.Store(old.served.Load())
+	e.models[spec.ID] = entry
+	close(old.gone)
+	return old
+}
+
+// Draining reports how many requests still hold a replaced or
+// unregistered entry.
+func (m *ModelEntry) Draining() int { return int(m.inflight.Load()) }
+
+// Slots is the entry's concurrency gate (0 = ungated).
+func (m *ModelEntry) Slots() int { return m.slots }
+
+// Demand reports a loaded model's load: requests running plus waiting
+// right now, and the peak of that since the previous call (which resets
+// it). It is what slot scaling follows.
+func (e *Engine) Demand(id string) (now, peak int, ok bool) {
+	e.mu.RLock()
+	m, ok := e.models[id]
+	e.mu.RUnlock()
+	if !ok {
+		return 0, 0, false
+	}
+	cur := m.load.cur.Load()
+	p := m.load.peak.Swap(cur)
+	return int(cur), int(max(p, cur)), true
 }
 
 // Unregister removes a model (eviction); callers shut the instance down.
@@ -207,6 +295,9 @@ func (e *Engine) UnregisterIdle(id string) (*ModelEntry, error) {
 }
 
 func (e *Engine) removeLocked(id string) {
+	if m, ok := e.models[id]; ok {
+		close(m.gone) // waiters at its gate re-route (and find it gone)
+	}
 	delete(e.models, id)
 	if e.defaultID == id {
 		// The longest-loaded chat model takes over; none = no default.
@@ -316,6 +407,61 @@ func (e *Engine) acquire(model string) (*ModelEntry, error) {
 	return m, nil
 }
 
+// enter takes a slot on the entry's instance, waiting at the gate while
+// all are busy. If the entry is replaced meanwhile (a resize) the request
+// moves to the model's new instance; if the model is unloaded, or ctx
+// ends, it fails. It returns the entry the slot was taken on. The caller
+// already holds entry (inflight) and passes it on to the returned one.
+func (e *Engine) enter(ctx context.Context, entry *ModelEntry) (*ModelEntry, error) {
+	for {
+		if entry.gate == nil {
+			return entry, nil
+		}
+		// A replaced entry takes no new requests, even with a slot free:
+		// its instance is on its way out.
+		select {
+		case <-entry.gone:
+			entry.inflight.Add(-1)
+			next, err := e.acquire(entry.Spec.ID)
+			if err != nil {
+				return nil, err
+			}
+			entry = next
+			continue
+		default:
+		}
+		select {
+		case entry.gate <- struct{}{}:
+			// Replaced between the check and the slot: give it back and
+			// follow the model.
+			select {
+			case <-entry.gone:
+				<-entry.gate
+				continue
+			default:
+			}
+			return entry, nil
+		case <-entry.gone:
+			entry.inflight.Add(-1)
+			next, err := e.acquire(entry.Spec.ID)
+			if err != nil {
+				return nil, err
+			}
+			entry = next
+		case <-ctx.Done():
+			entry.inflight.Add(-1)
+			return nil, ctx.Err()
+		}
+	}
+}
+
+// leave returns the slot taken by enter.
+func (m *ModelEntry) leave() {
+	if m.gate != nil {
+		<-m.gate
+	}
+}
+
 // Complete runs one request through admission, the runtime, and telemetry.
 func (e *Engine) Complete(ctx context.Context, req rt.CompletionRequest) (rt.TokenStream, error) {
 	entry, err := e.acquire(req.Model)
@@ -330,6 +476,9 @@ func (e *Engine) Complete(ctx context.Context, req rt.CompletionRequest) (rt.Tok
 		entry.inflight.Add(-1)
 		return nil, DecisionModelError(entry.Spec.ID)
 	}
+	// From here the request is demand on the model: running or waiting.
+	load := entry.load
+	load.add(1)
 
 	release := func() {}
 	runCtx := ctx
@@ -338,9 +487,18 @@ func (e *Engine) Complete(ctx context.Context, req rt.CompletionRequest) (rt.Tok
 		admitted, release, err = e.admit.Admit(ctx, req.ID)
 		if err != nil {
 			entry.inflight.Add(-1)
+			load.add(-1)
 			return nil, err
 		}
 		runCtx = admitted
+	}
+
+	// A slot on the runtime; waits here while the model's slots are all
+	// busy, and follows the model to its new instance across a resize.
+	if entry, err = e.enter(runCtx, entry); err != nil {
+		load.add(-1)
+		release()
+		return nil, err
 	}
 
 	if e.touch != nil {
@@ -356,7 +514,9 @@ func (e *Engine) Complete(ctx context.Context, req rt.CompletionRequest) (rt.Tok
 	stream, err := entry.Instance.Complete(runCtx, req)
 	if err != nil {
 		h.Finish(outcomeOf(err), 0, 0)
+		entry.leave()
 		entry.inflight.Add(-1)
+		load.add(-1)
 		e.stats.RequestFinished()
 		release()
 		return nil, err
@@ -397,6 +557,8 @@ func (s *meteredStream) finish() {
 			completion = s.usage.CompletionTokens
 		}
 		s.live.Finish(s.outcome, s.usage.PromptTokens, completion)
+		s.entry.leave()
+		s.entry.load.add(-1)
 		s.entry.inflight.Add(-1)
 		s.eng.stats.RequestFinished()
 		s.eng.stats.RecordRequest(s.usage.CompletionTokens, int64(s.usage.CompletionTokens)*payoutMicroPerToken)
