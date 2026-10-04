@@ -1,6 +1,8 @@
 package logging
 
 import (
+	"bytes"
+	"strings"
 	"testing"
 	"time"
 )
@@ -74,4 +76,27 @@ func TestRingSubscribeFollows(t *testing.T) {
 		}
 	default:
 	}
+}
+
+// SetLevel changes what an already-built logger (and loggers derived from
+// it) emits, without a restart.
+func TestSetLevelLive(t *testing.T) {
+	var out bytes.Buffer
+	log, ring := NewTo(&out, "info", "text")
+	child := log.With("model", "m")
+	child.Debug("hidden")
+	if strings.Contains(out.String(), "hidden") || len(ring.Tail(0)) != 0 {
+		t.Fatalf("debug logged at info: %q", out.String())
+	}
+	SetLevel("debug")
+	child.Debug("shown")
+	if !strings.Contains(out.String(), "shown") || len(ring.Tail(0)) != 1 {
+		t.Fatalf("debug not logged after SetLevel(debug): %q", out.String())
+	}
+	SetLevel("error")
+	log.Warn("quiet")
+	if strings.Contains(out.String(), "quiet") {
+		t.Fatalf("warn logged at error: %q", out.String())
+	}
+	SetLevel("info")
 }

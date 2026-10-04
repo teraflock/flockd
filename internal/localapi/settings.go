@@ -30,6 +30,7 @@ import (
 // SettingsValues are the settings added by flockd#55, as plain values.
 type SettingsValues struct {
 	MaxConcurrent  int // budget.max_concurrent, 0 = auto
+	MinConcurrent  int // budget.min_concurrent, 0 = auto
 	MaxVRAMPercent int
 	MaxContext     int
 	MinContext     int
@@ -69,10 +70,13 @@ type SettingsDeps struct {
 	ApplyPlan func(modelops.PlanLimits)
 	// SetExclude replaces models.exclude for later placements. May be nil.
 	SetExclude func([]string)
+	// SetLogLevel changes the daemon's log level. Nil = the level is only
+	// saved (and reported as pending a restart).
+	SetLogLevel func(string)
 }
 
 func planLimitsOf(v SettingsValues) modelops.PlanLimits {
-	return modelops.PlanLimits{MaxConcurrent: v.MaxConcurrent, MaxContext: v.MaxContext,
+	return modelops.PlanLimits{MaxConcurrent: v.MaxConcurrent, MinConcurrent: v.MinConcurrent, MaxContext: v.MaxContext,
 		MinContext: v.MinContext, ContextLength: v.ContextLength}
 }
 
@@ -115,6 +119,7 @@ func (s *Server) limits() gen.Limits {
 		MaxRamMb:          &ll.MaxRAMMB,
 		IdleUnloadSeconds: &ll.IdleUnloadS,
 		MaxConcurrent:     &cur.MaxConcurrent,
+		MinConcurrent:     &cur.MinConcurrent,
 		MaxContext:        &cur.MaxContext,
 		MinContext:        &cur.MinContext,
 		ContextLength:     &cur.ContextLength,
@@ -174,6 +179,12 @@ func validateLimits(lim gen.Limits, cur SettingsValues) ([]governor.Window, Sett
 			return nil, cur, fmt.Errorf("max_concurrent must be 0 (auto) to %d", config.MaxConcurrentLimit)
 		}
 		next.MaxConcurrent = *v
+	}
+	if v := lim.MinConcurrent; v != nil {
+		if *v < 0 || *v > config.MaxConcurrentLimit {
+			return nil, cur, fmt.Errorf("min_concurrent must be 0 (auto) to %d", config.MaxConcurrentLimit)
+		}
+		next.MinConcurrent = *v
 	}
 	ctxField := func(name string, v *int, floor int, dst *int) error {
 		if v == nil {
@@ -268,6 +279,9 @@ func (s *Server) UpdateLimits(w http.ResponseWriter, r *http.Request) {
 	if next.MaxConcurrent != prev.MaxConcurrent {
 		s.overlay.MaxConcurrent = &next.MaxConcurrent
 	}
+	if next.MinConcurrent != prev.MinConcurrent {
+		s.overlay.MinConcurrent = &next.MinConcurrent
+	}
 	if next.MaxContext != prev.MaxContext {
 		s.overlay.MaxContext = &next.MaxContext
 	}
@@ -348,6 +362,9 @@ func (s *Server) UpdateLimits(w http.ResponseWriter, r *http.Request) {
 	// The flockd#55 settings: live ones now, plan limits by reloading
 	// idle models, the rest at the next start (they are only saved).
 	s.requireAuthV1.Store(next.RequireAuthV1)
+	if next.LogLevel != prev.LogLevel && s.deps.Settings.SetLogLevel != nil {
+		s.deps.Settings.SetLogLevel(next.LogLevel)
+	}
 	if !slices.Equal(prev.Exclude, next.Exclude) && s.deps.Settings.SetExclude != nil {
 		s.deps.Settings.SetExclude(slices.Clone(next.Exclude))
 	}
@@ -430,6 +447,27 @@ func (s *Server) settingsMeta(lim gen.Limits, cur SettingsValues) []gen.LimitSet
 	if ops := s.deps.ModelOps; ops != nil && *lim.MaxRamMb == 0 {
 		ramOpts = append(ramOpts, effective(ops.MemoryBudgetMB()))
 	}
+	// The floor in force: auto resolves to 2, and it never exceeds the
+	// ceiling (at the ceiling the slot count is pinned).
+	ceiling := cur.MaxConcurrent
+	if ceiling == 0 {
+		ceiling = autoSlots
+	}
+	floor := cur.MinConcurrent
+	if floor == 0 {
+		floor = modelops.DefaultFloorSlots
+	}
+	floor = min(floor, ceiling)
+	floorOpts := []opt{unit("slots"), rng(0, config.MaxConcurrentLimit), zero("auto")}
+	if floor != cur.MinConcurrent {
+		floorOpts = append(floorOpts, effective(floor))
+	}
+	// log_level is live when the daemon wired a setter, else restart.
+	logApply, logOpts := gen.Live, []opt{options(config.LogLevels...)}
+	if s.deps.Settings.SetLogLevel == nil {
+		logApply = gen.Restart
+		logOpts = append(logOpts, pending(boot.LogLevel, boot.LogLevel != cur.LogLevel))
+	}
 	minCtxOpts := []opt{unit("tokens"), rng(0, config.MaxContextLimit), zero("8192")}
 	if cur.MinContext == 0 {
 		minCtxOpts = append(minCtxOpts, effective(memory.DefaultMinContext))
@@ -462,7 +500,7 @@ func (s *Server) settingsMeta(lim gen.Limits, cur SettingsValues) []gen.LimitSet
 			"How much memory loaded models may use together. Auto is about half of the machine's memory on Apple Silicon and the GPU share on discrete GPUs. A load that does not fit unloads idle models first.",
 			gen.Common, gen.Live, gen.Integer, def.Budget.MaxRAMMB, *lim.MaxRamMb, ramOpts...),
 		mk("max_concurrent", "budget.max_concurrent", "Concurrent requests per model",
-			"The most requests one model serves at once: the ceiling on a model's slots and on mesh dispatches to this node. Every slot holds its own context in memory, so fewer slots leave room for more models. Auto is 16 with a GPU or Apple Silicon and 2 on CPU.",
+			"The most requests one model serves at once: the ceiling on a model's slots and on mesh dispatches to this node. A chat model starts with fewer slots and grows toward this ceiling while requests are waiting; every slot holds its own context in memory, so a lower ceiling leaves room for more models. Auto is 16 with a GPU or Apple Silicon and 2 on CPU.",
 			gen.Common, gen.Reload, gen.Integer, def.Budget.MaxConcurrent, cur.MaxConcurrent, slotsOpts...),
 		mk("idle_unload_seconds", "models.idle_unload_s", "Unload idle models after",
 			"Unload a loaded model after this long without a request, freeing its memory; it is loaded again on demand in seconds. The default model is exempt.",
@@ -475,6 +513,9 @@ func (s *Server) settingsMeta(lim gen.Limits, cur SettingsValues) []gen.LimitSet
 		mk("retention_days", "models.retention_days", "Remove unused models after",
 			"Evict models that are not pinned and have not been used for this many days.",
 			gen.Advanced, gen.Live, gen.Integer, def.Models.RetentionDays, *lim.RetentionDays, unit("days"), rng(0, 0), zero("never")),
+		mk("min_concurrent", "budget.min_concurrent", "Slots a model starts with",
+			"How many requests a chat model can serve at once when it is loaded. The node adds slots, up to the concurrent-requests ceiling, while requests are waiting, and gives them back when demand is gone or another model needs the memory. Set it to the ceiling to pin a fixed slot count.",
+			gen.Advanced, gen.Reload, gen.Integer, def.Budget.MinConcurrent, cur.MinConcurrent, floorOpts...),
 		mk("max_context", "runtime.max_context", "Largest context per request",
 			"The largest context, in tokens, a single request gets. Memory per model grows with slots x context, so a lower cap leaves room for more slots or more models. 0 uses each model's own window.",
 			gen.Advanced, gen.Reload, gen.Integer, def.Runtime.MaxContext, cur.MaxContext, unit("tokens"), rng(0, config.MaxContextLimit), zero("model window")),
@@ -500,7 +541,6 @@ func (s *Server) settingsMeta(lim gen.Limits, cur SettingsValues) []gen.LimitSet
 			gen.Advanced, gen.Live, gen.Boolean, def.LocalAPI.RequireAuthV1, cur.RequireAuthV1),
 		mk("log_level", "log.level", "Log level",
 			"How much the daemon logs. debug is verbose and meant for troubleshooting.",
-			gen.Advanced, gen.Restart, gen.Enum, def.Log.Level, cur.LogLevel, options(config.LogLevels...),
-			pending(boot.LogLevel, boot.LogLevel != cur.LogLevel)),
+			gen.Advanced, logApply, gen.Enum, def.Log.Level, cur.LogLevel, logOpts...),
 	}
 }

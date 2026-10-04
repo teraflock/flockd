@@ -122,6 +122,10 @@ func modelRowLine(m gen.ModelRow) string {
 		if m.LoadedMb != nil {
 			loaded += fmt.Sprintf(" %.1fGB", float64(*m.LoadedMb)/1024)
 		}
+		if m.Slots != nil && m.ContextPerSlot != nil {
+			// What the memory is buying right now: slots follow demand.
+			loaded += fmt.Sprintf(" %d×%dk", *m.Slots, *m.ContextPerSlot/1024)
+		}
 		if m.IdleSince != nil {
 			loaded += styleDim.Render(" idle " + time.Since(*m.IdleSince).Round(time.Second).String())
 		}

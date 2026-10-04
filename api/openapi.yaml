@@ -393,7 +393,8 @@ paths:
         - `model_progress`: `{model, received_bytes, total_bytes}` during
           downloads (throttled).
         - `models_changed`: `{model, change}` where change is
-          downloaded|loading|loaded|load_failed|unloaded|default, or
+          downloaded|loading|loaded|load_failed|unloaded|default|resized
+          (`resized`: the model's slot count changed to follow demand), or
           `{change: catalog}` when a refreshed catalog differs from the one
           held. `loading` is a runtime starting (weights being read into
           memory); it ends with `loaded` or `load_failed`.
@@ -1041,6 +1042,15 @@ components:
           type: integer
           format: int64
           description: Measured memory footprint; present only while loaded.
+        slots:
+          type: integer
+          description: >
+            Present while loaded: requests the model serves at once right
+            now. For a chat model it moves between `min_concurrent` and
+            `max_concurrent` with demand.
+        context_per_slot:
+          type: integer
+          description: Present while loaded; tokens of context each request gets.
         idle_since:
           type: string
           format: date-time
@@ -1335,9 +1345,21 @@ components:
             Most requests one model serves at once (`budget.max_concurrent`):
             the ceiling on a model's slots and on mesh dispatches to this
             node. 0 = auto (16 with a GPU or unified memory, 2 on CPU).
-            Every slot holds its own context in memory, so fewer slots
-            leave room for more models. Applied by restarting idle models;
+            A chat model starts at `min_concurrent` slots and grows toward
+            this ceiling under demand; every slot holds its own context in
+            memory, so a lower ceiling leaves room for more models. Applied by restarting idle models;
             a busy one changes at its next load. Omitted on PUT = unchanged.
+        min_concurrent:
+          type: integer
+          minimum: 0
+          maximum: 64
+          description: >
+            Slots a chat model starts with (`budget.min_concurrent`). The
+            node adds slots, up to `max_concurrent`, while requests are
+            waiting, and gives them back when demand is gone or another
+            model needs the memory. 0 = auto (2). Set it to
+            `max_concurrent` (or higher) to pin the slot count. Applied
+            like `max_concurrent`. Omitted on PUT = unchanged.
         max_context:
           type: integer
           minimum: 0
@@ -1402,8 +1424,8 @@ components:
           type: string
           enum: [debug, info, warn, error]
           description: >
-            Daemon log verbosity (`log.level`). Takes effect after a
-            daemon restart. Omitted on PUT = unchanged.
+            Daemon log verbosity (`log.level`). Applied immediately.
+            Omitted on PUT = unchanged.
         settings:
           type: array
           readOnly: true

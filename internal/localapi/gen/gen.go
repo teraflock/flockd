@@ -535,10 +535,10 @@ type Limits struct {
 	// IdleUnloadSeconds Unload a loaded model after this long without a request (0 = never; default model exempt). Omitted on PUT = unchanged.
 	IdleUnloadSeconds *int `json:"idle_unload_seconds,omitempty"`
 
-	// LogLevel Daemon log verbosity (`log.level`). Takes effect after a daemon restart. Omitted on PUT = unchanged.
+	// LogLevel Daemon log verbosity (`log.level`). Applied immediately. Omitted on PUT = unchanged.
 	LogLevel *LimitsLogLevel `json:"log_level,omitempty"`
 
-	// MaxConcurrent Most requests one model serves at once (`budget.max_concurrent`): the ceiling on a model's slots and on mesh dispatches to this node. 0 = auto (16 with a GPU or unified memory, 2 on CPU). Every slot holds its own context in memory, so fewer slots leave room for more models. Applied by restarting idle models; a busy one changes at its next load. Omitted on PUT = unchanged.
+	// MaxConcurrent Most requests one model serves at once (`budget.max_concurrent`): the ceiling on a model's slots and on mesh dispatches to this node. 0 = auto (16 with a GPU or unified memory, 2 on CPU). A chat model starts at `min_concurrent` slots and grows toward this ceiling under demand; every slot holds its own context in memory, so a lower ceiling leaves room for more models. Applied by restarting idle models; a busy one changes at its next load. Omitted on PUT = unchanged.
 	MaxConcurrent *int `json:"max_concurrent,omitempty"`
 
 	// MaxContext Largest context, in tokens, a single request gets (`runtime.max_context`); 0 = the model's own window. Memory per model grows with slots x context. 0, or 1024 and up. Applied like `max_concurrent`. Omitted on PUT = unchanged.
@@ -558,6 +558,9 @@ type Limits struct {
 
 	// MeshManaged Let the mesh place models on this node (download, load, and evict what it placed) inside `models.max_disk_mb`, minus your pinned and excluded models. Off means the node serves only what you installed. Omitted on PUT = unchanged.
 	MeshManaged *bool `json:"mesh_managed,omitempty"`
+
+	// MinConcurrent Slots a chat model starts with (`budget.min_concurrent`). The node adds slots, up to `max_concurrent`, while requests are waiting, and gives them back when demand is gone or another model needs the memory. 0 = auto (2). Set it to `max_concurrent` (or higher) to pin the slot count. Applied like `max_concurrent`. Omitted on PUT = unchanged.
+	MinConcurrent *int `json:"min_concurrent,omitempty"`
 
 	// MinContext Smallest context a request is given (`runtime.min_context`): when memory is short the node gives up slots before going below it. 0 = 8192; otherwise 256 and up, and not above `max_context`. Applied like `max_concurrent`. Omitted on PUT = unchanged.
 	MinContext *int `json:"min_context,omitempty"`
@@ -584,7 +587,7 @@ type Limits struct {
 	YieldGraceSeconds int `json:"yield_grace_seconds"`
 }
 
-// LimitsLogLevel Daemon log verbosity (`log.level`). Takes effect after a daemon restart. Omitted on PUT = unchanged.
+// LimitsLogLevel Daemon log verbosity (`log.level`). Applied immediately. Omitted on PUT = unchanged.
 type LimitsLogLevel string
 
 // LogEntry defines model for LogEntry.
@@ -656,8 +659,11 @@ type ModelOperationOp string
 type ModelRow struct {
 	// Assignment Coordinator placement status for this model, when the mesh asked for it. Failures and refusals stay visible for ten minutes.
 	Assignment *Assignment `json:"assignment,omitempty"`
-	Default    bool        `json:"default"`
-	Id         string      `json:"id"`
+
+	// ContextPerSlot Present while loaded; tokens of context each request gets.
+	ContextPerSlot *int   `json:"context_per_slot,omitempty"`
+	Default        bool   `json:"default"`
+	Id             string `json:"id"`
 
 	// IdleSince Present while loaded and not serving; the daemon unloads the instance after `idle_unload_seconds` (default model exempt).
 	IdleSince *time.Time `json:"idle_since,omitempty"`
@@ -683,6 +689,9 @@ type ModelRow struct {
 	// ReceivedBytes Live progress summed over every file of the artifact; present only while downloading.
 	ReceivedBytes *int64 `json:"received_bytes,omitempty"`
 	SizeBytes     int64  `json:"size_bytes"`
+
+	// Slots Present while loaded: requests the model serves at once right now. For a chat model it moves between `min_concurrent` and `max_concurrent` with demand.
+	Slots *int `json:"slots,omitempty"`
 
 	// State assigned | downloading | ready | missing. `assigned` is a coordinator placement queued behind other work (nothing on disk yet). `missing` means the index knows the model but its file is gone from disk (deleted outside the daemon); it no longer counts against the budget and loads re-download it.
 	State string `json:"state"`

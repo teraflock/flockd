@@ -11,6 +11,7 @@ import (
 	"github.com/teraflock/flockd/internal/engine"
 	"github.com/teraflock/flockd/internal/memory"
 	"github.com/teraflock/flockd/internal/models"
+	rt "github.com/teraflock/flockd/internal/runtime"
 )
 
 // ErrOverMemory means a load does not fit the memory budget even after
@@ -39,6 +40,22 @@ type loadInfo struct {
 	// CtxPerSlot the layout itself (--parallel, --ctx-size / parallel).
 	Limits            PlanLimits
 	Slots, CtxPerSlot int
+	// Spec and Plan are what a resize needs to start the model again with
+	// another slot count: the runtime spec and the plan input (no budget).
+	Spec rt.ModelSpec
+	Plan memory.PlanInput
+	// Scalable: slots follow demand (chat and embedding models).
+	Scalable bool
+	// Scaling state (scale.go): when demand first reached the slot count
+	// (zero = not saturated), since when the peak has fit in half the
+	// slots and the highest peak in that stretch, and the last resize or
+	// failed attempt.
+	SatSince  time.Time
+	SatPeak   int
+	LowSince  time.Time
+	LowPeak   int
+	Resized   time.Time
+	Attempted time.Time
 }
 
 // MemorySnapshot is the /api/v1/status memory view and the heartbeat's
@@ -141,7 +158,7 @@ func (s *Service) hostFootprintLocked(id string) int64 {
 func (s *Service) usedLocked() int64 {
 	var used int64
 	if memory.Discrete(s.Hardware) && !s.vramSampledAt.IsZero() {
-		used = s.vramUsedMB
+		used = s.vramUsedMB + s.drainingMB
 		for _, m := range s.Eng.Models() {
 			if li, ok := s.loads[m.Spec.ID]; ok && li.VRAMSeq == s.vramSampleSeq {
 				used += li.EstimateMB
@@ -152,7 +169,8 @@ func (s *Service) usedLocked() int64 {
 	for _, m := range s.Eng.Models() {
 		used += s.footprintLocked(m.Spec.ID)
 	}
-	return used
+	// Instances replaced by a resize, still finishing their requests.
+	return used + s.drainingMB
 }
 
 func (s *Service) usedMB() int64 {
@@ -184,6 +202,13 @@ func (s *Service) admit(ctx context.Context, id string, estimateMB int64) error 
 	used := s.usedMB()
 	if used+estimateMB <= budget {
 		return nil
+	}
+	// First resort: idle models that grew with demand give their extra
+	// slots back (flockd#54). Unloading whole models comes after.
+	if s.shrinkForRoom(ctx, id) {
+		if used = s.usedMB(); used+estimateMB <= budget {
+			return nil
+		}
 	}
 	def := s.Eng.DefaultModel()
 	type cand struct {

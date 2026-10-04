@@ -135,17 +135,11 @@ func New(level, format string) (*slog.Logger, *Ring) {
 // NewTo is New with an explicit sink (a file alongside stderr for a
 // service that has no console — see config.Log.File).
 func NewTo(w io.Writer, level, format string) (*slog.Logger, *Ring) {
-	var lvl slog.Level
-	switch strings.ToLower(level) {
-	case "debug":
-		lvl = slog.LevelDebug
-	case "warn":
-		lvl = slog.LevelWarn
-	case "error":
-		lvl = slog.LevelError
-	default:
-		lvl = slog.LevelInfo
-	}
+	lvl := new(slog.LevelVar)
+	lvl.Set(ParseLevel(level))
+	levelMu.Lock()
+	current = lvl
+	levelMu.Unlock()
 	opts := &slog.HandlerOptions{Level: lvl}
 	var inner slog.Handler
 	if strings.ToLower(format) == "json" {
@@ -155,4 +149,35 @@ func NewTo(w io.Writer, level, format string) (*slog.Logger, *Ring) {
 	}
 	ring := NewRing(1024)
 	return slog.New(&ringHandler{ring: ring, inner: inner}), ring
+}
+
+// The level of the most recently built daemon logger, changeable while
+// the daemon runs (log.level through the limits API).
+var (
+	levelMu sync.Mutex
+	current *slog.LevelVar
+)
+
+// ParseLevel maps debug|info|warn|error to a slog level (info otherwise).
+func ParseLevel(level string) slog.Level {
+	switch strings.ToLower(level) {
+	case "debug":
+		return slog.LevelDebug
+	case "warn":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}
+
+// SetLevel changes the level of the logger built by New / NewTo, for
+// every logger derived from it. A no-op before one was built.
+func SetLevel(level string) {
+	levelMu.Lock()
+	defer levelMu.Unlock()
+	if current != nil {
+		current.Set(ParseLevel(level))
+	}
 }

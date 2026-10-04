@@ -140,6 +140,11 @@ type Budget struct {
 	// class (16 with a GPU or unified memory, 2 CPU-only; memory.DefaultSlots).
 	// Memory decides the actual slot count per load (flockd#46).
 	MaxConcurrent int `koanf:"max_concurrent"`
+	// MinConcurrent is the slot floor: the slots a chat model starts with
+	// and shrinks back to; it grows toward max_concurrent while requests
+	// are waiting (flockd#54). 0 = auto (2). At or above max_concurrent it
+	// pins the slot count: no scaling.
+	MinConcurrent int `koanf:"min_concurrent"`
 }
 
 type Models struct {
@@ -342,6 +347,7 @@ type LiveLimits struct {
 // limits.toml, which overrides config.toml.
 type LimitsExtra struct {
 	MaxConcurrent  *int      // budget.max_concurrent
+	MinConcurrent  *int      // budget.min_concurrent
 	MaxVRAMPercent *int      // budget.max_vram_percent
 	MaxContext     *int      // runtime.max_context
 	MinContext     *int      // runtime.min_context
@@ -386,6 +392,7 @@ func LoadLimitsExtra(dataDir string) (LimitsExtra, error) {
 		return &v
 	}
 	e.MaxConcurrent = intKey("budget.max_concurrent")
+	e.MinConcurrent = intKey("budget.min_concurrent")
 	e.MaxVRAMPercent = intKey("budget.max_vram_percent")
 	e.MaxContext = intKey("runtime.max_context")
 	e.MinContext = intKey("runtime.min_context")
@@ -460,6 +467,9 @@ func SaveLimits(dataDir string, g Governor, l LiveLimits, extra LimitsExtra) err
 	if extra.MaxConcurrent != nil {
 		fmt.Fprintf(&b, "max_concurrent = %d\n", *extra.MaxConcurrent)
 	}
+	if extra.MinConcurrent != nil {
+		fmt.Fprintf(&b, "min_concurrent = %d\n", *extra.MinConcurrent)
+	}
 	if extra.MaxVRAMPercent != nil {
 		fmt.Fprintf(&b, "max_vram_percent = %d\n", *extra.MaxVRAMPercent)
 	}
@@ -506,6 +516,9 @@ func (c Config) Validate() error {
 	}
 	if c.Budget.MaxVRAMPercent < 1 || c.Budget.MaxVRAMPercent > 100 {
 		return fmt.Errorf("config: budget.max_vram_percent must be 1-100, got %d", c.Budget.MaxVRAMPercent)
+	}
+	if c.Budget.MinConcurrent < 0 {
+		return fmt.Errorf("config: budget.min_concurrent must be >= 0 (0 = auto)")
 	}
 	if c.Budget.MaxConcurrent < 0 {
 		return fmt.Errorf("config: budget.max_concurrent must be >= 0 (0 = auto by accelerator class)")

@@ -338,7 +338,7 @@ func TestLimitsExtraOverlay(t *testing.T) {
 	two, ctx, minCtx, pin, vram := 2, 8192, 2048, 0, 70
 	none, auth, lvl := "", true, "debug"
 	ex := []string{}
-	extra := LimitsExtra{MaxConcurrent: &two, MaxContext: &ctx, MinContext: &minCtx, ContextLength: &pin,
+	extra := LimitsExtra{MaxConcurrent: &two, MinConcurrent: &two, MaxContext: &ctx, MinContext: &minCtx, ContextLength: &pin,
 		MaxVRAMPercent: &vram, Exclude: &ex, DefaultModel: &none, RequireAuthV1: &auth, LogLevel: &lvl}
 	if err := SaveLimits(dir, g, ll, extra); err != nil {
 		t.Fatal(err)
@@ -355,6 +355,9 @@ func TestLimitsExtraOverlay(t *testing.T) {
 	got, err := LoadLimitsExtra(dir)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if cfg.Budget.MinConcurrent != 2 || got.MinConcurrent == nil || *got.MinConcurrent != 2 {
+		t.Fatalf("min_concurrent overlay: cfg=%d extra=%v", cfg.Budget.MinConcurrent, got.MinConcurrent)
 	}
 	if got.MaxConcurrent == nil || *got.MaxConcurrent != 2 || got.MaxContext == nil || *got.MaxContext != 8192 ||
 		got.MinContext == nil || *got.MinContext != 2048 || got.ContextLength == nil || *got.ContextLength != 0 ||

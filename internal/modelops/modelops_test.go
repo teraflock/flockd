@@ -367,6 +367,12 @@ func TestCatalogMissTriggersOneRefetch(t *testing.T) {
 		t.Fatalf("pull of the promoted model: started=%v err=%v", started, err)
 	}
 	svc.CancelDownload("laya-q8_0")
+	// The download goroutine writes under the test's temp dir: let it end
+	// before the directory is removed.
+	deadline := time.Now().Add(5 * time.Second)
+	for svc.Downloading("laya-q8_0") && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 func TestCatalogPeriodicRefreshAndStaleOnFailure(t *testing.T) {
@@ -457,7 +463,9 @@ func TestSetPlanLimitsReloadsIdleModels(t *testing.T) {
 	eng := engine.New(nil, nil, nil)
 	loader := &captureLoader{mock: rt.NewMockRuntime(5)}
 	var cached []string
-	svc := &Service{Mgr: mgr, Eng: eng, Loader: loader, Budget: rt.ResourceBudget{MaxConcurrent: 16},
+	// Slots pinned (floor = ceiling): this test is about a settings
+	// change, not about demand scaling (scale_test.go).
+	svc := &Service{Mgr: mgr, Eng: eng, Loader: loader, Budget: rt.ResourceBudget{MaxConcurrent: 16}, MinConcurrent: 16,
 		MaxContext: 16384, MinContext: 8192, Log: quietLog(), ManifestPath: catPath,
 		OnUnloaded: func(id string) { cached = append(cached, id) }}
 	ctx := context.Background()
@@ -472,7 +480,7 @@ func TestSetPlanLimitsReloadsIdleModels(t *testing.T) {
 	if l := svc.Layouts(); l["idle-model"] != (Layout{Slots: 16, CtxPerSlot: 16384}) || l["busy-model"].Stale {
 		t.Fatalf("layouts at load = %+v", l)
 	}
-	if got := svc.PlanLimits(); got != (PlanLimits{MaxConcurrent: 16, MaxContext: 16384, MinContext: 8192}) || svc.SlotCeiling() != 16 {
+	if got := svc.PlanLimits(); got != (PlanLimits{MaxConcurrent: 16, MinConcurrent: 16, MaxContext: 16384, MinContext: 8192}) || svc.SlotCeiling() != 16 {
 		t.Fatalf("initial plan limits = %+v", got)
 	}
 
@@ -485,7 +493,7 @@ func TestSetPlanLimitsReloadsIdleModels(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	svc.SetPlanLimits(PlanLimits{MaxConcurrent: 4, MaxContext: 8192, MinContext: 8192})
+	svc.SetPlanLimits(PlanLimits{MaxConcurrent: 4, MinConcurrent: 4, MaxContext: 8192, MinContext: 8192})
 	if l := svc.Layouts(); !l["idle-model"].Stale || !l["busy-model"].Stale {
 		t.Fatalf("layouts after the change = %+v", l)
 	}
@@ -525,7 +533,16 @@ func TestSetPlanLimitsReloadsIdleModels(t *testing.T) {
 	}
 	// 0 = auto resolves by hardware (no GPU known here: the CPU default).
 	svc.SetPlanLimits(PlanLimits{MaxContext: 8192})
-	if svc.SlotCeiling() != 2 {
-		t.Fatalf("auto ceiling = %d", svc.SlotCeiling())
+	if svc.SlotCeiling() != 2 || svc.SlotFloor() != 2 {
+		t.Fatalf("auto ceiling = %d, floor = %d", svc.SlotCeiling(), svc.SlotFloor())
+	}
+	// The floor never exceeds the ceiling; auto is 2.
+	svc.SetPlanLimits(PlanLimits{MaxConcurrent: 16})
+	if svc.SlotFloor() != DefaultFloorSlots {
+		t.Fatalf("auto floor = %d", svc.SlotFloor())
+	}
+	svc.SetPlanLimits(PlanLimits{MaxConcurrent: 4, MinConcurrent: 9})
+	if svc.SlotFloor() != 4 {
+		t.Fatalf("floor above the ceiling = %d, want 4 (pinned)", svc.SlotFloor())
 	}
 }

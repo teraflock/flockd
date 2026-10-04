@@ -24,6 +24,9 @@ const (
 	KindMissing         = "missing"
 	KindUpdateAvailable = "update_available"
 	KindAssignment      = "assignment"
+	// KindResized: a loaded model was restarted with another slot count
+	// (slots follow demand, or memory pressure took them back).
+	KindResized = "resized"
 )
 
 // Actors: who caused the event.

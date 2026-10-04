@@ -141,12 +141,13 @@ func TestSettingsCoverEveryLimitsField(t *testing.T) {
 			t.Errorf("%s: configured %s != field %s", m.Key, got, fields[m.Key])
 		}
 	}
-	if tiers[gen.Common] != 10 || tiers[gen.Advanced] != 10 {
+	if tiers[gen.Common] != 10 || tiers[gen.Advanced] != 11 {
 		t.Fatalf("tiers = %v", tiers)
 	}
 	for key, apply := range map[string]gen.LimitSettingApply{
 		"max_concurrent": gen.Reload, "max_context": gen.Reload, "min_context": gen.Reload, "context_length": gen.Reload,
-		"max_vram_percent": gen.Restart, "default_model": gen.Restart, "log_level": gen.Restart,
+		"max_vram_percent": gen.Restart, "default_model": gen.Restart, "log_level": gen.Restart, // no SetLogLevel wired here
+		"min_concurrent": gen.Reload,
 		"exclude": gen.Live, "require_auth_v1": gen.Live, "serve_policy": gen.Live, "max_ram_mb": gen.Live,
 	} {
 		if meta[key].Apply != apply {
@@ -330,5 +331,53 @@ func TestSettingsOverlayCarriedForward(t *testing.T) {
 	lim, meta := h.get(t)
 	if *lim.MaxConcurrent != 4 || meta["max_concurrent"].Effective != nil {
 		t.Fatalf("max_concurrent = %v %+v", *lim.MaxConcurrent, meta["max_concurrent"])
+	}
+}
+
+// The slot floor (flockd#54) and the live log level.
+func TestSettingsSlotFloorAndLiveLogLevel(t *testing.T) {
+	h := newSettingsServer(t, SettingsValues{MaxContext: 16384, MinContext: 8192, LogLevel: "info"}, config.LimitsExtra{})
+	_, meta := h.get(t)
+	// Auto floor resolves to 2; the ceiling is auto 16 on this hardware.
+	if f := meta["min_concurrent"]; f.Configured != float64(0) || f.Effective != float64(2) || f.Tier != gen.Advanced || f.Apply != gen.Reload {
+		t.Fatalf("min_concurrent auto = %+v", f)
+	}
+	// A floor above the ceiling is the pin: effective = the ceiling.
+	code, lim := h.put(t, `"max_concurrent":4,"min_concurrent":8`)
+	if code != http.StatusOK {
+		t.Fatalf("PUT = %d", code)
+	}
+	if f := settingsByKey(t, lim)["min_concurrent"]; f.Configured != float64(8) || f.Effective != float64(4) {
+		t.Fatalf("min_concurrent above the ceiling = %+v", f)
+	}
+	h.mu.Lock()
+	plans := append([]modelops.PlanLimits(nil), h.plans...)
+	h.mu.Unlock()
+	if len(plans) != 1 || plans[0].MinConcurrent != 8 || plans[0].MaxConcurrent != 4 {
+		t.Fatalf("ApplyPlan calls = %+v", plans)
+	}
+	raw, _ := os.ReadFile(config.LimitsPath(h.dir))
+	if !bytes.Contains(raw, []byte("min_concurrent = 8")) {
+		t.Fatalf("overlay lacks min_concurrent:\n%s", raw)
+	}
+	if code, _ := h.put(t, `"min_concurrent":65`); code != http.StatusBadRequest {
+		t.Fatalf("min_concurrent 65 = %d", code)
+	}
+
+	// With a setter wired, log_level applies live and is never pending.
+	var levels []string
+	s := New(Deps{Engine: engine.New(nil, nil, nil), Governor: servingGovernor(t), Log: quietLog(), Token: testToken,
+		Settings: SettingsDeps{Boot: SettingsValues{LogLevel: "info"}, SetLogLevel: func(l string) { levels = append(levels, l) }}})
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+	var got gen.Limits
+	if code := apiDo(t, srv, http.MethodPut, "/api/v1/limits", "{"+baseLimits+`,"log_level":"debug"}`, &got); code != http.StatusOK {
+		t.Fatalf("PUT log_level = %d", code)
+	}
+	if l := settingsByKey(t, got)["log_level"]; l.Apply != gen.Live || l.PendingRestart || l.Effective != nil || l.Configured != "debug" {
+		t.Fatalf("live log_level = %+v", l)
+	}
+	if len(levels) != 1 || levels[0] != "debug" {
+		t.Fatalf("SetLogLevel calls = %v", levels)
 	}
 }

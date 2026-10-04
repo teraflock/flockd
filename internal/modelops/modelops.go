@@ -89,6 +89,9 @@ type Service struct {
 	// ContextLength is the operator's runtime.context_length pin on
 	// per-slot context (0 = planned from the budget).
 	ContextLength int
+	// MinConcurrent mirrors budget.min_concurrent: the slot floor chat
+	// models start at (0 = auto; see PlanLimits).
+	MinConcurrent int
 	// OnUnloaded is called after any unload (operator, idle, memory
 	// pressure) with the model id; the assign service reports `cached` to
 	// the coordinator from it. May be nil.
@@ -113,6 +116,9 @@ type Service struct {
 	catalogTried time.Time
 	downloads    map[string]context.CancelFunc
 	loading      map[string]bool
+	// drainingMB is the memory of instances replaced by a resize that are
+	// still finishing their requests (scale.go).
+	drainingMB int64
 	// plan is the live plan limits once SetPlanLimits has been called
 	// (planSet); before that the exported fields above are read.
 	plan    PlanLimits
@@ -477,6 +483,14 @@ func (s *Service) LoadInstanceOrigin(ctx context.Context, id, origin string) (rt
 		// what it is: no KV cache, one batch buffer (memory.DecisionPlanInput).
 		in = memory.DecisionPlanInput(in, strings.Contains(strings.ToLower(arch), "bert"), strings.ToLower(spec.Family))
 	}
+	// Chat and embedding models start at the slot floor and follow demand
+	// from there up to the ceiling (flockd#54, scale.go); a decision
+	// model keeps its fixed plan.
+	scalable := !spec.Decision
+	if scalable {
+		in.Slots = lim.floor(s.Hardware)
+	}
+	base := in // the plan input without the budget: what a resize re-plans from
 	minEstimate := in.EstimateAt(memory.FloorContext(in))
 
 	s.admitMu.Lock()
@@ -521,9 +535,10 @@ func (s *Service) LoadInstanceOrigin(ctx context.Context, id, origin string) (rt
 		s.loads = map[string]*loadInfo{}
 	}
 	s.loads[id] = &loadInfo{Origin: origin, EstimateMB: estimate, LoadedAt: time.Now(), VRAMSeq: s.vramSampleSeq,
-		Limits: lim, Slots: plan.Slots, CtxPerSlot: plan.CtxPerSlot}
+		Limits: lim, Slots: plan.Slots, CtxPerSlot: plan.CtxPerSlot,
+		Spec: spec, Plan: base, Scalable: scalable, Resized: time.Now()}
 	s.mu.Unlock()
-	s.Eng.Register(spec, inst)
+	s.Eng.RegisterSlots(spec, inst, plan.Slots)
 	if s.OnLoaded != nil {
 		s.OnLoaded(inst)
 	}
@@ -561,6 +576,26 @@ type PlanLimits struct {
 	// MaxContext, MinContext and ContextLength are runtime.max_context,
 	// min_context and context_length.
 	MaxContext, MinContext, ContextLength int
+	// MinConcurrent is budget.min_concurrent: the slots a chat model
+	// starts with and shrinks back to (flockd#54). 0 = auto
+	// (DefaultFloorSlots). At or above the ceiling it pins the slot count:
+	// no scaling.
+	MinConcurrent int
+}
+
+// DefaultFloorSlots is the auto slot floor: where a chat model starts.
+// Two slots is the measured sweet spot for a lone stream of requests
+// (1.44x aggregate, ~70 tok/s per request on Metal, flockd#46) at an
+// eighth of the memory of the 16-slot ceiling.
+const DefaultFloorSlots = 2
+
+// floor resolves the slot floor: never above the ceiling.
+func (l PlanLimits) floor(hw *typesv1.CapabilityProfile) int {
+	f := l.MinConcurrent
+	if f <= 0 {
+		f = DefaultFloorSlots
+	}
+	return min(f, l.slots(hw))
 }
 
 // slots resolves the ceiling: the operator's number, or the hardware
@@ -580,7 +615,7 @@ func (s *Service) PlanLimits() PlanLimits {
 		// Constructed with the plain fields (startup, tests): adopt them.
 		// Budget.MaxConcurrent there is already resolved, never 0.
 		return PlanLimits{MaxConcurrent: s.Budget.MaxConcurrent, MaxContext: s.MaxContext,
-			MinContext: s.MinContext, ContextLength: s.ContextLength}
+			MinContext: s.MinContext, ContextLength: s.ContextLength, MinConcurrent: s.MinConcurrent}
 	}
 	return s.plan
 }
@@ -591,12 +626,15 @@ func (s *Service) SetPlanLimits(l PlanLimits) {
 	s.mu.Lock()
 	s.plan, s.planSet = l, true
 	s.mu.Unlock()
-	s.log().Info("plan limits changed", "max_concurrent", l.MaxConcurrent, "max_context", l.MaxContext,
+	s.log().Info("plan limits changed", "max_concurrent", l.MaxConcurrent, "min_concurrent", l.MinConcurrent, "max_context", l.MaxContext,
 		"min_context", l.MinContext, "context_length", l.ContextLength)
 }
 
 // SlotCeiling is the resolved slot ceiling of the current plan limits.
 func (s *Service) SlotCeiling() int { return s.PlanLimits().slots(s.Hardware) }
+
+// SlotFloor is the resolved slot floor of the current plan limits.
+func (s *Service) SlotFloor() int { return s.PlanLimits().floor(s.Hardware) }
 
 // Layout is the slot and context layout a loaded model runs with.
 type Layout struct {

@@ -353,7 +353,8 @@ export interface paths {
          *     - `model_progress`: `{model, received_bytes, total_bytes}` during
          *       downloads (throttled).
          *     - `models_changed`: `{model, change}` where change is
-         *       downloaded|loading|loaded|load_failed|unloaded|default, or
+         *       downloaded|loading|loaded|load_failed|unloaded|default|resized
+         *       (`resized`: the model's slot count changed to follow demand), or
          *       `{change: catalog}` when a refreshed catalog differs from the one
          *       held. `loading` is a runtime starting (weights being read into
          *       memory); it ends with `loaded` or `load_failed`.
@@ -746,6 +747,10 @@ export interface components {
              * @description Measured memory footprint; present only while loaded.
              */
             loaded_mb?: number;
+            /** @description Present while loaded: requests the model serves at once right now. For a chat model it moves between `min_concurrent` and `max_concurrent` with demand. */
+            slots?: number;
+            /** @description Present while loaded; tokens of context each request gets. */
+            context_per_slot?: number;
             /**
              * Format: date-time
              * @description Present while loaded and not serving; the daemon unloads the instance after `idle_unload_seconds` (default model exempt).
@@ -917,8 +922,10 @@ export interface components {
             max_ram_mb?: number;
             /** @description Unload a loaded model after this long without a request (0 = never; default model exempt). Omitted on PUT = unchanged. */
             idle_unload_seconds?: number;
-            /** @description Most requests one model serves at once (`budget.max_concurrent`): the ceiling on a model's slots and on mesh dispatches to this node. 0 = auto (16 with a GPU or unified memory, 2 on CPU). Every slot holds its own context in memory, so fewer slots leave room for more models. Applied by restarting idle models; a busy one changes at its next load. Omitted on PUT = unchanged. */
+            /** @description Most requests one model serves at once (`budget.max_concurrent`): the ceiling on a model's slots and on mesh dispatches to this node. 0 = auto (16 with a GPU or unified memory, 2 on CPU). A chat model starts at `min_concurrent` slots and grows toward this ceiling under demand; every slot holds its own context in memory, so a lower ceiling leaves room for more models. Applied by restarting idle models; a busy one changes at its next load. Omitted on PUT = unchanged. */
             max_concurrent?: number;
+            /** @description Slots a chat model starts with (`budget.min_concurrent`). The node adds slots, up to `max_concurrent`, while requests are waiting, and gives them back when demand is gone or another model needs the memory. 0 = auto (2). Set it to `max_concurrent` (or higher) to pin the slot count. Applied like `max_concurrent`. Omitted on PUT = unchanged. */
+            min_concurrent?: number;
             /** @description Largest context, in tokens, a single request gets (`runtime.max_context`); 0 = the model's own window. Memory per model grows with slots x context. 0, or 1024 and up. Applied like `max_concurrent`. Omitted on PUT = unchanged. */
             max_context?: number;
             /** @description Smallest context a request is given (`runtime.min_context`): when memory is short the node gives up slots before going below it. 0 = 8192; otherwise 256 and up, and not above `max_context`. Applied like `max_concurrent`. Omitted on PUT = unchanged. */
@@ -934,7 +941,7 @@ export interface components {
             /** @description Require the bearer token on the local inference routes (`/v1/*`) too (`local_api.require_auth_v1`). Off, any program on this machine can use the loaded models without a key. Applied immediately. Omitted on PUT = unchanged. */
             require_auth_v1?: boolean;
             /**
-             * @description Daemon log verbosity (`log.level`). Takes effect after a daemon restart. Omitted on PUT = unchanged.
+             * @description Daemon log verbosity (`log.level`). Applied immediately. Omitted on PUT = unchanged.
              * @enum {string}
              */
             log_level?: "debug" | "info" | "warn" | "error";

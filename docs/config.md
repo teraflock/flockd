@@ -70,6 +70,13 @@ mock_tokens_per_sec = 120
 # tokens, causal ones (Kev, Clef) 2 slots of up to 8192. A longer prompt
 # is a 422. context_length below raises (pins) it for every model.
 #
+# Slots follow demand (flockd#54): a chat or embedding model loads with
+# budget.min_concurrent slots (auto 2), grows toward budget.max_concurrent
+# when requests have been waiting for a few seconds, and shrinks back after
+# five quiet minutes or when another model needs the memory. A resize
+# starts a second runtime with the new layout and swaps it in; requests in
+# flight finish where they are. Set min_concurrent = max_concurrent to pin.
+#
 # Pin per-request context exactly (0 = planned). Slots still adapt.
 context_length = 0
 # Cap on per-request context, in tokens (0 = the model's training window).
@@ -115,8 +122,11 @@ max_ram_mb       = 0    # memory budget for LOADED models. 0 = auto: half of
                         # as `cached`. Live via PUT /api/v1/limits max_ram_mb.
 max_concurrent   = 0    # slot ceiling per model and the node's dispatch cap;
                         # 0 = auto by accelerator class (16 with a GPU or
-                        # unified memory, 2 CPU-only). Memory decides the
-                        # actual slots per load; see [runtime] max_context.
+                        # unified memory, 2 CPU-only). Demand and memory
+                        # decide the actual slots; see [runtime] below.
+min_concurrent   = 0    # slot floor: what a chat model starts with and
+                        # shrinks back to; 0 = auto (2). >= max_concurrent
+                        # pins the slot count (no scaling).
 
 [models]
 manifest_path = ""              # local catalog file (teraflock/models YAML/JSON)
@@ -275,6 +285,7 @@ at its next load; **restart** = saved, used from the next daemon start.
 | `models.max_disk_mb` | `max_disk_mb` | common | live |
 | `budget.max_ram_mb` | `max_ram_mb` | common | live |
 | `budget.max_concurrent` | `max_concurrent` | common | reload |
+| `budget.min_concurrent` | `min_concurrent` | advanced | reload |
 | `models.idle_unload_s` | `idle_unload_seconds` | common | live |
 | `governor.yield_grace` | `yield_grace_seconds` | advanced | live |
 | `models.retention_days` | `retention_days` | advanced | live |
@@ -285,7 +296,7 @@ at its next load; **restart** = saved, used from the next daemon start.
 | `models.exclude` | `exclude` | advanced | live |
 | `models.default` | `default_model` | advanced | restart |
 | `local_api.require_auth_v1` | `require_auth_v1` | advanced | live |
-| `log.level` | `log_level` | advanced | restart |
+| `log.level` | `log_level` | advanced | live |
 
 `models.pin` is edited per model (`POST /api/v1/models/{id}/pin`), not here.
 

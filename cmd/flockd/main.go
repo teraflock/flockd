@@ -292,6 +292,7 @@ func run() error {
 			ContextLength: cfg.Runtime.ContextLength,
 			MaxContext:    cfg.Runtime.MaxContext,
 			MinContext:    cfg.Runtime.MinContext,
+			MinConcurrent: cfg.Budget.MinConcurrent,
 		}
 		// Memory admission (plan 17 A): loads must fit budget.max_ram_mb
 		// (0 = auto: half of unified memory); idle instances are unloaded
@@ -398,6 +399,10 @@ func run() error {
 		// A catalog promoted while the daemon runs is picked up without
 		// a restart (conditional refetch every few minutes).
 		go ops.RunCatalogRefresh(ctx, 0)
+		// Slots follow demand between budget.min_concurrent and
+		// budget.max_concurrent (flockd#54).
+		applyDevScaleTimings(log)
+		go ops.RunSlotScaling(ctx)
 	}
 
 	// ---- update check (plan 17 D.2) ----
@@ -600,11 +605,15 @@ func run() error {
 		Token:         token,
 		Settings: localapi.SettingsDeps{
 			Boot: localapi.SettingsValues{
-				MaxConcurrent: cfg.Budget.MaxConcurrent, MaxVRAMPercent: cfg.Budget.MaxVRAMPercent,
+				MaxConcurrent: cfg.Budget.MaxConcurrent, MinConcurrent: cfg.Budget.MinConcurrent, MaxVRAMPercent: cfg.Budget.MaxVRAMPercent,
 				MaxContext: cfg.Runtime.MaxContext, MinContext: cfg.Runtime.MinContext, ContextLength: cfg.Runtime.ContextLength,
 				Exclude: slices.Clone(cfg.Models.Exclude), DefaultModel: cfg.Models.Default, LogLevel: cfg.Log.Level,
 			},
 			Overlay: overlayExtra,
+			SetLogLevel: func(level string) {
+				logging.SetLevel(level)
+				log.Info("log level changed", "level", level)
+			},
 			SetExclude: func(ids []string) {
 				exclude.Store(&ids)
 				log.Info("models.exclude changed", "exclude", ids)
@@ -641,6 +650,32 @@ func run() error {
 		"dashboard", "http://"+cfg.LocalAPI.Listen+"/",
 		"openai_base_url", "http://"+cfg.LocalAPI.Listen+"/v1")
 	return srv.ListenAndServe(ctx, cfg.LocalAPI.Listen)
+}
+
+// applyDevScaleTimings shortens the slot-scaling windows for scratch
+// daemons and measurements: TERAFLOCK_DEV_SCALE_TIMINGS="grow,shrink,cooldown"
+// as Go durations ("2s,20s,5s"). Not a setting: production uses the
+// defaults in internal/modelops/scale.go.
+func applyDevScaleTimings(log *slog.Logger) {
+	v := os.Getenv("TERAFLOCK_DEV_SCALE_TIMINGS")
+	if v == "" {
+		return
+	}
+	parts := strings.Split(v, ",")
+	if len(parts) != 3 {
+		log.Warn("TERAFLOCK_DEV_SCALE_TIMINGS ignored: want grow,shrink,cooldown")
+		return
+	}
+	var d [3]time.Duration
+	for i, p := range parts {
+		var err error
+		if d[i], err = time.ParseDuration(strings.TrimSpace(p)); err != nil {
+			log.Warn("TERAFLOCK_DEV_SCALE_TIMINGS ignored", "err", err)
+			return
+		}
+	}
+	modelops.SetScaleTimings(d[0], d[1], d[2])
+	log.Warn("slot scaling timings overridden (development)", "grow", d[0], "shrink", d[1], "cooldown", d[2])
 }
 
 // meshRunner owns the live tunnel-client lifecycle so enrollment over the

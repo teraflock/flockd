@@ -14,6 +14,7 @@ import (
 	"github.com/teraflock/flockd/internal/governor"
 	"github.com/teraflock/flockd/internal/localapi/gen"
 	"github.com/teraflock/flockd/internal/logging"
+	"github.com/teraflock/flockd/internal/modelops"
 	"github.com/teraflock/flockd/internal/models"
 	"github.com/teraflock/flockd/internal/telemetry"
 	"github.com/teraflock/flockd/internal/update"
@@ -209,8 +210,10 @@ func (s *Server) ListModels(w http.ResponseWriter, _ *http.Request) {
 		}
 	}
 	var loadedMB map[string]int64
+	var layouts map[string]modelops.Layout
 	if s.deps.ModelOps != nil {
 		loadedMB = s.deps.ModelOps.Memory().Models
+		layouts = s.deps.ModelOps.Layouts()
 	}
 	decorate := func(row *gen.ModelRow) {
 		if !row.Loaded {
@@ -218,6 +221,10 @@ func (s *Server) ListModels(w http.ResponseWriter, _ *http.Request) {
 		}
 		if mb, ok := loadedMB[row.Id]; ok && mb > 0 {
 			row.LoadedMb = &mb
+		}
+		if l, ok := layouts[row.Id]; ok && l.Slots > 0 {
+			slots, ctx := l.Slots, l.CtxPerSlot
+			row.Slots, row.ContextPerSlot = &slots, &ctx
 		}
 		if u, ok := s.deps.Engine.Usage(row.Id); ok && u.Inflight == 0 {
 			t := u.LastUsed
