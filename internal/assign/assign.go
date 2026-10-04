@@ -51,6 +51,7 @@ import (
 	"github.com/teraflock/flockd/internal/events"
 	"github.com/teraflock/flockd/internal/modelops"
 	"github.com/teraflock/flockd/internal/models"
+	rt "github.com/teraflock/flockd/internal/runtime"
 )
 
 // States reported to the coordinator and shown in the local API.
@@ -220,6 +221,21 @@ func (s *Service) admit(ctx context.Context, spec *typesv1.ModelSpec, stage bool
 		// The coordinator and this node disagree on what the artifact is.
 		// Refusing is the hash-pinning story (SPEC §6) doing its job.
 		s.conclude(id, StateFailed, "catalog sha256 differs from the coordinator's")
+		return
+	}
+	// A decision model on a runtime build that predates decision support
+	// can never load: refuse up front, with the reason, instead of
+	// downloading an artifact llama-server will not recognise. Either
+	// side saying `decision` counts — this node's catalog may predate the
+	// field.
+	check := entry
+	check.Decision = entry.Decision || spec.GetDecision()
+	if err := s.Ops.CheckRuntime(ctx, check); err != nil {
+		if errors.Is(err, rt.ErrRuntimeTooOld) {
+			s.conclude(id, StateDeclined, err.Error())
+		} else {
+			s.conclude(id, StateFailed, "runtime unavailable: "+err.Error())
+		}
 		return
 	}
 	onDisk := s.Mgr != nil && s.Mgr.Has(id)

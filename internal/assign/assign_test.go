@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -637,5 +638,49 @@ func TestReportsAndModelStatesCarryOrigin(t *testing.T) {
 	h.svc.Apply(context.Background(), assignMsg(h.spec("theirs")))
 	if st := h.svc.States(); len(st) != 1 || st[0].GetOrigin() != models.OriginMesh || st[0].GetState() != StateAssigned {
 		t.Fatalf("queued States() = %v", st)
+	}
+}
+
+// oldRuntime is a loader whose build predates decision support, the way
+// the llama.cpp adapter answers on the b9892 pin.
+type oldRuntime struct{ *rt.MockRuntime }
+
+func (oldRuntime) SupportsModel(_ context.Context, m rt.ModelSpec) error {
+	if m.Decision {
+		return fmt.Errorf("%w: %s is a decision model and needs llama.cpp b11382 or newer, this node runs llamacpp-b9892-4", rt.ErrRuntimeTooOld, m.ID)
+	}
+	return nil
+}
+
+// A decision model placed on a node whose runtime build predates decision
+// support is refused up front — declined with the reason, nothing
+// downloaded — while other models are placed as usual.
+func TestDecisionAssignmentRefusedOnOldRuntime(t *testing.T) {
+	h := newHarness(t, 0, map[string][]byte{"laya": []byte("gguf laya"), "chat": []byte("gguf chat")})
+	h.ops.Loader = oldRuntime{rt.NewMockRuntime(0)}
+
+	// The coordinator's spec says decision; this node's catalog file has
+	// no such field (it predates it). Either side is enough.
+	spec := h.spec("laya")
+	spec.Decision = true
+	h.svc.Apply(context.Background(), assignMsg(spec, h.spec("chat")))
+
+	waitFor(t, "chat ready", func() bool { return h.loaded("chat") })
+	waitFor(t, "laya declined", func() bool { return len(h.rep.states("laya")) == 1 })
+	if st := h.rep.states("laya"); st[0] != StateDeclined {
+		t.Fatalf("laya reports = %v, want declined", st)
+	}
+	p, ok := h.svc.Get("laya")
+	if !ok || !strings.Contains(p.Error, "b11382") || !strings.Contains(p.Error, "llamacpp-b9892-4") {
+		t.Fatalf("declined reason = %+v", p)
+	}
+	if h.svc.Mgr.Has("laya") || h.loaded("laya") {
+		t.Fatal("refused decision model was downloaded or loaded")
+	}
+	// A stage (download only) is refused the same way.
+	h.svc.Apply(context.Background(), &tunnelv1.ModelAssignment{Stage: []*typesv1.ModelSpec{spec}})
+	waitFor(t, "stage declined", func() bool { return len(h.rep.states("laya")) == 2 })
+	if st := h.rep.states("laya"); st[1] != StateDeclined || h.svc.Mgr.Has("laya") {
+		t.Fatalf("stage reports = %v", st)
 	}
 }

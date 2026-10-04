@@ -90,3 +90,32 @@ func TestLoadCatalogFromPathAndURL(t *testing.T) {
 		t.Fatal("expected error with no source")
 	}
 }
+
+// The flat catalog JSON carries `decision` next to `embeddings` on every
+// entry; it reaches the proto ModelSpec, and catalogs that predate the
+// field read as false.
+func TestCatalogDecisionFlag(t *testing.T) {
+	c, err := ParseCatalog([]byte(`{"models":[
+	  {"id":"laya","family":"laya","sha256":"aa","context_length":512,"embeddings":false,"decision":true},
+	  {"id":"chat","family":"qwen","sha256":"bb","embeddings":false,"decision":false},
+	  {"id":"old","family":"qwen","sha256":"cc"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	laya, _ := c.Find("laya")
+	if !laya.Decision || !laya.Spec().GetDecision() || laya.Spec().GetEmbeddings() {
+		t.Errorf("laya = %+v spec = %v", laya, laya.Spec())
+	}
+	for _, id := range []string{"chat", "old"} {
+		if m, _ := c.Find(id); m.Decision || m.Spec().GetDecision() {
+			t.Errorf("%s reads as a decision model", id)
+		}
+	}
+	y, err := ParseCatalog([]byte("models:\n  - id: julia-1\n    sha256: dd\n    decision: true\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, _ := y.Find("julia-1"); !m.Decision {
+		t.Error("yaml decision flag lost")
+	}
+}

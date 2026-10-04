@@ -42,6 +42,10 @@ type CatalogModel struct {
 	PayoutClass   string  `yaml:"payout_class" json:"payout_class"`
 	ContextLength uint32  `yaml:"context_length" json:"context_length"`
 	Embeddings    bool    `yaml:"embeddings" json:"embeddings"`
+	// Decision marks a typed decision model (served for /v1/systemone,
+	// never for chat). Mutually exclusive with Embeddings; absent (false)
+	// in catalogs that predate the field.
+	Decision bool `yaml:"decision" json:"decision"`
 	// Parts lists the shards of a sharded GGUF in series order
 	// (<name>-00001-of-0000N.gguf ...), each with its own hash. Empty for a
 	// single-file model. When set, ArtifactURL is empty, SizeBytes is the
@@ -83,6 +87,7 @@ func (m CatalogModel) Spec() *typesv1.ModelSpec {
 		PayoutClass:   m.PayoutClass,
 		ContextLength: m.ContextLength,
 		Embeddings:    m.Embeddings,
+		Decision:      m.Decision,
 	}
 	for _, p := range m.Parts {
 		spec.Parts = append(spec.Parts, p.proto())

@@ -294,6 +294,11 @@ func (s *Service) LoadInstanceOrigin(ctx context.Context, id, origin string) (rt
 		return nil, fmt.Errorf("%w: %q", ErrUnknownModel, id)
 	}
 	pspec := entry.Spec()
+	// Refuse before downloading what the installed runtime build cannot
+	// serve (a decision model on a llama.cpp build without /v1/systemone).
+	if err := s.CheckRuntime(ctx, entry); err != nil {
+		return nil, err
+	}
 	art, err := s.Mgr.EnsureArtifact(ctx, pspec, origin)
 	if err != nil {
 		return nil, err
@@ -316,6 +321,7 @@ func (s *Service) LoadInstanceOrigin(ctx context.Context, id, origin string) (rt
 		SizeBytes:     art.SizeBytes,
 		ContextLength: int(pspec.GetContextLength()),
 		Embeddings:    pspec.GetEmbeddings(),
+		Decision:      pspec.GetDecision(),
 	}
 
 	// Footprint estimate: on-disk size (the store's, then a stat — not
@@ -396,6 +402,19 @@ func (s *Service) LoadInstanceOrigin(ctx context.Context, id, origin string) (rt
 	}
 	s.Activity.Record(activity.KindLoaded, actor, id, fmt.Sprintf("loaded %s (~%d MB)", id, estimate), "")
 	return inst, nil
+}
+
+// CheckRuntime reports whether the runtime build this node runs can serve
+// a catalog model, without downloading or loading anything. It returns an
+// error wrapping rt.ErrRuntimeTooOld for a decision model on a llama.cpp
+// build that predates decision support (the reason names both builds),
+// and nil when the loader cannot tell (mock, an operator's own binary).
+func (s *Service) CheckRuntime(ctx context.Context, m models.CatalogModel) error {
+	sup, ok := s.Loader.(rt.ModelSupporter)
+	if !ok {
+		return nil
+	}
+	return sup.SupportsModel(ctx, rt.ModelSpec{ID: m.ID, Embeddings: m.Embeddings, Decision: m.Decision})
 }
 
 // slotCeiling is the most slots a load may plan: the operator's

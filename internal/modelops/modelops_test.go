@@ -216,3 +216,43 @@ func TestLoadPassesThePlannedLayout(t *testing.T) {
 		t.Fatalf("pinned layout = %d × %d, want 2 × 8192", loader2.lastBudget.Slots, loader2.lastBudget.ContextTokens)
 	}
 }
+
+// tooOldLoader refuses decision models the way the llama.cpp adapter does
+// on a build that predates /v1/systemone.
+type tooOldLoader struct{ *rt.MockRuntime }
+
+func (tooOldLoader) SupportsModel(_ context.Context, m rt.ModelSpec) error {
+	if m.Decision {
+		return fmt.Errorf("%w: %s needs llama.cpp b11382 or newer", rt.ErrRuntimeTooOld, m.ID)
+	}
+	return nil
+}
+
+func TestLoadRefusesDecisionModelOnOldRuntime(t *testing.T) {
+	svc, eng := harness(t, "laya", []byte("gguf"))
+	raw, err := os.ReadFile(svc.ManifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(svc.ManifestPath, append(raw, []byte("    decision: true\n")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	svc.Loader = tooOldLoader{rt.NewMockRuntime(0)}
+	err = svc.Load(context.Background(), "laya")
+	if !errors.Is(err, rt.ErrRuntimeTooOld) {
+		t.Fatalf("load err = %v, want ErrRuntimeTooOld", err)
+	}
+	if svc.Mgr.Has("laya") || len(eng.Models()) != 0 {
+		t.Fatal("refused decision model was downloaded or loaded")
+	}
+
+	// On a runtime that supports it, the spec handed to the loader says
+	// decision.
+	svc.Loader = rt.NewMockRuntime(0)
+	if err := svc.Load(context.Background(), "laya"); err != nil {
+		t.Fatal(err)
+	}
+	if m := eng.Models(); len(m) != 1 || !m[0].Spec.Decision || m[0].Spec.Embeddings {
+		t.Fatalf("loaded = %+v", m)
+	}
+}
