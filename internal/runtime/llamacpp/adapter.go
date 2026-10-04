@@ -574,6 +574,7 @@ func (i *instance) decide(ctx context.Context, req rt.CompletionRequest) (rt.Tok
 		return nil, fmt.Errorf("llamacpp: build request: %w", err)
 	}
 	hreq.Header.Set("Content-Type", "application/json")
+	markReplayable(hreq)
 	resp, err := i.client.Do(hreq)
 	if err != nil {
 		return nil, fmt.Errorf("llamacpp: %s: %w", path, err)
@@ -635,6 +636,17 @@ func runtimeErrorMessage(raw []byte) string {
 	return msg
 }
 
+// markReplayable lets net/http resend a POST when the kept-alive
+// connection it picked had already been closed by llama-server (its
+// keep-alive is 5 s): without it a request that follows a few idle seconds
+// can fail at once with "EOF" / "server closed idle connection", before
+// llama-server saw a byte of it. An Idempotency-Key header entry with no
+// values marks the request as safe to retry and is not sent on the wire;
+// the transport only retries when no response was received at all.
+func markReplayable(req *http.Request) {
+	req.Header["Idempotency-Key"] = []string{}
+}
+
 // postStream is post for the one caller that hands the response to a
 // goroutine (generate's SSE reader closes the body when the stream ends).
 // bodyclose cannot follow a Close on another goroutine, so the hand-off
@@ -655,6 +667,7 @@ func (i *instance) post(ctx context.Context, path string, body any) (*http.Respo
 		return nil, fmt.Errorf("llamacpp: build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	markReplayable(req)
 	resp, err := i.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("llamacpp: %s: %w", path, err)

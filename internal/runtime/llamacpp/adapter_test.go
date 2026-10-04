@@ -255,3 +255,38 @@ func TestAdapterSelectedAccelFollowsTheResolvedBuild(t *testing.T) {
 		t.Errorf("empty adapter: SelectedAccel = %q", got)
 	}
 }
+
+// llama-server closes kept-alive connections after a few idle seconds; a
+// POST that picks such a connection must be resent, not failed.
+func TestPostSurvivesAClosedKeepAliveConnection(t *testing.T) {
+	var hits int
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits++
+		_, _ = w.Write([]byte(`{"data":[{"embedding":[0.1]}],"usage":{"prompt_tokens":1}}`))
+	}))
+	srv.Start()
+	defer srv.Close()
+	inst := testInstance(t, srv.URL)
+	embed := func() error {
+		ts, err := inst.Complete(context.Background(), rt.CompletionRequest{Kind: rt.KindEmbedding, EmbeddingInput: []string{"a"}})
+		if err != nil {
+			return err
+		}
+		_, err = ts.Recv()
+		return err
+	}
+	if err := embed(); err != nil {
+		t.Fatal(err)
+	}
+	// The server drops its idle connections; the client still holds one.
+	srv.CloseClientConnections()
+	for n := range 20 {
+		if err := embed(); err != nil {
+			t.Fatalf("request %d after the server closed the idle connection: %v", n, err)
+		}
+		srv.CloseClientConnections()
+	}
+	if hits != 21 {
+		t.Fatalf("server saw %d requests, want 21", hits)
+	}
+}
