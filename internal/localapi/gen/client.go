@@ -172,7 +172,7 @@ type ClientInterface interface {
 
 	// SetDefaultModel Serve this model when a request names none (must be loaded)
 	//
-	// Only a chat model can be the default: a decision or embedding model is refused with `400`. With no chat model loaded the node has no default (`status.default_model` is empty).
+	// Takes effect at once and is remembered: the choice is saved as `default_model` (limits.toml), so it is also the model the daemon loads, and makes the default, when it next starts. Only a chat model can be the default: a decision or embedding model is refused with `400`. With no chat model loaded the node has no default (`status.default_model` is empty).
 	//
 	// Corresponds with POST /api/v1/models/{id}/default (the `SetDefaultModel` operationId).
 	SetDefaultModel(ctx context.Context, id ModelID, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -453,7 +453,7 @@ func (c *Client) DeleteModel(ctx context.Context, id ModelID, reqEditors ...Requ
 
 // SetDefaultModel Serve this model when a request names none (must be loaded)
 //
-// Only a chat model can be the default: a decision or embedding model is refused with `400`. With no chat model loaded the node has no default (`status.default_model` is empty).
+// Takes effect at once and is remembered: the choice is saved as `default_model` (limits.toml), so it is also the model the daemon loads, and makes the default, when it next starts. Only a chat model can be the default: a decision or embedding model is refused with `400`. With no chat model loaded the node has no default (`status.default_model` is empty).
 //
 // Corresponds with POST /api/v1/models/{id}/default (the `SetDefaultModel` operationId).
 func (c *Client) SetDefaultModel(ctx context.Context, id ModelID, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -1467,7 +1467,7 @@ type ClientWithResponsesInterface interface {
 
 	// SetDefaultModelWithResponse Serve this model when a request names none (must be loaded)
 	//
-	// Only a chat model can be the default: a decision or embedding model is refused with `400`. With no chat model loaded the node has no default (`status.default_model` is empty).
+	// Takes effect at once and is remembered: the choice is saved as `default_model` (limits.toml), so it is also the model the daemon loads, and makes the default, when it next starts. Only a chat model can be the default: a decision or embedding model is refused with `400`. With no chat model loaded the node has no default (`status.default_model` is empty).
 	//
 	// Returns a wrapper object for the known response body format(s).
 	//
@@ -2833,7 +2833,7 @@ func (c *ClientWithResponses) DeleteModelWithResponse(ctx context.Context, id Mo
 
 // SetDefaultModelWithResponse Serve this model when a request names none (must be loaded)
 //
-// Only a chat model can be the default: a decision or embedding model is refused with `400`. With no chat model loaded the node has no default (`status.default_model` is empty).
+// Takes effect at once and is remembered: the choice is saved as `default_model` (limits.toml), so it is also the model the daemon loads, and makes the default, when it next starts. Only a chat model can be the default: a decision or embedding model is refused with `400`. With no chat model loaded the node has no default (`status.default_model` is empty).
 //
 // Returns a wrapper object for the known response body format(s).
 //

@@ -182,5 +182,8 @@ func (s *Server) SetDefaultModel(w http.ResponseWriter, _ *http.Request, id gen.
 		writeOpenAIError(w, status, "invalid_request_error", err.Error())
 		return
 	}
+	// Remembered: the next start loads this model and makes it the
+	// default again (models.default in limits.toml).
+	s.rememberDefault(id)
 	writeJSON(w, http.StatusOK, gen.Ok{Ok: true})
 }

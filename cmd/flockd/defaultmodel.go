@@ -2,9 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync/atomic"
 	"time"
+
+	"github.com/teraflock/flockd/internal/modelops"
+	"github.com/teraflock/flockd/internal/models"
+	rt "github.com/teraflock/flockd/internal/runtime"
 )
 
 // bootState is what the local API reports while the node has nothing
@@ -24,7 +29,7 @@ func (b *bootState) DefaultPending() bool { return b != nil && b.pending.Load() 
 // network hours later, and a running daemon should notice.
 const (
 	defaultLoadRetryFirst = 5 * time.Second
-	defaultLoadRetryCap = 5 * time.Minute
+	defaultLoadRetryCap   = 5 * time.Minute
 )
 
 // retryUntilLoaded calls load until it succeeds or ctx ends, sleeping
@@ -60,4 +65,29 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	case <-t.C:
 		return true
 	}
+}
+
+// defaultFallback decides whether start-up should give up on the default
+// model `want` and load `base` (the default as config.toml or the built-in
+// default has it) instead. That is the case when want was chosen through
+// the API (it differs from base) and can never work as the default: it is
+// not in the catalog, its id is not valid, the runtime build cannot serve
+// it, or it loaded but is not a chat model (notChat).
+// Transient failures — no network, no memory yet — keep retrying want.
+// It returns the model to load next and the reason, or "" to carry on.
+func defaultFallback(want, base string, loadErr error, notChat bool) (next, why string) {
+	if base == "" || base == want {
+		return "", ""
+	}
+	switch {
+	case loadErr == nil && notChat:
+		return base, want + " is not a chat model"
+	case errors.Is(loadErr, modelops.ErrUnknownModel):
+		return base, want + " is not in the catalog"
+	case errors.Is(loadErr, models.ErrInvalidID):
+		return base, want + " is not a valid model id"
+	case errors.Is(loadErr, rt.ErrRuntimeTooOld):
+		return base, loadErr.Error()
+	}
+	return "", ""
 }

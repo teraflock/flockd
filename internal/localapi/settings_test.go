@@ -7,16 +7,20 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/teraflock/flockd/internal/config"
 	"github.com/teraflock/flockd/internal/engine"
 	"github.com/teraflock/flockd/internal/localapi/gen"
 	"github.com/teraflock/flockd/internal/modelops"
+	"github.com/teraflock/flockd/internal/models"
 	rt "github.com/teraflock/flockd/internal/runtime"
+	"github.com/teraflock/flockd/internal/telemetry"
 	typesv1 "github.com/teraflock/proto/gen/go/flock/types/v1"
 )
 
@@ -146,9 +150,9 @@ func TestSettingsCoverEveryLimitsField(t *testing.T) {
 	}
 	for key, apply := range map[string]gen.LimitSettingApply{
 		"max_concurrent": gen.Reload, "max_context": gen.Reload, "min_context": gen.Reload, "context_length": gen.Reload,
-		"max_vram_percent": gen.Restart, "default_model": gen.Restart, "log_level": gen.Restart, // no SetLogLevel wired here
+		"max_vram_percent": gen.Restart, "default_model": gen.Live, "log_level": gen.Restart, // no SetLogLevel wired here
 		"min_concurrent": gen.Reload,
-		"exclude": gen.Live, "require_auth_v1": gen.Live, "serve_policy": gen.Live, "max_ram_mb": gen.Live,
+		"exclude":        gen.Live, "require_auth_v1": gen.Live, "serve_policy": gen.Live, "max_ram_mb": gen.Live,
 	} {
 		if meta[key].Apply != apply {
 			t.Errorf("%s apply = %q, want %q", key, meta[key].Apply, apply)
@@ -231,7 +235,9 @@ func TestSettingsEffectiveAndApply(t *testing.T) {
 		t.Fatalf("PUT = %d", code)
 	}
 	meta = settingsByKey(t, lim)
-	if d := meta["default_model"]; *lim.DefaultModel != "" || !d.PendingRestart || d.Effective != "llama" || d.Configured != "" {
+	// default_model is live: "none" is saved for the next start, never
+	// pending; the default still running shows as the effective value.
+	if d := meta["default_model"]; *lim.DefaultModel != "" || d.PendingRestart || d.Apply != gen.Live || d.Effective != "chat" || d.Configured != "" {
 		t.Fatalf("default_model = %+v", d)
 	}
 	if l := meta["log_level"]; !l.PendingRestart || l.Effective != "info" || l.Configured != "debug" {
@@ -379,5 +385,167 @@ func TestSettingsSlotFloorAndLiveLogLevel(t *testing.T) {
 	}
 	if len(levels) != 1 || levels[0] != "debug" {
 		t.Fatalf("SetLogLevel calls = %v", levels)
+	}
+}
+
+// "Make default" lasts: it switches the running default at once and is
+// saved as default_model, which is what the next start loads. The setting
+// reports configured == effective and nothing pending.
+func TestMakeDefaultPersists(t *testing.T) {
+	srv, dir, deps := newOpsServerDeps(t)
+	_ = srv
+	deps.Governor = servingGovernor(t)
+	deps.Settings.Boot = SettingsValues{DefaultModel: "mock-8b-instruct"}
+	s := New(deps)
+	gsrv := httptest.NewServer(s.Handler())
+	defer gsrv.Close()
+	eng := deps.Engine
+	for _, spec := range []rt.ModelSpec{{ID: "second-chat"}, {ID: "laya", Decision: true}, {ID: "embed", Embeddings: true}} {
+		inst, err := rt.NewMockRuntime(0).Load(context.Background(), spec, rt.ResourceBudget{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		eng.Register(spec, inst)
+	}
+	getDefault := func() (gen.Limits, gen.LimitSetting) {
+		var lim gen.Limits
+		if code := apiDo(t, gsrv, http.MethodGet, "/api/v1/limits", "", &lim); code != http.StatusOK {
+			t.Fatalf("GET limits = %d", code)
+		}
+		return lim, settingsByKey(t, lim)["default_model"]
+	}
+	if _, d := getDefault(); d.Configured != "mock-8b-instruct" || d.Effective != nil || d.PendingRestart || d.Apply != gen.Live {
+		t.Fatalf("before: %+v", d)
+	}
+
+	// Make default: live now...
+	if code := apiDo(t, gsrv, http.MethodPost, "/api/v1/models/second-chat/default", "", nil); code != http.StatusOK {
+		t.Fatalf("make default = %d", code)
+	}
+	if eng.DefaultModel() != "second-chat" {
+		t.Fatalf("running default = %q", eng.DefaultModel())
+	}
+	// ...reported as configured == effective, nothing pending...
+	lim, d := getDefault()
+	if *lim.DefaultModel != "second-chat" || d.Configured != "second-chat" || d.Effective != nil || d.PendingRestart {
+		t.Fatalf("after make default: %v %+v", *lim.DefaultModel, d)
+	}
+	// ...and what the next start reads.
+	raw, err := os.ReadFile(config.LimitsPath(dir))
+	if err != nil {
+		t.Fatalf("limits.toml not written: %v", err)
+	}
+	if !bytes.Contains(raw, []byte(`default = "second-chat"`)) {
+		t.Fatalf("limits.toml lacks the default:\n%s", raw)
+	}
+	cfgPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(cfgPath, []byte("data_dir = \""+filepath.ToSlash(dir)+"\"\n[models]\ndefault = \"from-config\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Models.Default != "second-chat" || cfg.Models.BaseDefault != "from-config" {
+		t.Fatalf("next start: default=%q base=%q", cfg.Models.Default, cfg.Models.BaseDefault)
+	}
+	extra, _ := config.LoadLimitsExtra(dir)
+	if extra.DefaultModel == nil || *extra.DefaultModel != "second-chat" {
+		t.Fatalf("overlay default = %v", extra.DefaultModel)
+	}
+
+	// A refused make-default (decision / embedding / not loaded) changes
+	// nothing, live or saved.
+	for id, want := range map[string]int{"laya": http.StatusBadRequest, "embed": http.StatusBadRequest, "nope": http.StatusNotFound} {
+		if code := apiDo(t, gsrv, http.MethodPost, "/api/v1/models/"+id+"/default", "", nil); code != want {
+			t.Errorf("make default %s = %d, want %d", id, code, want)
+		}
+	}
+	if _, d := getDefault(); eng.DefaultModel() != "second-chat" || d.Configured != "second-chat" {
+		t.Fatalf("a refused make-default changed the default: %q %+v", eng.DefaultModel(), d)
+	}
+
+	// The same through the limits API: live for a loaded chat model,
+	// refused for a decision or embedding model, saved either way it is
+	// accepted.
+	put := func(extra string) int {
+		return apiDo(t, gsrv, http.MethodPut, "/api/v1/limits", "{"+baseLimits+","+extra+"}", nil)
+	}
+	if code := put(`"default_model":"mock-8b-instruct"`); code != http.StatusOK || eng.DefaultModel() != "mock-8b-instruct" {
+		t.Fatalf("PUT default_model = %d, running default %q", code, eng.DefaultModel())
+	}
+	for _, id := range []string{"laya", "embed"} {
+		if code := put(`"default_model":"` + id + `"`); code != http.StatusBadRequest {
+			t.Errorf("PUT default_model %s = %d, want 400", id, code)
+		}
+	}
+	// On disk but not loaded: loaded, then made the default.
+	if err := deps.ModelOps.Fetch(context.Background(), "cat-model", models.OriginOperator); err != nil {
+		t.Fatal(err)
+	}
+	if code := put(`"default_model":"cat-model"`); code != http.StatusOK {
+		t.Fatalf("PUT default_model cat-model = %d", code)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for eng.DefaultModel() != "cat-model" {
+		if time.Now().After(deadline) {
+			t.Fatalf("a default on disk was not loaded and switched to; running default %q", eng.DefaultModel())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// "none": saved for the next start; the running default stays and is
+	// shown as the effective value.
+	if code := put(`"default_model":"none"`); code != http.StatusOK {
+		t.Fatalf("PUT default_model none = %d", code)
+	}
+	if lim, d := getDefault(); *lim.DefaultModel != "" || d.Effective != "cat-model" || d.PendingRestart {
+		t.Fatalf("after none: %+v", d)
+	}
+	raw, _ = os.ReadFile(config.LimitsPath(dir))
+	if !bytes.Contains(raw, []byte(`default = "none"`)) {
+		t.Fatalf("limits.toml after none:\n%s", raw)
+	}
+}
+
+// Status carries lifetime and session counters side by side.
+func TestStatusLifetimeAndSessionCounters(t *testing.T) {
+	stats := telemetry.NewStats()
+	since := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	stats.Restore(telemetry.Counters{Tokens: 1000, Requests: 10, EarnedMicrocred: 55000, Since: since})
+	eng := engine.New(nil, stats, nil)
+	inst, _ := rt.NewMockRuntime(0).Load(context.Background(), rt.ModelSpec{ID: "chat"}, rt.ResourceBudget{})
+	eng.Register(rt.ModelSpec{ID: "chat"}, inst)
+	s := New(Deps{Engine: eng, Log: quietLog(), Token: testToken, Standalone: true})
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+	resp, err := http.Post(srv.URL+"/v1/chat/completions", "application/json", strings.NewReader(`{"messages":[{"role":"user","content":"hi"}],"max_tokens":5,"seed":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	var st gen.Status
+	if code := apiDo(t, srv, http.MethodGet, "/api/v1/status", "", &st); code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	x := st.Stats
+	if x.SessionRequests != 1 || x.SessionTokens == 0 || x.TotalRequests != 11 || x.TotalTokens != 1000+x.SessionTokens ||
+		x.EarnedMicrocredits != 55000+x.SessionEarnedMicrocredits || !x.LifetimeSince.Equal(since) {
+		t.Fatalf("stats = %+v", x)
+	}
+	// The estimated daily rate is this run's, not the lifetime total over
+	// this run's uptime.
+	var e gen.Earnings
+	if code := apiDo(t, srv, http.MethodGet, "/api/v1/earnings", "", &e); code != http.StatusOK {
+		t.Fatalf("earnings = %d", code)
+	}
+	if e.LifetimeTokens != x.TotalTokens || e.EarnedMicrocredits != x.EarnedMicrocredits {
+		t.Fatalf("earnings = %+v", e)
+	}
+	// The estimated daily rate is this run's earnings over this run's
+	// uptime — not the lifetime total, which would inflate after a restart.
+	got := estimatedEarnings(telemetry.Snapshot{EarnedMicrocred: 100e6, SessionEarnedMicrocred: 1e6, TotalTokens: 5},
+		time.Now().Add(-12*time.Hour), "")
+	if got.EstUsd < 99.99 || got.EstUsd > 100.01 || got.EstUsdPerDay < 1.99 || got.EstUsdPerDay > 2.01 || got.LifetimeTokens != 5 {
+		t.Fatalf("estimated earnings = %+v, want $100 lifetime and ~$2/day from this run", got)
 	}
 }

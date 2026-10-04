@@ -196,6 +196,21 @@ func run() error {
 
 	// ---- models & runtime ----
 	stats := telemetry.NewStats()
+	// Lifetime counters (status.stats.total_*) continue across restarts:
+	// restored here, saved every 30 s and once more on shutdown.
+	statsFile := &telemetry.Persister{Stats: stats, DataDir: cfg.DataDir, Log: log}
+	statsFile.Restore()
+	statsDone := make(chan struct{})
+	go func() {
+		defer close(statsDone)
+		statsFile.Run(ctx, 0)
+	}()
+	defer func() {
+		// run returns when ctx ends (or on a start-up error): wait for the
+		// final write so a graceful stop never loses the last interval.
+		stop()
+		<-statsDone
+	}()
 	var mgr *models.Manager
 	if cfg.Runtime.Kind == "llamacpp" {
 		mgr, err = models.NewManager(filepath.Join(cfg.DataDir, "models"), cfg.Models.MaxDiskMB, log)
@@ -351,17 +366,46 @@ func run() error {
 		boot.pending.Store(true)
 		go func() {
 			first := true
-			err := retryUntilLoaded(ctx, cfg.Models.Default, func(ctx context.Context) error {
-				err := loadDefaultModel(ctx, cfg, hw, ops, mgr, eng, budget, log)
+			// The default may be one the operator chose through the API
+			// (limits.toml). If that choice can no longer be used — the
+			// model left the catalog, the runtime cannot serve it, it is
+			// not a chat model — start-up falls back to the configured
+			// default instead of retrying a load that cannot succeed.
+			want := cfg.Models.Default
+			err := retryUntilLoaded(ctx, want, func(ctx context.Context) error {
+				c := cfg
+				c.Models.Default = want
+				err := loadDefaultModel(ctx, c, hw, ops, mgr, eng, budget, log)
 				if first && mgr != nil {
 					first = false
 					go mgr.RunHousekeeping(ctx)
 				}
+				// The start-up model is THE default, whatever was loaded
+				// before it finished (a mesh placement): say so explicitly.
+				// A decision or embedding model is refused here.
+				notChat := false
+				if err == nil {
+					notChat = errors.Is(eng.SetDefault(want), engine.ErrNotChatModel)
+				}
+				if next, why := defaultFallback(want, cfg.Models.BaseDefault, err, notChat); next != "" {
+					log.Warn("the chosen default model cannot be the default; falling back to the configured one",
+						"chosen", want, "fallback", next, "reason", why)
+					want = next
+					return errors.New(why)
+				}
 				return err
 			}, log, sleepCtx)
 			boot.pending.Store(false)
-			if err == nil {
-				log.Info("default model ready", "model", cfg.Models.Default)
+			switch {
+			case err != nil:
+			case eng.DefaultModel() == want:
+				log.Info("default model ready", "model", want)
+			default:
+				// Loaded, but it is a decision or embedding model: the
+				// node serves it, with no default until a chat model is
+				// loaded or chosen.
+				log.Warn("the start-up model is loaded but is not a chat model, so it is not the default",
+					"model", want, "default", eng.DefaultModel())
 			}
 		}()
 	}

@@ -1,6 +1,7 @@
 package localapi
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -146,7 +147,7 @@ func (s *Server) GetLimits(w http.ResponseWriter, _ *http.Request) {
 // validateLimits checks a whole PUT before anything is applied, so a bad
 // field never leaves the node half-changed. It returns the schedule
 // windows and the settings as they would be after the PUT.
-func validateLimits(lim gen.Limits, cur SettingsValues) ([]governor.Window, SettingsValues, error) {
+func (s *Server) validateLimits(lim gen.Limits, cur SettingsValues) ([]governor.Window, SettingsValues, error) {
 	switch lim.ServePolicy {
 	case "always", "idle-only", "scheduled":
 	default:
@@ -237,6 +238,13 @@ func validateLimits(lim gen.Limits, cur SettingsValues) ([]governor.Window, Sett
 				return nil, cur, fmt.Errorf("default_model: %q is not a model id (empty or \"none\" = load nothing)", id)
 			}
 		}
+		// Only a chat model can be the default (the engine's rule); say
+		// so now for a model this node knows is not one.
+		if id != "" && id != cur.DefaultModel {
+			if kind := s.nonChatKind(id); kind != "" {
+				return nil, cur, fmt.Errorf("default_model: %q is %s and cannot be the default, which answers chat requests that name no model", id, kind)
+			}
+		}
 		next.DefaultModel = id
 	}
 	if v := lim.RequireAuthV1; v != nil {
@@ -250,6 +258,34 @@ func validateLimits(lim gen.Limits, cur SettingsValues) ([]governor.Window, Sett
 		next.LogLevel = lvl
 	}
 	return windows, next, nil
+}
+
+// nonChatKind names why id cannot be the default ("a decision model",
+// "an embedding model"), going by the loaded model or the catalog; ""
+// when it is a chat model or unknown here.
+func (s *Server) nonChatKind(id string) string {
+	kind := func(decision, embeddings bool) string {
+		switch {
+		case decision:
+			return "a decision model"
+		case embeddings:
+			return "an embedding model"
+		}
+		return ""
+	}
+	for _, m := range s.deps.Engine.Models() {
+		if m.Spec.ID == id {
+			return kind(m.Spec.Decision, m.Spec.Embeddings)
+		}
+	}
+	if ops := s.deps.ModelOps; ops != nil {
+		if cat, err := ops.Catalog(context.Background(), false); err == nil {
+			if e, ok := cat.Find(id); ok {
+				return kind(e.Decision, e.Embeddings)
+			}
+		}
+	}
+	return ""
 }
 
 // UpdateLimits implements gen.ServerInterface.
@@ -266,7 +302,7 @@ func (s *Server) UpdateLimits(w http.ResponseWriter, r *http.Request) {
 	}
 	s.setMu.Lock()
 	prev := s.cur
-	windows, next, err := validateLimits(lim, prev)
+	windows, next, err := s.validateLimits(lim, prev)
 	if err != nil {
 		s.setMu.Unlock()
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
@@ -372,23 +408,76 @@ func (s *Server) UpdateLimits(w http.ResponseWriter, r *http.Request) {
 		s.deps.Settings.ApplyPlan(planLimitsOf(next))
 	}
 
-	// Persist to the daemon-owned overlay (never the operator's
-	// config.toml) so limits survive restarts. A write failure loses only
-	// persistence, not the live change — log it and answer normally.
-	if s.deps.DataDir != "" {
-		err := config.SaveLimits(s.deps.DataDir, config.Governor{
-			ServePolicy:    p.Serve,
-			IdleAfter:      p.IdleAfter,
-			YieldGrace:     p.YieldGrace,
-			ServeOnBattery: p.ServeOnBattery,
-			MaxTempCelsius: p.MaxTempCelsius,
-			Schedule:       lim.Schedule,
-		}, s.liveLimits(), overlay)
-		if err != nil {
-			s.deps.Log.Warn("limits applied but not persisted", "err", err)
+	// The default model applies now as well as at the next start: make it
+	// the default if it is loaded, load it first if it is only on disk.
+	if next.DefaultModel != prev.DefaultModel && next.DefaultModel != "" {
+		s.applyDefaultModel(next.DefaultModel)
+	}
+	s.saveOverlay(overlay)
+	writeJSON(w, http.StatusOK, s.limits())
+}
+
+// saveOverlay persists the settings to the daemon-owned overlay (never the
+// operator's config.toml) so they survive restarts. A write failure loses
+// only persistence, not the live change — it is logged.
+func (s *Server) saveOverlay(overlay config.LimitsExtra) {
+	g := s.deps.Governor
+	if s.deps.DataDir == "" || g == nil {
+		return
+	}
+	p := g.Policy()
+	err := config.SaveLimits(s.deps.DataDir, config.Governor{
+		ServePolicy:    p.Serve,
+		IdleAfter:      p.IdleAfter,
+		YieldGrace:     p.YieldGrace,
+		ServeOnBattery: p.ServeOnBattery,
+		MaxTempCelsius: p.MaxTempCelsius,
+		Schedule:       windowsToStrings(p.Schedule),
+	}, s.liveLimits(), overlay)
+	if err != nil {
+		s.deps.Log.Warn("settings applied but not persisted", "err", err)
+	}
+}
+
+// rememberDefault records the operator's choice of default model (make
+// default, or default_model through the limits API) so the next start
+// loads the same model: models.default in limits.toml.
+func (s *Server) rememberDefault(id string) {
+	s.setMu.Lock()
+	s.cur.DefaultModel = id
+	s.overlay.DefaultModel = &id
+	overlay := s.overlay
+	s.setMu.Unlock()
+	s.saveOverlay(overlay)
+}
+
+// applyDefaultModel makes id the running default: at once when it is
+// loaded, after loading it when it is on disk. Anything else (not
+// installed yet) waits for the next start, which loads it.
+func (s *Server) applyDefaultModel(id string) {
+	for _, m := range s.deps.Engine.Models() {
+		if m.Spec.ID == id {
+			if err := s.deps.Engine.SetDefault(id); err != nil {
+				s.deps.Log.Warn("default model not switched", "model", id, "err", err)
+			}
+			return
 		}
 	}
-	writeJSON(w, http.StatusOK, s.limits())
+	ops := s.deps.ModelOps
+	if ops == nil || s.deps.Models == nil || !s.deps.Models.Has(id) {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		if err := ops.Load(ctx, id); err != nil {
+			s.deps.Log.Warn("default model not loaded; it will be loaded at the next start", "model", id, "err", err)
+			return
+		}
+		if err := ops.SetDefault(id); err != nil {
+			s.deps.Log.Warn("default model not switched", "model", id, "err", err)
+		}
+	}()
 }
 
 // ---- metadata ----
@@ -468,6 +557,13 @@ func (s *Server) settingsMeta(lim gen.Limits, cur SettingsValues) []gen.LimitSet
 		logApply = gen.Restart
 		logOpts = append(logOpts, pending(boot.LogLevel, boot.LogLevel != cur.LogLevel))
 	}
+	// The default in force: the engine's. It differs from the configured
+	// one while that model is not loaded (still loading, not installed,
+	// or "none" chosen with a default still running).
+	var defaultOpts []opt
+	if running := s.deps.Engine.DefaultModel(); running != cur.DefaultModel {
+		defaultOpts = append(defaultOpts, effective(running))
+	}
 	minCtxOpts := []opt{unit("tokens"), rng(0, config.MaxContextLimit), zero("8192")}
 	if cur.MinContext == 0 {
 		minCtxOpts = append(minCtxOpts, effective(memory.DefaultMinContext))
@@ -532,10 +628,9 @@ func (s *Server) settingsMeta(lim gen.Limits, cur SettingsValues) []gen.LimitSet
 		mk("exclude", "models.exclude", "Models the mesh may not place",
 			"Model ids the mesh is never allowed to place on this node. A model already placed stays until it is evicted.",
 			gen.Advanced, gen.Live, gen.StringList, []string{}, cur.Exclude),
-		mk("default_model", "models.default", "Model loaded at startup",
-			"The model the daemon loads when it starts. Empty (or \"none\") loads nothing and serves what the mesh places. To switch the default of a running node, use the model's Set default action instead.",
-			gen.Advanced, gen.Restart, gen.String, def.Models.Default, cur.DefaultModel,
-			pending(boot.DefaultModel, boot.DefaultModel != cur.DefaultModel)),
+		mk("default_model", "models.default", "Default model",
+			"The node's default model: it answers requests that name no model, and it is the model the daemon loads when it starts. Choosing one makes it the default right away (it is loaded first if it is on disk) and is remembered across restarts; \"Make default\" on a model sets the same value. Must be a chat model. Empty (or \"none\") loads nothing at start and serves what the mesh places.",
+			gen.Advanced, gen.Live, gen.String, def.Models.Default, cur.DefaultModel, defaultOpts...),
 		mk("require_auth_v1", "local_api.require_auth_v1", "Require the token for local inference",
 			"Require the bearer token on the local inference routes (/v1/*) too. Off, any program on this machine can use the loaded models without a key.",
 			gen.Advanced, gen.Live, gen.Boolean, def.LocalAPI.RequireAuthV1, cur.RequireAuthV1),

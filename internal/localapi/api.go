@@ -33,6 +33,11 @@ func statsToGen(s telemetry.Snapshot) gen.Stats {
 		TotalTokens:        s.TotalTokens,
 		Inflight:           s.Inflight,
 		EarnedMicrocredits: s.EarnedMicrocred,
+
+		SessionRequests:           s.SessionRequests,
+		SessionTokens:             s.SessionTokens,
+		SessionEarnedMicrocredits: s.SessionEarnedMicrocred,
+		LifetimeSince:             s.LifetimeSince,
 	}
 }
 
@@ -378,10 +383,12 @@ func (s *Server) GetEarnings(w http.ResponseWriter, _ *http.Request) {
 func estimatedEarnings(snap telemetry.Snapshot, start time.Time, note string) gen.Earnings {
 	credits := float64(snap.EarnedMicrocred) / 1e6
 	usd := credits * 0.000001 * 1e6 // 1 credit = $0.000001 peg (SPEC §4.5)
+	// The daily rate is this run's earnings over this run's uptime: the
+	// lifetime total over the uptime would inflate after every restart.
 	uptime := time.Since(start).Hours()
 	perDay := 0.0
 	if uptime > 0 {
-		perDay = usd / uptime * 24
+		perDay = float64(snap.SessionEarnedMicrocred) / 1e6 / uptime * 24
 	}
 	return gen.Earnings{
 		Source:             gen.Estimated,

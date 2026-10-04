@@ -347,12 +347,14 @@ type Earnings struct {
 	EarnedTodayCredits *int64  `json:"earned_today_credits,omitempty"`
 	EscrowCredits      float64 `json:"escrow_credits"`
 	EstUsd             float64 `json:"est_usd"`
-	EstUsdPerDay       float64 `json:"est_usd_per_day"`
+
+	// EstUsdPerDay `estimated` source: this daemon run's estimated earnings projected to a day (session figure over uptime).
+	EstUsdPerDay float64 `json:"est_usd_per_day"`
 
 	// LifetimePayoutCredits Payout credits earned since the account opened (ledger only).
 	LifetimePayoutCredits *int64 `json:"lifetime_payout_credits,omitempty"`
 
-	// LifetimeTokens Always this node's own count, whatever the source.
+	// LifetimeTokens Always this node's own count, whatever the source: tokens generated since `stats.lifetime_since`, across daemon restarts.
 	LifetimeTokens int64 `json:"lifetime_tokens"`
 
 	// NextVestAt When the oldest pending lot vests; absent with nothing pending.
@@ -523,7 +525,7 @@ type Limits struct {
 	// ContextLength Pin every request's context to exactly this many tokens (`runtime.context_length`), for every model, decision models included; 0 = plan it from memory (recommended). 256 and up. Applied like `max_concurrent`. Omitted on PUT = unchanged.
 	ContextLength *int `json:"context_length,omitempty"`
 
-	// DefaultModel Model loaded when the daemon starts (`models.default`); empty or `none` = load nothing and serve what the mesh places. Takes effect after a daemon restart (use `POST /api/v1/models/{id}/default` to switch now). Omitted on PUT = unchanged.
+	// DefaultModel The node's default model (`models.default`): the one that answers requests naming no model, and the one the daemon loads when it starts. Setting it makes the model the default now (loading it first if it is on disk but not loaded); `POST /api/v1/models/{id}/default` sets the same value. Must be a chat model. Empty or `none` = load nothing at start (a running default stays until the daemon restarts). Omitted on PUT = unchanged.
 	DefaultModel *string `json:"default_model,omitempty"`
 
 	// Exclude Model ids the mesh may never place on this node (`models.exclude`). Applies to the next placement; a model already placed stays until evicted. Omitted on PUT = unchanged.
@@ -737,14 +739,35 @@ type RequestOrigin string
 // RequestOutcome `ok`: ran to completion. `cancelled`: stopped by the caller, the coordinator, a deadline or the governor (operator back at the machine). `invalid_input`: the runtime rejected the input itself (prompt over the model's context, too many options). `error`: anything else.
 type RequestOutcome string
 
-// Stats defines model for Stats.
+// Stats Counters and rates. `total_*` and `earned_microcredits` are LIFETIME figures: they continue across daemon restarts (kept in `<data_dir>/stats.json`, saved every 30 s and on shutdown, so a crash loses at most the last 30 s) and count from `lifetime_since`. `session_*` are the same counters since this daemon process started (see `uptime_seconds`). The two rates are rolling one-minute windows of this process.
 type Stats struct {
-	EarnedMicrocredits int64   `json:"earned_microcredits"`
-	Inflight           int     `json:"inflight"`
-	RequestsPerMin     float64 `json:"requests_per_min"`
-	TokensPerSec1m     float64 `json:"tokens_per_sec_1m"`
-	TotalRequests      int64   `json:"total_requests"`
-	TotalTokens        int64   `json:"total_tokens"`
+	// EarnedMicrocredits Lifetime. This node's own estimate of what its work earned (not the ledger; see Earnings for the real figures).
+	EarnedMicrocredits int64 `json:"earned_microcredits"`
+	Inflight           int   `json:"inflight"`
+
+	// LifetimeSince When lifetime counting began on this node.
+	LifetimeSince time.Time `json:"lifetime_since"`
+
+	// RequestsPerMin Requests finished in the last minute.
+	RequestsPerMin float64 `json:"requests_per_min"`
+
+	// SessionEarnedMicrocredits The estimate, since the daemon started.
+	SessionEarnedMicrocredits int64 `json:"session_earned_microcredits"`
+
+	// SessionRequests Requests finished since the daemon started.
+	SessionRequests int64 `json:"session_requests"`
+
+	// SessionTokens Tokens generated since the daemon started.
+	SessionTokens int64 `json:"session_tokens"`
+
+	// TokensPerSec1m Tokens generated per second, averaged over the last minute. 0 for decision and embedding work, which generates none.
+	TokensPerSec1m float64 `json:"tokens_per_sec_1m"`
+
+	// TotalRequests Lifetime. Requests finished on this node.
+	TotalRequests int64 `json:"total_requests"`
+
+	// TotalTokens Lifetime. Tokens generated on this node.
+	TotalTokens int64 `json:"total_tokens"`
 }
 
 // Status defines model for Status.
@@ -778,7 +801,9 @@ type Status struct {
 	Standalone   bool    `json:"standalone"`
 
 	// State serving | starting | idle | no-model | yielded | paused-battery | paused-thermal | outside-schedule. `starting`: the default model is still being fetched or loaded; `idle`: nothing loaded but models are on disk (a placement or request loads one); `no-model`: nothing loaded and nothing on disk.
-	State       string  `json:"state"`
+	State string `json:"state"`
+
+	// Stats Counters and rates. `total_*` and `earned_microcredits` are LIFETIME figures: they continue across daemon restarts (kept in `<data_dir>/stats.json`, saved every 30 s and on shutdown, so a crash loses at most the last 30 s) and count from `lifetime_since`. `session_*` are the same counters since this daemon process started (see `uptime_seconds`). The two rates are rolling one-minute windows of this process.
 	Stats       Stats   `json:"stats"`
 	TempCelsius float64 `json:"temp_celsius"`
 

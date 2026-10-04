@@ -20,17 +20,60 @@ type Stats struct {
 	tokens   ring // token completion events
 	requests ring // request completion events
 
+	// Session counters: since this process started.
 	totalRequests   int64
 	totalTokens     int64
 	inflight        int
 	earnedMicrocred int64 // standalone/demo earnings counter (micro-credits)
+
+	// base is what earlier runs of the daemon counted (Restore): lifetime
+	// = base + session. since is when lifetime counting began.
+	base    Counters
+	started time.Time
+}
+
+// Counters are the lifetime totals that survive a daemon restart
+// (persist.go). Numbers only: nothing about any request.
+type Counters struct {
+	Tokens          int64     `json:"total_tokens"`
+	Requests        int64     `json:"total_requests"`
+	EarnedMicrocred int64     `json:"earned_microcredits"`
+	Since           time.Time `json:"since"`
+}
+
+// Restore sets the totals of earlier runs; lifetime figures continue from
+// them. Call before serving.
+func (s *Stats) Restore(c Counters) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.base = c
+}
+
+// Lifetime returns the totals to persist: earlier runs plus this one.
+func (s *Stats) Lifetime() Counters {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lifetimeLocked()
+}
+
+func (s *Stats) lifetimeLocked() Counters {
+	c := Counters{
+		Tokens:          s.base.Tokens + s.totalTokens,
+		Requests:        s.base.Requests + s.totalRequests,
+		EarnedMicrocred: s.base.EarnedMicrocred + s.earnedMicrocred,
+		Since:           s.base.Since,
+	}
+	if c.Since.IsZero() {
+		c.Since = s.started
+	}
+	return c
 }
 
 // NewStats returns a Stats using the real clock.
-func NewStats() *Stats { return &Stats{now: time.Now} }
+func NewStats() *Stats { return NewStatsWithClock(time.Now) }
 
 // NewStatsWithClock injects a clock (tests).
-func NewStatsWithClock(now func() time.Time) *Stats { return &Stats{now: now} }
+func NewStatsWithClock(now func() time.Time) *Stats { return &Stats{now: now, started: now()} }
 
 // RecordTokens registers n generated tokens at the current time.
 func (s *Stats) RecordTokens(n int) {
@@ -69,6 +112,11 @@ func (s *Stats) RequestFinished() {
 }
 
 // Snapshot is a point-in-time view for the local API / heartbeat.
+//
+// Total* and EarnedMicrocred are LIFETIME figures: they continue across
+// daemon restarts (since LifetimeSince). Session* are the same counters
+// since this process started. The rates are rolling one-minute windows
+// and know nothing of either.
 type Snapshot struct {
 	TokensPerSec1m  float64 `json:"tokens_per_sec_1m"`
 	RequestsPerMin  float64 `json:"requests_per_min"`
@@ -76,19 +124,30 @@ type Snapshot struct {
 	TotalTokens     int64   `json:"total_tokens"`
 	Inflight        int     `json:"inflight"`
 	EarnedMicrocred int64   `json:"earned_microcredits"`
+
+	SessionRequests        int64     `json:"session_requests"`
+	SessionTokens          int64     `json:"session_tokens"`
+	SessionEarnedMicrocred int64     `json:"session_earned_microcredits"`
+	LifetimeSince          time.Time `json:"lifetime_since"`
 }
 
 func (s *Stats) Snapshot() Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
+	life := s.lifetimeLocked()
 	return Snapshot{
 		TokensPerSec1m:  float64(s.tokens.countSince(now.Add(-time.Minute))) / 60,
 		RequestsPerMin:  float64(s.requests.countSince(now.Add(-time.Minute))),
-		TotalRequests:   s.totalRequests,
-		TotalTokens:     s.totalTokens,
+		TotalRequests:   life.Requests,
+		TotalTokens:     life.Tokens,
 		Inflight:        s.inflight,
-		EarnedMicrocred: s.earnedMicrocred,
+		EarnedMicrocred: life.EarnedMicrocred,
+
+		SessionRequests:        s.totalRequests,
+		SessionTokens:          s.totalTokens,
+		SessionEarnedMicrocred: s.earnedMicrocred,
+		LifetimeSince:          life.Since,
 	}
 }
 

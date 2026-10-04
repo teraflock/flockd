@@ -7,6 +7,8 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
+	"fmt"
 	"math/big"
 	"net"
 	"os"
@@ -16,6 +18,9 @@ import (
 
 	"github.com/teraflock/flockd/internal/config"
 	"github.com/teraflock/flockd/internal/enroll"
+	"github.com/teraflock/flockd/internal/modelops"
+	"github.com/teraflock/flockd/internal/models"
+	rt "github.com/teraflock/flockd/internal/runtime"
 	"github.com/teraflock/flockd/internal/tunnel"
 )
 
@@ -169,5 +174,35 @@ func TestBootstrapTLSTrustsPinnedAndEnrolledMeshCA(t *testing.T) {
 	}
 	if _, ok := d.(tunnel.InsecureDialer); !ok {
 		t.Fatalf("insecure dialer = %T", d)
+	}
+}
+
+// A default chosen through the API that can never work falls back to the
+// configured default; transient failures keep retrying the chosen one.
+func TestDefaultFallback(t *testing.T) {
+	const chosen, base = "kev-4b-q4_k_m", "llama-3.2-3b-instruct-q4_k_m"
+	cases := []struct {
+		name     string
+		want     string
+		base     string
+		err      error
+		notChat  bool
+		wantNext string
+	}{
+		{"loaded and chat: carry on", chosen, base, nil, false, ""},
+		{"loaded but a decision model", chosen, base, nil, true, base},
+		{"left the catalog", chosen, base, fmt.Errorf("load default model: %w", modelops.ErrUnknownModel), false, base},
+		{"invalid id", "../x", base, fmt.Errorf("load: %w", models.ErrInvalidID), false, base},
+		{"runtime too old", chosen, base, fmt.Errorf("load: %w", rt.ErrRuntimeTooOld), false, base},
+		{"no network: keep retrying the choice", chosen, base, errors.New("dial tcp: no route to host"), false, ""},
+		{"over memory: keep retrying", chosen, base, fmt.Errorf("load: %w", modelops.ErrOverMemory), false, ""},
+		{"the configured default itself fails: nothing to fall back to", base, base, fmt.Errorf("x: %w", modelops.ErrUnknownModel), false, ""},
+		{"configured default is none", chosen, "", fmt.Errorf("x: %w", modelops.ErrUnknownModel), false, ""},
+	}
+	for _, c := range cases {
+		next, why := defaultFallback(c.want, c.base, c.err, c.notChat)
+		if next != c.wantNext || (next != "" && why == "") {
+			t.Errorf("%s: fallback = %q (%q), want %q", c.name, next, why, c.wantNext)
+		}
 	}
 }

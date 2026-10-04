@@ -161,7 +161,7 @@ export interface paths {
         put?: never;
         /**
          * Serve this model when a request names none (must be loaded)
-         * @description Only a chat model can be the default: a decision or embedding model is refused with `400`. With no chat model loaded the node has no default (`status.default_model` is empty).
+         * @description Takes effect at once and is remembered: the choice is saved as `default_model` (limits.toml), so it is also the model the daemon loads, and makes the default, when it next starts. Only a chat model can be the default: a decision or embedding model is refused with `400`. With no chat model loaded the node has no default (`status.default_model` is empty).
          */
         post: operations["setDefaultModel"];
         delete?: never;
@@ -606,18 +606,54 @@ export interface components {
             accel: string;
             unified_memory: boolean;
         };
+        /** @description Counters and rates. `total_*` and `earned_microcredits` are LIFETIME figures: they continue across daemon restarts (kept in `<data_dir>/stats.json`, saved every 30 s and on shutdown, so a crash loses at most the last 30 s) and count from `lifetime_since`. `session_*` are the same counters since this daemon process started (see `uptime_seconds`). The two rates are rolling one-minute windows of this process. */
         Stats: {
-            /** Format: double */
+            /**
+             * Format: double
+             * @description Tokens generated per second, averaged over the last minute. 0 for decision and embedding work, which generates none.
+             */
             tokens_per_sec_1m: number;
-            /** Format: double */
+            /**
+             * Format: double
+             * @description Requests finished in the last minute.
+             */
             requests_per_min: number;
-            /** Format: int64 */
+            /**
+             * Format: int64
+             * @description Lifetime. Requests finished on this node.
+             */
             total_requests: number;
-            /** Format: int64 */
+            /**
+             * Format: int64
+             * @description Lifetime. Tokens generated on this node.
+             */
             total_tokens: number;
             inflight: number;
-            /** Format: int64 */
+            /**
+             * Format: int64
+             * @description Lifetime. This node's own estimate of what its work earned (not the ledger; see Earnings for the real figures).
+             */
             earned_microcredits: number;
+            /**
+             * Format: int64
+             * @description Requests finished since the daemon started.
+             */
+            session_requests: number;
+            /**
+             * Format: int64
+             * @description Tokens generated since the daemon started.
+             */
+            session_tokens: number;
+            /**
+             * Format: int64
+             * @description The estimate, since the daemon started.
+             */
+            session_earned_microcredits: number;
+            /**
+             * Format: date-time
+             * @description When lifetime counting began on this node.
+             */
+            lifetime_since: string;
         };
         /**
          * @description What the request asks of the model.
@@ -878,11 +914,14 @@ export interface components {
             earned_credits: number;
             /** Format: double */
             est_usd: number;
-            /** Format: double */
+            /**
+             * Format: double
+             * @description `estimated` source: this daemon run's estimated earnings projected to a day (session figure over uptime).
+             */
             est_usd_per_day: number;
             /**
              * Format: int64
-             * @description Always this node's own count, whatever the source.
+             * @description Always this node's own count, whatever the source: tokens generated since `stats.lifetime_since`, across daemon restarts.
              */
             lifetime_tokens: number;
             /** Format: double */
@@ -936,7 +975,7 @@ export interface components {
             max_vram_percent?: number;
             /** @description Model ids the mesh may never place on this node (`models.exclude`). Applies to the next placement; a model already placed stays until evicted. Omitted on PUT = unchanged. */
             exclude?: string[];
-            /** @description Model loaded when the daemon starts (`models.default`); empty or `none` = load nothing and serve what the mesh places. Takes effect after a daemon restart (use `POST /api/v1/models/{id}/default` to switch now). Omitted on PUT = unchanged. */
+            /** @description The node's default model (`models.default`): the one that answers requests naming no model, and the one the daemon loads when it starts. Setting it makes the model the default now (loading it first if it is on disk but not loaded); `POST /api/v1/models/{id}/default` sets the same value. Must be a chat model. Empty or `none` = load nothing at start (a running default stays until the daemon restarts). Omitted on PUT = unchanged. */
             default_model?: string;
             /** @description Require the bearer token on the local inference routes (`/v1/*`) too (`local_api.require_auth_v1`). Off, any program on this machine can use the loaded models without a key. Applied immediately. Omitted on PUT = unchanged. */
             require_auth_v1?: boolean;

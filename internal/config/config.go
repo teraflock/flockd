@@ -152,8 +152,14 @@ type Models struct {
 	// teraflock/models format).
 	ManifestPath string `koanf:"manifest_path"`
 	ManifestURL  string `koanf:"manifest_url"`
-	// Default is the model id served in standalone mode.
+	// Default is the node's default model: loaded at start-up and used
+	// for requests that name no model. "none" = load nothing.
 	Default string `koanf:"default"`
+	// BaseDefault is Default as config.toml / env / the built-in default
+	// had it, before limits.toml: what start-up falls back to when a
+	// default chosen through the API can no longer be used. Not a config
+	// key.
+	BaseDefault string `koanf:"-"`
 	// MaxDiskMB is the model-cache disk budget; LRU eviction below it.
 	MaxDiskMB int64 `koanf:"max_disk_mb"`
 	// Pin lists model ids exempt from eviction; Exclude are never assigned.
@@ -304,6 +310,8 @@ func Load(path string) (Config, error) {
 	if err := k.Unmarshal("", &cfg); err != nil {
 		return cfg, fmt.Errorf("config: unmarshal: %w", err)
 	}
+	cfg.Models.BaseDefault = NormalizeDefaultModel(cfg.Models.Default)
+
 	// Live-edited limits (PUT /api/v1/limits) persist in a daemon-owned
 	// overlay so the operator's config.toml — comments and all — is never
 	// rewritten by the API. The overlay is the operator's most recent

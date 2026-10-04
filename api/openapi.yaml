@@ -183,6 +183,9 @@ paths:
       operationId: setDefaultModel
       summary: Serve this model when a request names none (must be loaded)
       description: >-
+        Takes effect at once and is remembered: the choice is saved as
+        `default_model` (limits.toml), so it is also the model the daemon
+        loads, and makes the default, when it next starts.
         Only a chat model can be the default: a decision or embedding
         model is refused with `400`. With no chat model loaded the node
         has no default (`status.default_model` is empty).
@@ -845,16 +848,60 @@ components:
 
     Stats:
       type: object
+      description: >-
+        Counters and rates. `total_*` and `earned_microcredits` are
+        LIFETIME figures: they continue across daemon restarts (kept in
+        `<data_dir>/stats.json`, saved every 30 s and on shutdown, so a
+        crash loses at most the last 30 s) and count from
+        `lifetime_since`. `session_*` are the same counters since this
+        daemon process started (see `uptime_seconds`). The two rates are
+        rolling one-minute windows of this process.
       required:
         [tokens_per_sec_1m, requests_per_min, total_requests, total_tokens,
-         inflight, earned_microcredits]
+         inflight, earned_microcredits, session_requests, session_tokens,
+         session_earned_microcredits, lifetime_since]
       properties:
-        tokens_per_sec_1m: { type: number, format: double }
-        requests_per_min: { type: number, format: double }
-        total_requests: { type: integer, format: int64 }
-        total_tokens: { type: integer, format: int64 }
+        tokens_per_sec_1m:
+          type: number
+          format: double
+          description: >-
+            Tokens generated per second, averaged over the last minute.
+            0 for decision and embedding work, which generates none.
+        requests_per_min:
+          type: number
+          format: double
+          description: Requests finished in the last minute.
+        total_requests:
+          type: integer
+          format: int64
+          description: Lifetime. Requests finished on this node.
+        total_tokens:
+          type: integer
+          format: int64
+          description: Lifetime. Tokens generated on this node.
         inflight: { type: integer }
-        earned_microcredits: { type: integer, format: int64 }
+        earned_microcredits:
+          type: integer
+          format: int64
+          description: >-
+            Lifetime. This node's own estimate of what its work earned
+            (not the ledger; see Earnings for the real figures).
+        session_requests:
+          type: integer
+          format: int64
+          description: Requests finished since the daemon started.
+        session_tokens:
+          type: integer
+          format: int64
+          description: Tokens generated since the daemon started.
+        session_earned_microcredits:
+          type: integer
+          format: int64
+          description: The estimate, since the daemon started.
+        lifetime_since:
+          type: string
+          format: date-time
+          description: When lifetime counting began on this node.
 
     RequestKind:
       type: string
@@ -1238,11 +1285,18 @@ components:
         earned_microcredits: { type: integer, format: int64 }
         earned_credits: { type: number, format: double }
         est_usd: { type: number, format: double }
-        est_usd_per_day: { type: number, format: double }
+        est_usd_per_day:
+          type: number
+          format: double
+          description: >-
+            `estimated` source: this daemon run's estimated earnings
+            projected to a day (session figure over uptime).
         lifetime_tokens:
           type: integer
           format: int64
-          description: Always this node's own count, whatever the source.
+          description: >-
+            Always this node's own count, whatever the source: tokens
+            generated since `stats.lifetime_since`, across daemon restarts.
         escrow_credits: { type: number, format: double }
         note: { type: string }
 
@@ -1408,10 +1462,13 @@ components:
         default_model:
           type: string
           description: >
-            Model loaded when the daemon starts (`models.default`); empty
-            or `none` = load nothing and serve what the mesh places. Takes
-            effect after a daemon restart (use `POST
-            /api/v1/models/{id}/default` to switch now). Omitted on PUT =
+            The node's default model (`models.default`): the one that
+            answers requests naming no model, and the one the daemon loads
+            when it starts. Setting it makes the model the default now
+            (loading it first if it is on disk but not loaded); `POST
+            /api/v1/models/{id}/default` sets the same value. Must be a
+            chat model. Empty or `none` = load nothing at start (a running
+            default stays until the daemon restarts). Omitted on PUT =
             unchanged.
         require_auth_v1:
           type: boolean

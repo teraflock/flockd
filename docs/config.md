@@ -294,9 +294,22 @@ at its next load; **restart** = saved, used from the next daemon start.
 | `runtime.context_length` | `context_length` | advanced | reload |
 | `budget.max_vram_percent` | `max_vram_percent` | advanced | restart |
 | `models.exclude` | `exclude` | advanced | live |
-| `models.default` | `default_model` | advanced | restart |
+| `models.default` | `default_model` | advanced | live |
 | `local_api.require_auth_v1` | `require_auth_v1` | advanced | live |
 | `log.level` | `log_level` | advanced | live |
+
+`default_model` is the node's default: what answers requests that name no
+model and what the daemon loads at start. "Make default" (`tera models
+default`, `POST /api/v1/models/{id}/default`) switches the running default
+at once and saves it here, so it survives restarts. If a saved choice can
+no longer be the default at start-up (gone from the catalog, not a chat
+model, runtime too old) the daemon logs it and falls back to the default
+in `config.toml`.
+
+Lifetime counters (`status.stats.total_tokens`, `total_requests`,
+`earned_microcredits`) are kept in `<data_dir>/stats.json`, saved every
+30 s and on shutdown; `session_*` are the same counters since the daemon
+started. Delete the file to reset them.
 
 `models.pin` is edited per model (`POST /api/v1/models/{id}/pin`), not here.
 
