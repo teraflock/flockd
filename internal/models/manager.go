@@ -172,8 +172,8 @@ func NewManager(dir string, maxDiskMB int64, log *slog.Logger) (*Manager, error)
 		Client:              &http.Client{}, // long downloads: no client timeout, ctx governs
 		Log:                 log,
 		DownloadMaxAttempts: downloadMaxAttempts,
-		DownloadBackoffMin:  downloadBackoffMin,
-		DownloadBackoffMax:  downloadBackoffMax,
+		DownloadBackoffMin:  downloadBackoffFloor,
+		DownloadBackoffMax:  downloadBackoffCeil,
 		state:               cacheState{Entries: map[string]*cacheEntry{}},
 		progress:            map[string]Progress{},
 		missingSeen:         map[string]bool{},
@@ -486,14 +486,14 @@ func humanBytes(n int64) string {
 	}
 }
 
-// downloadMaxAttempts, downloadBackoffMin/Max bound the retry schedule for
+// downloadMaxAttempts, downloadBackoffFloor/Ceil bound the retry schedule for
 // a transient download failure (rate limiting, a flaky upstream) — hosts
 // like Hugging Face, which most catalog artifact_urls point at directly,
 // rate-limit anonymous fetches (429) with no auth option here to avoid it.
 const (
-	downloadMaxAttempts = 6
-	downloadBackoffMin  = 2 * time.Second
-	downloadBackoffMax  = 60 * time.Second
+	downloadMaxAttempts  = 6
+	downloadBackoffFloor = 2 * time.Second
+	downloadBackoffCeil  = 60 * time.Second
 )
 
 // transientDownloadError marks a download failure as worth retrying — a
@@ -544,11 +544,11 @@ func (m *Manager) download(ctx context.Context, id string, f artifactFile, dest 
 	maxAttempts := max(m.DownloadMaxAttempts, 1)
 	backoff := m.DownloadBackoffMin
 	if backoff <= 0 {
-		backoff = downloadBackoffMin
+		backoff = downloadBackoffFloor
 	}
 	backoffMax := m.DownloadBackoffMax
 	if backoffMax <= 0 {
-		backoffMax = downloadBackoffMax
+		backoffMax = downloadBackoffCeil
 	}
 	var err error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
