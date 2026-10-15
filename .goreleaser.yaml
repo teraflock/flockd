@@ -33,6 +33,16 @@ builds:
         goarch: arm64
     ldflags:
       - -s -w -X main.version={{.Version}}
+    overrides:
+      # GUI subsystem on Windows: the logon task runs the daemon in the
+      # operator's session, where a console program opens a console window
+      # that stays on the desktop for as long as the daemon runs
+      # (cmd/flockd/console_windows.go attaches to a terminal's console
+      # when started from one, so -version still prints).
+      - goos: windows
+        goarch: amd64
+        ldflags:
+          - -s -w -X main.version={{.Version}} -H=windowsgui
     hooks:
       post:
         # Authenticode; a no-op for non-.exe targets and without Azure secrets.

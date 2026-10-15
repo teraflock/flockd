@@ -50,7 +50,9 @@ asks you there rather than in the background.
 Windows: grab the zip from the [latest release](https://github.com/teraflock/flockd/releases/latest)
 (`winget install Teraflock.tera` coming later). On Windows `tera up`
 registers a per-user Task Scheduler logon task named `flockd` (no admin
-prompt; logs go to `%USERPROFILE%\.teraflock\flockd.log`), hardware
+prompt; logs go to `%USERPROFILE%\.teraflock\flockd.log`; the release
+`flockd.exe` is a GUI-subsystem binary, so the task opens no console
+window), hardware
 detection is real — RAM, CPU name, NVIDIA GPUs with VRAM via `nvidia-smi`
 (`cuda12`), other adapters listed on the CPU lane — and the battery guard
 works; a Windows llama-server build is still in progress
