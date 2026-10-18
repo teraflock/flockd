@@ -24,7 +24,7 @@ func detectPlatform(ctx context.Context, p *typesv1.CapabilityProfile) error {
 	// NVIDIA first, AMD only when nvidia-smi found nothing (flockd#20).
 	// CPU-only fallback is applied by the caller when no GPUs are found.
 	p.Gpus = pickLinuxGPUs(detectNvidia(ctx, "nvidia-smi"), func() []*typesv1.GpuInfo {
-		return detectAMD(ctx, "/")
+		return detectAMD(ctx, "/", p.RamTotalMb)
 	})
 	return nil
 }
@@ -38,8 +38,9 @@ const rocmSMITimeout = 5 * time.Second
 var rocmSMIArgs = []string{"--showproductname", "--showmeminfo", "vram", "--showbus", "--showdriverversion", "--json"}
 
 // detectAMD reads the amdgpu sysfs tree under root and enriches it with
-// rocm-smi when that is on PATH. See amd.go for the parsers.
-func detectAMD(ctx context.Context, root string) []*typesv1.GpuInfo {
+// rocm-smi when that is on PATH. ramMB is the VRAM figure for
+// unified-memory APUs. See amd.go for the parsers.
+func detectAMD(ctx context.Context, root string, ramMB uint64) []*typesv1.GpuInfo {
 	sys := amdSysfsGPUs(root)
 	if unbound := amdUnboundPCI(root, sys); len(unbound) > 0 {
 		slog.Default().Info("amd display device without amdgpu driver bound; not usable for inference",
@@ -56,7 +57,7 @@ func detectAMD(ctx context.Context, root string) []*typesv1.GpuInfo {
 			slog.Default().Debug("rocm-smi output not parsed; using sysfs only", "err", perr)
 		}
 	}
-	return buildAMDGPUs(root, sys, smi, kernelRelease())
+	return buildAMDGPUs(root, sys, smi, kernelRelease(), ramMB)
 }
 
 func runRocmSMI(ctx context.Context) ([]byte, error) {

@@ -97,7 +97,7 @@ func TestAMDSysfsWalkerSkipsNonAMDConnectorsAndRenderNodes(t *testing.T) {
 
 func TestAMDSysfsOnly(t *testing.T) {
 	root := fixture(t, "rx7900xtx")
-	gpus := buildAMDGPUs(root, amdSysfsGPUs(root), rocmSMIInfo{}, "6.8.0-45-generic")
+	gpus := buildAMDGPUs(root, amdSysfsGPUs(root), rocmSMIInfo{}, "6.8.0-45-generic", 0)
 	if len(gpus) != 2 {
 		t.Fatalf("gpus = %d, want 2", len(gpus))
 	}
@@ -120,7 +120,7 @@ func TestAMDWithRocmSMI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	gpus := buildAMDGPUs(root, amdSysfsGPUs(root), smi, "6.8.0-45-generic")
+	gpus := buildAMDGPUs(root, amdSysfsGPUs(root), smi, "6.8.0-45-generic", 0)
 	if len(gpus) != 2 {
 		t.Fatalf("gpus = %d, want 2", len(gpus))
 	}
@@ -134,7 +134,7 @@ func TestAMDWithRocmSMI(t *testing.T) {
 func TestAMDModuleVersionBeatsRocmSMI(t *testing.T) {
 	root := fixture(t, "mi210")
 	smi := rocmSMIInfo{DriverVersion: "6.2.1"}
-	gpus := buildAMDGPUs(root, amdSysfsGPUs(root), smi, "5.15.0")
+	gpus := buildAMDGPUs(root, amdSysfsGPUs(root), smi, "5.15.0", 0)
 	if len(gpus) != 1 {
 		t.Fatalf("gpus = %d, want 1", len(gpus))
 	}
@@ -149,8 +149,56 @@ func TestAMDAPUBelowThresholdIsSkipped(t *testing.T) {
 	if len(sys) != 1 || sys[0].VRAMMB != 512 || sys[0].DeviceID != "0x15bf" {
 		t.Fatalf("sysfs = %+v, want one 512 MB Phoenix iGPU", sys)
 	}
-	if gpus := buildAMDGPUs(root, sys, rocmSMIInfo{}, "6.8.0"); len(gpus) != 0 {
+	if gpus := buildAMDGPUs(root, sys, rocmSMIInfo{}, "6.8.0", 0); len(gpus) != 0 {
 		t.Errorf("gpus = %+v, want none: %d MB carveout is below the %d MB threshold", gpus, sys[0].VRAMMB, minAMDVRAMMB)
+	}
+}
+
+// The strixhalo fixture and testdata/rocm-smi/strixhalo.json were captured
+// from a real Ryzen AI MAX+ 395 (amd-halo, kernel 7.2.7+rex-amd64), unlike
+// the invented trees above. Its carveout is 512 MB — the same figure the
+// Phoenix APU above is skipped for — but the GPU addresses system RAM, so
+// it is reported with RAM as the VRAM figure instead of being dropped.
+func TestAMDUnifiedMemoryAPUReportsSystemRAM(t *testing.T) {
+	root := fixture(t, "strixhalo")
+	sys := amdSysfsGPUs(root)
+	if len(sys) != 1 || sys[0].VRAMMB != 512 || sys[0].DeviceID != "0x1586" {
+		t.Fatalf("sysfs = %+v, want one 512 MB Strix Halo iGPU", sys)
+	}
+	smi, err := parseRocmSMI(readFixture(t, "rocm-smi/strixhalo.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const ramMB = 128123
+	gpus := buildAMDGPUs(root, sys, smi, "7.2.7+rex-amd64", ramMB)
+	if len(gpus) != 1 {
+		t.Fatalf("gpus = %+v, want 1 (unified memory bypasses the %d MB threshold)", gpus, minAMDVRAMMB)
+	}
+	assertGPU(t, gpus[0], &typesv1.GpuInfo{
+		Vendor:        "amd",
+		Model:         "AMD Radeon 8060S Graphics",
+		VramMb:        ramMB,
+		DriverVersion: "7.2.7+rex-amd64",
+		Accel:         "rocm",
+		UnifiedMemory: true,
+	})
+}
+
+// With no RAM figure the GPU is still reported — dropping a serveable GPU
+// is worse than reporting its carveout — but the VRAM figure stays the
+// carveout, since there is nothing better to report.
+func TestAMDUnifiedMemoryAPUWithoutRAMFigure(t *testing.T) {
+	root := fixture(t, "strixhalo")
+	gpus := buildAMDGPUs(root, amdSysfsGPUs(root), rocmSMIInfo{}, "7.2.7+rex-amd64", 0)
+	if len(gpus) != 1 {
+		t.Fatalf("gpus = %+v, want 1", gpus)
+	}
+	if gpus[0].VramMb != 512 || !gpus[0].UnifiedMemory {
+		t.Errorf("gpu = %+v, want the 512 MB carveout with UnifiedMemory set", gpus[0])
+	}
+	// No rocm-smi: the pci.ids silicon-family name stands in for the series.
+	if want := "Strix Halo [Radeon Graphics / Radeon 8050S Graphics / Radeon 8060S Graphics]"; gpus[0].Model != want {
+		t.Errorf("model = %q, want %q", gpus[0].Model, want)
 	}
 }
 
@@ -164,7 +212,7 @@ func TestAMDNoDriverBound(t *testing.T) {
 	if len(unbound) != 1 || unbound[0] != "0000:03:00.0" {
 		t.Errorf("unbound = %v, want [0000:03:00.0] (the .1 function is HDMI audio)", unbound)
 	}
-	if gpus := buildAMDGPUs(root, sys, rocmSMIInfo{}, "6.8.0"); len(gpus) != 0 {
+	if gpus := buildAMDGPUs(root, sys, rocmSMIInfo{}, "6.8.0", 0); len(gpus) != 0 {
 		t.Errorf("gpus = %+v, want none", gpus)
 	}
 }

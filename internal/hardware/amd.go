@@ -34,11 +34,21 @@ const (
 	// Integrated APUs reserve a BIOS carveout (typically 256 MB–2 GB) that
 	// no catalog model fits, and reporting one would place the node as a
 	// GPU box it cannot serve as. Skipped GPUs are logged at debug, never
-	// dropped silently. Large-carveout APUs (Strix Halo class) clear the
-	// bar; using GTT beyond the carveout is a llama.cpp/ROCm concern, not
-	// detection's.
+	// dropped silently. Unified-memory APUs bypass this entirely: their
+	// carveout is not their budget (see unifiedMemoryDeviceIDs).
 	minAMDVRAMMB = 2048
 )
+
+// unifiedMemoryDeviceIDs are AMD APUs whose GPU addresses system RAM rather
+// than a fixed VRAM pool, so the BIOS carveout reported by sysfs and
+// rocm-smi (512 MB on Strix Halo) says nothing about what the GPU can
+// actually use. These are reported like Apple Silicon — UnifiedMemory with
+// system RAM as the VRAM figure (hw_darwin.go) — and skip minAMDVRAMMB.
+//
+//	0x1586 — Strix Halo (Ryzen AI MAX+ 395, Radeon 8060S, gfx1151)
+var unifiedMemoryDeviceIDs = map[string]bool{
+	"0x1586": true,
+}
 
 // drmCardRe matches primary DRM nodes (card0, card1) and excludes
 // connectors (card1-DP-1) and render nodes (renderD128).
@@ -297,12 +307,13 @@ func lowerKeys(m map[string]any) map[string]string {
 
 // buildAMDGPUs merges the sysfs view with optional rocm-smi enrichment
 // into GpuInfo records. kernel is the running kernel release, the driver
-// version of last resort for the in-tree module.
+// version of last resort for the in-tree module. ramMB is the system RAM,
+// reported as the VRAM figure for unified-memory APUs.
 //
 // Model name precedence: sysfs product_name (VBIOS/FRU string, mostly
 // server cards) > pci.ids subsystem (retail SKU) > rocm-smi series >
 // pci.ids device (silicon family) > "AMD GPU <device id>".
-func buildAMDGPUs(root string, sys []amdSysfsGPU, smi rocmSMIInfo, kernel string) []*typesv1.GpuInfo {
+func buildAMDGPUs(root string, sys []amdSysfsGPU, smi rocmSMIInfo, kernel string, ramMB uint64) []*typesv1.GpuInfo {
 	log := slog.Default()
 	driver := firstNonEmpty(amdModuleVersion(root), smi.DriverVersion)
 	if driver == "" && kernel != "" {
@@ -320,7 +331,14 @@ func buildAMDGPUs(root string, sys []amdSysfsGPU, smi rocmSMIInfo, kernel string
 		if vram == 0 {
 			vram = card.VRAMMB
 		}
-		if vram < minAMDVRAMMB {
+		unified := unifiedMemoryDeviceIDs[g.DeviceID]
+		if unified && ramMB > 0 {
+			// The carveout is not the budget; the GPU addresses system RAM.
+			log.Info("amd unified-memory apu; reporting system ram as vram",
+				"card", g.Card, "model", model, "carveout_mb", vram, "ram_mb", ramMB)
+			vram = ramMB
+		}
+		if !unified && vram < minAMDVRAMMB {
 			log.Debug("amd gpu below VRAM threshold; not reported (APU carveout?)",
 				"card", g.Card, "model", model, "vram_mb", vram, "min_mb", minAMDVRAMMB)
 			continue
@@ -331,6 +349,7 @@ func buildAMDGPUs(root string, sys []amdSysfsGPU, smi rocmSMIInfo, kernel string
 			VramMb:        vram,
 			DriverVersion: driver,
 			Accel:         accelROCm,
+			UnifiedMemory: unified,
 		})
 	}
 	return gpus
