@@ -34,11 +34,53 @@ const (
 	// Integrated APUs reserve a BIOS carveout (typically 256 MB–2 GB) that
 	// no catalog model fits, and reporting one would place the node as a
 	// GPU box it cannot serve as. Skipped GPUs are logged at debug, never
-	// dropped silently. Large-carveout APUs (Strix Halo class) clear the
-	// bar; using GTT beyond the carveout is a llama.cpp/ROCm concern, not
-	// detection's.
+	// dropped silently. Unified-memory APUs bypass this entirely: their
+	// carveout is not their budget (see unifiedMemoryDeviceIDs).
 	minAMDVRAMMB = 2048
 )
+
+// unifiedMemoryDeviceIDs are AMD APUs whose GPU addresses system RAM rather
+// than a fixed VRAM pool, so the BIOS carveout reported by sysfs and
+// rocm-smi (512 MB on Strix Halo) says nothing about what the GPU can
+// actually use. These are reported like Apple Silicon — UnifiedMemory with
+// system RAM as the VRAM figure (hw_darwin.go) — and skip minAMDVRAMMB.
+//
+//	0x1586 — Strix Halo (Ryzen AI MAX+ 395, Radeon 8060S, gfx1151)
+var unifiedMemoryDeviceIDs = map[string]bool{
+	"0x1586": true,
+}
+
+// hasUsableDiscreteAMD reports whether a non-unified AMD GPU clears
+// minAMDVRAMMB, which decides whether a unified-memory APU on the same box
+// may be reported as unified at all.
+//
+// memory.Unified() is true as soon as *any* GPU carries UnifiedMemory, and
+// Discrete(), AutoBudgetMB() and VRAMSampler.Vendor() all key off it. That
+// is safe on Apple Silicon, where a unified GPU is the only GPU, but a Strix
+// Halo board with a PCIe slot (Framework Desktop) or an OCuLink mini-PC is
+// commonly paired with a discrete Radeon, and pickLinuxGPUs's NVIDIA-first
+// rule does not apply to an all-AMD box, so both are reported. Marking the
+// APU unified there would hand the planner RAM/2 as its budget, disable
+// VRAM admission, and report the APU's RAM as the node's VRAM — admitting
+// models that do not fit the card the weights actually land on.
+//
+// So the APU yields to the card: dropped at the floor exactly as it was
+// before unified support, leaving every derived figure keyed to the dGPU.
+func hasUsableDiscreteAMD(sys []amdSysfsGPU, smi rocmSMIInfo) bool {
+	for i, g := range sys {
+		if unifiedMemoryDeviceIDs[g.DeviceID] {
+			continue
+		}
+		vram := g.VRAMMB
+		if vram == 0 {
+			vram = matchRocmCard(smi.Cards, g, i, len(sys)).VRAMMB
+		}
+		if vram >= minAMDVRAMMB {
+			return true
+		}
+	}
+	return false
+}
 
 // drmCardRe matches primary DRM nodes (card0, card1) and excludes
 // connectors (card1-DP-1) and render nodes (renderD128).
@@ -297,17 +339,20 @@ func lowerKeys(m map[string]any) map[string]string {
 
 // buildAMDGPUs merges the sysfs view with optional rocm-smi enrichment
 // into GpuInfo records. kernel is the running kernel release, the driver
-// version of last resort for the in-tree module.
+// version of last resort for the in-tree module. ramMB is the system RAM,
+// reported as the VRAM figure for unified-memory APUs.
 //
 // Model name precedence: sysfs product_name (VBIOS/FRU string, mostly
 // server cards) > pci.ids subsystem (retail SKU) > rocm-smi series >
 // pci.ids device (silicon family) > "AMD GPU <device id>".
-func buildAMDGPUs(root string, sys []amdSysfsGPU, smi rocmSMIInfo, kernel string) []*typesv1.GpuInfo {
+func buildAMDGPUs(root string, sys []amdSysfsGPU, smi rocmSMIInfo, kernel string, ramMB uint64) []*typesv1.GpuInfo {
 	log := slog.Default()
 	driver := firstNonEmpty(amdModuleVersion(root), smi.DriverVersion)
 	if driver == "" && kernel != "" {
 		driver = "amdgpu (kernel " + kernel + ")"
 	}
+	// A discrete Radeon on the same box outranks a unified-memory APU.
+	discrete := hasUsableDiscreteAMD(sys, smi)
 	var gpus []*typesv1.GpuInfo
 	for i, g := range sys {
 		card := matchRocmCard(smi.Cards, g, i, len(sys))
@@ -320,7 +365,22 @@ func buildAMDGPUs(root string, sys []amdSysfsGPU, smi rocmSMIInfo, kernel string
 		if vram == 0 {
 			vram = card.VRAMMB
 		}
-		if vram < minAMDVRAMMB {
+		// Substituting RAM for the carveout is what earns the threshold
+		// bypass: without a RAM figure (unreadable /proc/meminfo) there is
+		// nothing better to report than the carveout, and reporting that is
+		// the mis-advertisement minAMDVRAMMB exists to prevent, so such a
+		// GPU falls through to the floor like any other.
+		unified := unifiedMemoryDeviceIDs[g.DeviceID] && !discrete && ramMB > 0
+		if unified {
+			log.Info("amd unified-memory apu; reporting system ram as vram",
+				"card", g.Card, "model", model, "carveout_mb", vram, "ram_mb", ramMB)
+			vram = ramMB
+		} else if unifiedMemoryDeviceIDs[g.DeviceID] && discrete {
+			log.Info("amd unified-memory apu yields to a discrete radeon on this box; not reported",
+				"card", g.Card, "model", model, "carveout_mb", vram)
+			continue
+		}
+		if !unified && vram < minAMDVRAMMB {
 			log.Debug("amd gpu below VRAM threshold; not reported (APU carveout?)",
 				"card", g.Card, "model", model, "vram_mb", vram, "min_mb", minAMDVRAMMB)
 			continue
@@ -331,6 +391,7 @@ func buildAMDGPUs(root string, sys []amdSysfsGPU, smi rocmSMIInfo, kernel string
 			VramMb:        vram,
 			DriverVersion: driver,
 			Accel:         accelROCm,
+			UnifiedMemory: unified,
 		})
 	}
 	return gpus
