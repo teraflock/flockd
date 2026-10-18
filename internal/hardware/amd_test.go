@@ -184,22 +184,40 @@ func TestAMDUnifiedMemoryAPUReportsSystemRAM(t *testing.T) {
 	})
 }
 
-// With no RAM figure the GPU is still reported — dropping a serveable GPU
-// is worse than reporting its carveout — but the VRAM figure stays the
-// carveout, since there is nothing better to report.
-func TestAMDUnifiedMemoryAPUWithoutRAMFigure(t *testing.T) {
+// Substituting RAM for the carveout is what earns the threshold bypass, so
+// with no RAM figure (unreadable /proc/meminfo) the APU falls through to the
+// floor like any other GPU rather than advertising its 512 MB carveout —
+// which is the mis-advertisement minAMDVRAMMB exists to prevent.
+func TestAMDUnifiedMemoryAPUWithoutRAMFigureIsSkipped(t *testing.T) {
 	root := fixture(t, "strixhalo")
-	gpus := buildAMDGPUs(root, amdSysfsGPUs(root), rocmSMIInfo{}, "7.2.7+rex-amd64", 0)
+	if gpus := buildAMDGPUs(root, amdSysfsGPUs(root), rocmSMIInfo{}, "7.2.7+rex-amd64", 0); len(gpus) != 0 {
+		t.Errorf("gpus = %+v, want none: with no RAM figure the carveout is all there is", gpus)
+	}
+}
+
+// A unified-memory APU paired with a discrete Radeon yields to the card.
+// memory.Unified() is true as soon as any GPU is unified, and Discrete(),
+// AutoBudgetMB() and VRAMSampler.Vendor() key off it, so marking the APU
+// unified here would budget RAM/2, disable VRAM admission and report the
+// APU's RAM as the node's VRAM instead of the dGPU's 24 GB.
+func TestAMDUnifiedMemoryAPUYieldsToDiscreteGPU(t *testing.T) {
+	root := fixture(t, "strixhalo-dgpu")
+	sys := amdSysfsGPUs(root)
+	if len(sys) != 2 {
+		t.Fatalf("sysfs = %+v, want 2 (the APU and the dGPU)", sys)
+	}
+	gpus := buildAMDGPUs(root, sys, rocmSMIInfo{}, "6.8.0", 128123)
 	if len(gpus) != 1 {
-		t.Fatalf("gpus = %+v, want 1", gpus)
+		t.Fatalf("gpus = %+v, want only the discrete card", gpus)
 	}
-	if gpus[0].VramMb != 512 || !gpus[0].UnifiedMemory {
-		t.Errorf("gpu = %+v, want the 512 MB carveout with UnifiedMemory set", gpus[0])
-	}
-	// No rocm-smi: the pci.ids silicon-family name stands in for the series.
-	if want := "Strix Halo [Radeon Graphics / Radeon 8050S Graphics / Radeon 8060S Graphics]"; gpus[0].Model != want {
-		t.Errorf("model = %q, want %q", gpus[0].Model, want)
-	}
+	assertGPU(t, gpus[0], &typesv1.GpuInfo{
+		Vendor:        "amd",
+		Model:         "Radeon RX 7900 XTX",
+		VramMb:        24560,
+		DriverVersion: "amdgpu (kernel 6.8.0)",
+		Accel:         "rocm",
+		UnifiedMemory: false,
+	})
 }
 
 func TestAMDNoDriverBound(t *testing.T) {

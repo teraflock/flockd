@@ -1,0 +1,7 @@
+#
+#	List of PCI ID's (trimmed fixture: only the entries the tests need)
+#
+1002  Advanced Micro Devices, Inc. [AMD/ATI]
+	1586  Strix Halo [Radeon Graphics / Radeon 8050S Graphics / Radeon 8060S Graphics]
+	744c  Navi 31 [Radeon RX 7900 XT/7900 XTX/7900M]
+		1002 0e3b  Radeon RX 7900 XTX
