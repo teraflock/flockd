@@ -85,7 +85,7 @@ func TestListMarksMissingFilesAndDropsThemFromBudget(t *testing.T) {
 	// "here" (9 bytes) is over only by "here" — the missing one is never
 	// evicted-by-size, and no error mentions it.
 	m.SetMaxDiskMB(1)
-	if err := m.evictForLocked(context.Background(), 0, false); err != nil {
+	if err := m.evictForLocked(context.Background(), "probe", 0, false); err != nil {
 		t.Fatal(err)
 	}
 	if !m.Has("here") {

@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/teraflock/flockd/internal/activity"
 	typesv1 "github.com/teraflock/proto/gen/go/flock/types/v1"
 )
 
@@ -413,6 +414,87 @@ func TestLRUEvictionUnderBudget(t *testing.T) {
 	}
 	if _, err := os.Stat(m.Path("m2")); !errors.Is(err, os.ErrNotExist) {
 		t.Error("m2 file should be gone")
+	}
+}
+
+// A loaded model is never evicted for disk space, however old its
+// LastUsed: on 2026-10-31 the LRU pass deleted qwen3-4b-instruct's weights
+// under a running llama-server. The next-oldest unloaded model goes
+// instead, the activity row says which model made room for which and
+// which loaded model was kept, and when every candidate is loaded the
+// download fails with the loaded models named instead of freeing nothing.
+func TestLRUEvictionSkipsLoadedModels(t *testing.T) {
+	mb := 1024 * 1024
+	blobs := map[string][]byte{}
+	for _, id := range []string{"m1", "m2", "m3", "m4", "m5"} {
+		blobs[id] = []byte(strings.Repeat(id[:1]+id[1:], mb/2))
+	}
+	srv := artifactServer(t, blobs)
+	defer srv.Close()
+
+	m, _ := NewManager(t.TempDir(), 3, quietLog())
+	m.Activity = activity.New(16)
+	loaded := map[string]bool{"m2": true}
+	m.IsLoaded = func(id string) bool { return loaded[id] }
+	ctx := context.Background()
+	for _, id := range []string{"m1", "m2", "m3"} {
+		if _, err := m.Ensure(ctx, spec(id, blobs[id], srv.URL)); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(5 * time.Millisecond) // distinct LastUsed
+	}
+	m.Touch("m1") // LRU order: m2, m3, m1 — but m2 is loaded
+
+	if _, err := m.Ensure(ctx, spec("m4", blobs["m4"], srv.URL)); err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]bool{}
+	for _, i := range m.List() {
+		ids[i.ID] = true
+	}
+	if !ids["m2"] {
+		t.Error("m2 is loaded and must survive eviction")
+	}
+	if ids["m3"] {
+		t.Error("m3 (oldest unloaded) should have been evicted instead")
+	}
+	if !ids["m1"] || !ids["m4"] {
+		t.Errorf("cache = %v", ids)
+	}
+	var row *activity.Event
+	for _, e := range m.Activity.List() {
+		if e.Kind == activity.KindEvicted {
+			e := e
+			row = &e
+		}
+	}
+	if row == nil {
+		t.Fatal("no evicted activity row")
+	}
+	if row.Model != "m3" || !strings.Contains(row.Message, "to make room for m4") {
+		t.Errorf("evicted row = %+v, want m3 evicted for m4", *row)
+	}
+	if !strings.Contains(row.Detail, "kept (loaded): m2") {
+		t.Errorf("evicted row detail = %q, want the kept loaded model named", row.Detail)
+	}
+
+	// Everything left is loaded: nothing may go, and the failure names why.
+	loaded["m1"], loaded["m4"] = true, true
+	_, err := m.Ensure(ctx, spec("m5", blobs["m5"], srv.URL))
+	if !errors.Is(err, ErrOverBudget) {
+		t.Fatalf("err = %v, want ErrOverBudget", err)
+	}
+	if !strings.Contains(err.Error(), "loaded: m1, m2, m4") {
+		t.Errorf("err = %v, want the loaded models named", err)
+	}
+	for _, id := range []string{"m1", "m2", "m4"} {
+		if _, err := os.Stat(m.Path(id)); err != nil {
+			t.Errorf("%s must survive: %v", id, err)
+		}
+	}
+	failed := m.Activity.List()[0]
+	if failed.Kind != activity.KindDownloadFailed || failed.Model != "m5" || !strings.Contains(failed.Detail, "kept loaded: m1, m2, m4") {
+		t.Errorf("download_failed row = %+v", failed)
 	}
 }
 

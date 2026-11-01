@@ -78,8 +78,12 @@ type Manager struct {
 	// Activity receives store events (downloads, evictions, missing
 	// files). May be nil.
 	Activity *activity.Ring
-	// IsLoaded reports whether a model is currently loaded in a runtime;
-	// retention never evicts a loaded model. Nil = nothing is loaded.
+	// IsLoaded reports whether a model is in a runtime right now — loaded,
+	// serving a request, or on its way in (download, admission, runtime
+	// start). Neither retention nor disk-budget eviction ever takes such a
+	// model: deleting the weights under a live llama-server (which mmaps
+	// them) is a crash or a silently wrong answer, never a freed budget.
+	// Nil = nothing is loaded.
 	IsLoaded func(id string) bool
 
 	// DownloadMaxAttempts, DownloadBackoffMin/Max bound the retry schedule
@@ -158,6 +162,11 @@ type cacheEntry struct {
 	// models are never the mesh's to delete. Empty = operator (pre-field
 	// cache files).
 	Origin string `json:"origin,omitempty"`
+	// Placement is why the mesh asked for a mesh-origin model, as the
+	// coordinator said when it placed it: "floor", "demand", "warm" or
+	// "stage" (proto design note 2026-11-01). Empty when unknown (an
+	// operator model, or a coordinator that sends no reason).
+	Placement string `json:"placement,omitempty"`
 	// Parts and Mmproj are set for a multi-file artifact (sharded GGUF
 	// and/or vision projector), which lives in <Dir>/<id>/ under the
 	// upstream basenames; SHA256 is then the composite id, not a file
@@ -372,7 +381,7 @@ func (m *Manager) EnsureArtifact(ctx context.Context, spec *typesv1.ModelSpec, o
 
 	// Pre-flight on the whole set: nothing is fetched that cannot fit.
 	need := set.totalBytes()
-	if err := m.evictForLocked(ctx, need, origin == OriginMesh); err != nil {
+	if err := m.evictForLocked(ctx, id, need, origin == OriginMesh); err != nil {
 		// The operator sees this row; the 202 that started an operator
 		// download went out before this check ran.
 		m.Activity.Record(activity.KindDownloadFailed, actorFor(origin), id,
@@ -804,12 +813,16 @@ func verifySHA(path, want string) error {
 	return nil
 }
 
-// evictForLocked frees space so a new artifact of size need fits inside
-// MaxDiskMB, evicting least-recently-used unpinned models first.
-// evictForLocked frees LRU space under the disk budget for need bytes.
-// meshOnly restricts candidates to mesh-origin entries (a coordinator
-// placement never costs the operator one of their own models).
-func (m *Manager) evictForLocked(_ context.Context, need int64, meshOnly bool) error {
+// evictForLocked frees LRU space under the disk budget so a new artifact
+// of size need (the model forID) fits inside MaxDiskMB, deleting
+// least-recently-used models first. Never a candidate: a pinned model, a
+// model that is still downloading, a model IsLoaded says is in a runtime
+// (loaded, serving, or being loaded — the weights are mmapped by a live
+// process), and, when meshOnly, an operator-owned model (a coordinator
+// placement never costs the operator one of their own). Every eviction
+// leaves an activity row naming the model it made room for, and when the
+// artifact cannot fit the download_failed row says what stood in the way.
+func (m *Manager) evictForLocked(_ context.Context, forID string, need int64, meshOnly bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.maxDiskMB <= 0 {
@@ -819,18 +832,33 @@ func (m *Manager) evictForLocked(_ context.Context, need int64, meshOnly bool) e
 
 	total := need
 	var candidates []*cacheEntry
+	var skippedLoaded, skippedPinned, skippedOperator []string
 	for _, e := range m.state.Entries {
 		if e.State == StateReady && !m.filesExistLocked(e) {
 			continue // missing from disk: occupies nothing
 		}
 		total += e.SizeBytes
-		if !e.Pinned && e.State == "ready" && (!meshOnly || e.Origin == OriginMesh) {
+		if e.State != StateReady {
+			continue
+		}
+		switch {
+		case e.Pinned:
+			skippedPinned = append(skippedPinned, e.ID)
+		case meshOnly && e.Origin != OriginMesh:
+			skippedOperator = append(skippedOperator, e.ID)
+		case m.IsLoaded != nil && m.IsLoaded(e.ID):
+			skippedLoaded = append(skippedLoaded, e.ID)
+		default:
 			candidates = append(candidates, e)
 		}
 	}
 	if total <= budget {
 		return nil
 	}
+	sort.Strings(skippedLoaded)
+	sort.Strings(skippedPinned)
+	sort.Strings(skippedOperator)
+	why := evictionBlockers(skippedLoaded, skippedPinned, skippedOperator)
 	// Decide before deleting anything: when evicting every candidate still
 	// would not make room, the artifact does not fit and nothing is
 	// evicted. The old order (evict first, check after) let a placement
@@ -841,33 +869,59 @@ func (m *Manager) evictForLocked(_ context.Context, need int64, meshOnly bool) e
 		reclaimable += e.SizeBytes
 	}
 	if total-reclaimable > budget {
-		return fmt.Errorf("%w: %d MB within disk budget %d MB (pinned or operator-owned models occupy the rest)", ErrOverBudget, need/1024/1024, m.maxDiskMB)
+		return fmt.Errorf("%w: %d MB within disk budget %d MB (%s)", ErrOverBudget, need/1024/1024, m.maxDiskMB, why)
 	}
 	sort.Slice(candidates, func(i, j int) bool {
 		return candidates[i].LastUsed.Before(candidates[j].LastUsed)
 	})
+	actor := activity.ActorOperator
+	if meshOnly {
+		actor = activity.ActorMesh
+	}
+	detail := "lru, max_disk_mb"
+	if len(skippedLoaded) > 0 {
+		detail += "; kept (loaded): " + strings.Join(skippedLoaded, ", ")
+	}
 	for _, e := range candidates {
 		if total <= budget {
 			break
 		}
-		m.Log.Info("evicting model (LRU, disk budget)", "model", e.ID, "size_mb", e.SizeBytes/1024/1024)
+		m.Log.Info("evicting model (LRU, disk budget)", "model", e.ID, "size_mb", e.SizeBytes/1024/1024, "for", forID, "kept_loaded", skippedLoaded)
 		if err := m.removeFilesLocked(e); err != nil {
 			return fmt.Errorf("models: evict %s: %w", e.ID, err)
 		}
 		total -= e.SizeBytes
 		delete(m.state.Entries, e.ID)
-		actor := activity.ActorOperator
-		if meshOnly {
-			actor = activity.ActorMesh
-		}
 		m.Activity.Record(activity.KindEvicted, actor, e.ID,
-			fmt.Sprintf("evicted %s (%s) to stay under the disk budget", e.ID, humanBytes(e.SizeBytes)), "lru, max_disk_mb")
+			fmt.Sprintf("evicted %s (%s) to make room for %s under the disk budget", e.ID, humanBytes(e.SizeBytes), forID), detail)
 	}
 	m.saveLocked()
 	if total > budget {
-		return fmt.Errorf("%w: %d MB within disk budget %d MB (pinned or operator-owned models occupy the rest)", ErrOverBudget, need/1024/1024, m.maxDiskMB)
+		return fmt.Errorf("%w: %d MB within disk budget %d MB (%s)", ErrOverBudget, need/1024/1024, m.maxDiskMB, why)
 	}
 	return nil
+}
+
+// evictionBlockers words what kept the budget from being freed, for the
+// ErrOverBudget message and the download_failed activity row: which
+// models were not candidates and why. Loaded models are named first —
+// before this, "pinned or operator-owned models occupy the rest" was all
+// the operator saw when the real reason was a model still serving.
+func evictionBlockers(loaded, pinned, operator []string) string {
+	var parts []string
+	if len(loaded) > 0 {
+		parts = append(parts, "loaded: "+strings.Join(loaded, ", "))
+	}
+	if len(pinned) > 0 {
+		parts = append(parts, "pinned: "+strings.Join(pinned, ", "))
+	}
+	if len(operator) > 0 {
+		parts = append(parts, "operator-owned: "+strings.Join(operator, ", "))
+	}
+	if len(parts) == 0 {
+		return "nothing evictable"
+	}
+	return "kept " + strings.Join(parts, "; ")
 }
 
 // filesExistLocked reports whether every file of the entry is on disk.
@@ -915,6 +969,31 @@ func (m *Manager) Origin(id string) string {
 		return OriginOperator
 	}
 	return e.Origin
+}
+
+// Placement reports why the mesh placed a cached model ("" when unknown
+// or not cached); see cacheEntry.Placement.
+func (m *Manager) Placement(id string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if e, ok := m.state.Entries[id]; ok {
+		return e.Placement
+	}
+	return ""
+}
+
+// SetPlacement records why the mesh asked for a cached model, replacing
+// an earlier reason (a warm of a cached copy is a new placement). A model
+// the cache does not know is ignored.
+func (m *Manager) SetPlacement(id, reason string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e, ok := m.state.Entries[id]
+	if !ok || e.Placement == reason {
+		return
+	}
+	e.Placement = reason
+	m.saveLocked()
 }
 
 // Pin marks a model exempt from eviction; unpin re-allows it.
@@ -1008,6 +1087,9 @@ type Info struct {
 	State     string    `json:"state"`
 	// Origin is "operator" or "mesh" (who installed it).
 	Origin string `json:"origin"`
+	// Placement is why the mesh placed it (floor, demand, warm, stage);
+	// "" when unknown.
+	Placement string `json:"placement,omitempty"`
 	// ReceivedBytes is live progress, present only while downloading.
 	ReceivedBytes int64 `json:"received_bytes,omitempty"`
 	// Path is the artifact's absolute path; empty unless the file exists.
@@ -1030,7 +1112,7 @@ func (m *Manager) List() []Info {
 	out := make([]Info, 0, len(m.state.Entries))
 	var newlyMissing []string
 	for _, e := range m.state.Entries {
-		row := Info{ID: e.ID, SizeBytes: e.SizeBytes, Pinned: e.Pinned, LastUsed: e.LastUsed, State: e.State, Origin: e.Origin}
+		row := Info{ID: e.ID, SizeBytes: e.SizeBytes, Pinned: e.Pinned, LastUsed: e.LastUsed, State: e.State, Origin: e.Origin, Placement: e.Placement}
 		if row.Origin == "" {
 			row.Origin = OriginOperator
 		}
