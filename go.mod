@@ -2,7 +2,7 @@ module github.com/teraflock/flockd
 
 go 1.26.0
 
-toolchain go1.26.9
+toolchain go1.26.10
 
 require (
 	github.com/charmbracelet/bubbletea v1.3.10
