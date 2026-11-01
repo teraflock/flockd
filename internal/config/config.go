@@ -126,6 +126,11 @@ type Governor struct {
 	MaxTempCelsius float64 `koanf:"max_temp_celsius"`
 	// Schedule windows for serve_policy=scheduled, e.g. ["22:00-08:00"].
 	Schedule []string `koanf:"schedule"`
+	// KeepAwake holds a system-sleep assertion (never the display) while a
+	// request is in flight or while the node is serving and enrolled, so
+	// the OS idle timer does not suspend a node the mesh is counting on
+	// (docs/sleep.md). False = flockd never touches power management.
+	KeepAwake bool `koanf:"keep_awake"`
 }
 
 type Budget struct {
@@ -244,6 +249,7 @@ func Default() Config {
 			PollInterval:   2 * time.Second,
 			ServeOnBattery: false,
 			MaxTempCelsius: 90,
+			KeepAwake:      true,
 		},
 		Budget: Budget{
 			MaxVRAMPercent: 80,

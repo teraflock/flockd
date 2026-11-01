@@ -91,6 +91,10 @@ type Policy struct {
 	ServeOnBattery bool
 	MaxTempCelsius float64
 	Schedule       []Window
+	// KeepAwake lets the governor hold a system-sleep assertion while a
+	// request is in flight or while serving and enrolled (docs/sleep.md).
+	// False = flockd never touches power management.
+	KeepAwake bool
 }
 
 // Governor evaluates Policy against live signals.
@@ -108,6 +112,15 @@ type Governor struct {
 	subs         []chan State
 	lastPower    PowerStatus
 	warnedIdle   bool
+	enrolled     bool
+
+	// Sleep assertion (power.go). awakeMu orders the OS calls and is
+	// never taken under mu — wantAwake takes mu inside it.
+	awakeMu     sync.Mutex
+	inhibitor   SleepInhibitor
+	awakeReason string
+	awakeClosed bool
+	warnedAwake bool
 }
 
 // New builds a Governor. clk may be nil (wall clock).
@@ -169,6 +182,7 @@ func (g *Governor) SetPolicy(p Policy) {
 	g.mu.Lock()
 	g.policy = p
 	g.mu.Unlock()
+	g.syncAwake()
 }
 
 // Policy returns a copy of the active policy.
@@ -222,6 +236,7 @@ func (g *Governor) Admit(parent context.Context, id string) (context.Context, fu
 	ctx, cancel := context.WithCancel(parent)
 	g.inflight[id] = cancel
 	g.mu.Unlock()
+	g.syncAwake()
 
 	var once sync.Once
 	release := func() {
@@ -236,6 +251,7 @@ func (g *Governor) Admit(parent context.Context, id string) (context.Context, fu
 			}
 			g.mu.Unlock()
 			cancel()
+			g.syncAwake()
 		})
 	}
 	return ctx, release, nil
@@ -258,6 +274,7 @@ func (g *Governor) evaluate(ctx context.Context) {
 	if desired == prev {
 		return
 	}
+	g.syncAwake()
 	g.log.Info("governor state change", "from", prev.String(), "to", desired.String())
 	for _, ch := range subs {
 		select {

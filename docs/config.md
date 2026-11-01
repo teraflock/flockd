@@ -108,6 +108,15 @@ max_temp_celsius = 90.0         # pause above this temperature (0 disables;
                                 # Linux thermal zones only — macOS and Windows
                                 # report no temperature, so this never trips there)
 schedule         = []           # serve_policy=scheduled windows, e.g. ["22:00-08:00"]
+keep_awake       = true         # hold a system-sleep assertion (never the display)
+                                # while a request is in flight, or while serving
+                                # and enrolled — so the OS idle timer does not
+                                # suspend a node the mesh counts on. Released on
+                                # yield, pause, idle-unenrolled, stop and exit.
+                                # Standalone never holds it. See docs/sleep.md.
+                                # (macOS: caffeinate -i; Windows: PowerSetRequest
+                                # SystemRequired, visible in powercfg /requests;
+                                # Linux: logind idle inhibitor via systemd-inhibit)
 
 [budget]
 max_vram_percent = 80   # ceiling for the runtime (passed to llama-server)

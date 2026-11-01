@@ -171,7 +171,14 @@ func run() error {
 		ServeOnBattery: cfg.Governor.ServeOnBattery,
 		MaxTempCelsius: cfg.Governor.MaxTempCelsius,
 		Schedule:       windows,
+		KeepAwake:      cfg.Governor.KeepAwake,
 	}, governor.NewPlatformIdleSource(), governor.NewPlatformPowerSource(), nil, log)
+	// Sleep policy (docs/sleep.md): the governor owns the one power
+	// assertion flockd ever takes, and run's return drops it whatever
+	// else is still winding down — a stopped daemon never keeps a
+	// machine awake.
+	gov.SetSleepInhibitor(governor.NewPlatformSleepInhibitor(log))
+	defer gov.Close()
 	go gov.Run(ctx)
 
 	// ---- event bus (SSE) ----
@@ -321,6 +328,11 @@ func run() error {
 		// Retention must never take a model that is loaded or on its way
 		// into memory (the window between the store handing out the path
 		// and the engine registering the instance).
+		// Disk-budget eviction (evictForLocked) asks the same question:
+		// on 2026-10-31 it deleted qwen3-4b-instruct's weights under a
+		// running llama-server because it never did. A model the engine
+		// knows is loaded or serving; one modelops is still bringing in
+		// counts too.
 		mgr.IsLoaded = func(id string) bool {
 			if _, ok := eng.Usage(id); ok {
 				return true
@@ -490,6 +502,11 @@ func run() error {
 		mesh.creds = creds
 		mesh.rotationErr = nil
 		mesh.client = client
+		// Enrolled and serving is the "serve the mesh while you sleep"
+		// case: from here the governor keeps the system (not the display)
+		// awake while it serves. Standalone never counts as enrolled —
+		// `make run` on a laptop must not change its sleep.
+		gov.SetEnrolled(true)
 		return nil
 	}
 
@@ -662,6 +679,19 @@ func run() error {
 				exclude.Store(&ids)
 				log.Info("models.exclude changed", "exclude", ids)
 			},
+			// A budget field moved (or may have): the coordinator's copy
+			// follows now, not at the next reconnect.
+			BudgetChanged: func() {
+				mesh.mu.Lock()
+				client := mesh.client
+				mesh.mu.Unlock()
+				if client == nil {
+					return
+				}
+				if err := client.SendBudget(); err != nil {
+					log.Debug("budget update not sent", "err", err)
+				}
+			},
 			// Slots and context: later loads plan with the new limits, the
 			// mesh dispatch cap follows the slot ceiling, and loaded
 			// models that are idle are restarted now so the change shows
@@ -830,21 +860,32 @@ func reportRuntimeBuild(hw *typesv1.CapabilityProfile, inst rt.Instance, log *sl
 // startTunnel runs the session client in the background. nodeID must be the
 // coordinator-assigned ID from enrollment — the session is rejected
 // otherwise.
-func startTunnel(ctx context.Context, cfg config.Config, dialer tunnel.Dialer, addr string, coordKey []byte, nodeID string, _ *enroll.Identity, hw *typesv1.CapabilityProfile, gov *governor.Governor, stats *telemetry.Stats, eng *engine.Engine, _ *models.Manager, ops *modelops.Service, asg *assign.Service, upd *update.Checker, slotCap *atomic.Int64, log *slog.Logger) (*tunnel.Client, error) {
-	// Built per session: the slot ceiling can change under a running
-	// daemon, and the coordinator reads it from the Hello.
+func startTunnel(ctx context.Context, cfg config.Config, dialer tunnel.Dialer, addr string, coordKey []byte, nodeID string, _ *enroll.Identity, hw *typesv1.CapabilityProfile, gov *governor.Governor, stats *telemetry.Stats, eng *engine.Engine, mgr *models.Manager, ops *modelops.Service, asg *assign.Service, upd *update.Checker, slotCap *atomic.Int64, log *slog.Logger) (*tunnel.Client, error) {
+	// Built per use from the live owners of each knob, never the config
+	// file's startup values: the limits API changes them under a running
+	// daemon, the coordinator reads them from the Hello, and a settings
+	// change pushes the same object as a BudgetUpdate (design note
+	// 2026-11-01).
 	protoBudget := func() *typesv1.ResourceBudget {
-		return &typesv1.ResourceBudget{
-			MaxVramPercent: uint32(cfg.Budget.MaxVRAMPercent),
+		pol := gov.Policy()
+		b := &typesv1.ResourceBudget{
+			MaxVramPercent: uint32(cfg.Budget.MaxVRAMPercent), // restart-only setting
 			MaxRamMb:       uint64(max(cfg.Budget.MaxRAMMB, 0)),
 			// The resolved ceiling, never the raw 0 of "auto": this is the
 			// most the coordinator may set max_concurrent_requests to.
 			MaxConcurrentRequests: uint32(slotCap.Load()),
 			MaxDiskMb:             uint64(max(cfg.Models.MaxDiskMB, 0)),
-			ServeOnBattery:        cfg.Governor.ServeOnBattery,
-			MaxTempCelsius:        uint32(cfg.Governor.MaxTempCelsius),
-			ServePolicy:           cfg.Governor.ServePolicy,
+			ServeOnBattery:        pol.ServeOnBattery,
+			MaxTempCelsius:        uint32(pol.MaxTempCelsius),
+			ServePolicy:           pol.Serve,
 		}
+		if ops != nil {
+			b.MaxRamMb = uint64(max(ops.ConfiguredMemoryBudgetMB(), 0))
+		}
+		if mgr != nil {
+			b.MaxDiskMb = uint64(max(mgr.MaxDiskMB(), 0))
+		}
+		return b
 	}
 	// ready / cached / assigned / downloading, each with its origin; see
 	// assign.ModelStates for the contract.
@@ -877,6 +918,7 @@ func startTunnel(ctx context.Context, cfg config.Config, dialer tunnel.Dialer, a
 		Engine:            eng,
 		Admit:             gov,
 		MaxConcurrent:     int(slotCap.Load()),
+		Budget:            protoBudget,
 		HeartbeatInterval: cfg.Tunnel.HeartbeatInterval,
 		ReconnectMin:      cfg.Tunnel.ReconnectMin,
 		ReconnectMax:      cfg.Tunnel.ReconnectMax,
