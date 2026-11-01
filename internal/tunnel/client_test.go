@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1059,5 +1060,51 @@ func TestGenerationDispatchToDecisionModelFails(t *testing.T) {
 	}
 	if res := <-dch; res.GetError() != "" || len(res.GetAnswers()) != 3 {
 		t.Fatalf("decision result = %v", res)
+	}
+}
+
+// A live settings change pushes the whole budget as a BudgetUpdate; one
+// equal to what the coordinator already has (the Hello's, or the last
+// update) is not sent again (design note 2026-11-01).
+func TestSendBudgetReachesCoordinatorOnce(t *testing.T) {
+	var mu sync.Mutex
+	budget := &typesv1.ResourceBudget{MaxDiskMb: 1000, MaxRamMb: 2000, ServePolicy: "always"}
+	current := func() *typesv1.ResourceBudget { mu.Lock(); defer mu.Unlock(); return proto.Clone(budget).(*typesv1.ResourceBudget) }
+	h := newHarness(t, func(o *tunnel.Options) {
+		o.Budget = current
+		o.Hello = func() *tunnelv1.Hello { return &tunnelv1.Hello{NodeId: "test-node", DaemonVersion: "test", Budget: current()} }
+	})
+	// Unchanged since the Hello: nothing to send.
+	if err := h.client.SendBudget(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := h.coord.Budgets(); len(got) != 0 {
+		t.Fatalf("budget equal to the Hello's was sent: %v", got)
+	}
+	mu.Lock()
+	budget.MaxDiskMb = 5000
+	mu.Unlock()
+	for i := 0; i < 2; i++ { // the second call is a duplicate
+		if err := h.client.SendBudget(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deadline := time.After(2 * time.Second)
+	for {
+		got := h.coord.Budgets()
+		if len(got) >= 1 {
+			time.Sleep(50 * time.Millisecond)
+			got = h.coord.Budgets()
+			if len(got) != 1 || got[0].GetMaxDiskMb() != 5000 || got[0].GetMaxRamMb() != 2000 {
+				t.Fatalf("budget updates = %v, want exactly one with max_disk_mb 5000", got)
+			}
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("budget update never arrived")
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 }

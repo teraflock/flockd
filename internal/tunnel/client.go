@@ -18,6 +18,8 @@ import (
 	"time"
 
 	rt "github.com/teraflock/flockd/internal/runtime"
+	"google.golang.org/protobuf/proto"
+
 	tunnelv1 "github.com/teraflock/proto/gen/go/flock/tunnel/v1"
 	typesv1 "github.com/teraflock/proto/gen/go/flock/types/v1"
 	"google.golang.org/grpc"
@@ -57,6 +59,11 @@ type Options struct {
 	Heartbeat func() *tunnelv1.Heartbeat
 	// Hello returns the session-open message (capability, models, budget).
 	Hello func() *tunnelv1.Hello
+	// Budget returns the operator's ResourceBudget as it stands now, for
+	// SendBudget (a live settings change). May be nil: then SendBudget is
+	// a no-op. The Hello's budget is expected to come from the same
+	// source.
+	Budget func() *typesv1.ResourceBudget
 	// OnModelAssignment is invoked for coordinator model placement pushes.
 	OnModelAssignment func(ctx context.Context, ma *tunnelv1.ModelAssignment)
 	// OnConfigUpdate observes coordinator ConfigUpdates after the client
@@ -105,6 +112,10 @@ type Client struct {
 	// when it arrived; kept across reconnects (the figure does not
 	// become wrong because the tunnel blipped — only stale).
 	earnings EarningsState
+	// sentBudget is the budget the coordinator last heard on the live
+	// session (the Hello's, or the last BudgetUpdate); SendBudget skips
+	// a budget equal to it.
+	sentBudget *typesv1.ResourceBudget
 }
 
 // EarningsState is the last EarningsSnapshot pushed by the coordinator
@@ -181,10 +192,40 @@ func (c *Client) SendModelState(m *typesv1.ModelState) error {
 	}})
 }
 
+// SendBudget pushes a BudgetUpdate carrying Options.Budget() on the live
+// session, so the coordinator's capacity view follows a settings change
+// (max_disk_mb, max_ram_mb, the serve policy) without a reconnect (proto
+// design note 2026-11-01). Nothing is sent when the budget equals the one
+// the coordinator already has for this session, or between sessions (the
+// next Hello carries the live values anyway). Coordinators that predate
+// the message drop it.
+func (c *Client) SendBudget() error {
+	if c.o.Budget == nil {
+		return nil
+	}
+	b := c.o.Budget()
+	c.mu.Lock()
+	ss := c.cur
+	same := proto.Equal(b, c.sentBudget)
+	if ss != nil && !same {
+		c.sentBudget = proto.Clone(b).(*typesv1.ResourceBudget)
+	}
+	c.mu.Unlock()
+	if ss == nil {
+		return errors.New("tunnel: no session")
+	}
+	if same {
+		return nil
+	}
+	return ss.send(&tunnelv1.NodeMessage{Msg: &tunnelv1.NodeMessage_BudgetUpdate{
+		BudgetUpdate: &tunnelv1.BudgetUpdate{Budget: b},
+	}})
+}
+
 // SetMaxConcurrent changes the operator's dispatch concurrency ceiling on
 // a running client (budget.max_concurrent edited through the limits API).
 // It applies to the next dispatch; the coordinator learns the new ceiling
-// from the next session's Hello.
+// from the next session's Hello, or from SendBudget.
 func (c *Client) SetMaxConcurrent(n int) {
 	c.mu.Lock()
 	c.o.MaxConcurrent = n
@@ -312,6 +353,7 @@ func (c *Client) runSession(ctx context.Context) error {
 	c.sessions++
 	c.draining = false
 	c.cur = ss
+	c.sentBudget = hello.GetBudget()
 	c.mu.Unlock()
 	defer func() {
 		c.mu.Lock()

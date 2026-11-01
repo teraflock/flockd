@@ -261,6 +261,13 @@ func (s *Server) ListModels(w http.ResponseWriter, _ *http.Request) {
 				row.Assignment = assignmentToGen(p)
 				delete(assignments, i.ID)
 			}
+			// Why the mesh placed it: the cache entry remembers across
+			// restarts; an in-flight placement knows before it lands.
+			if r := i.Placement; r != "" {
+				row.PlacementReason = &r
+			} else if row.Assignment != nil && row.Assignment.Reason != nil {
+				row.PlacementReason = row.Assignment.Reason
+			}
 			rows = append(rows, row)
 			delete(loaded, i.ID)
 		}
@@ -279,10 +286,12 @@ func (s *Server) ListModels(w http.ResponseWriter, _ *http.Request) {
 		if p.State != assign.StateAssigned && p.State != assign.StateDownloading {
 			state = p.State // declined/failed: visible, actionable
 		}
-		rows = append(rows, gen.ModelRow{
+		row := gen.ModelRow{
 			Id: p.ID, State: state, Origin: models.OriginMesh, LastUsed: p.Since,
 			Assignment: assignmentToGen(p),
-		})
+		}
+		row.PlacementReason = row.Assignment.Reason
+		rows = append(rows, row)
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Id < rows[j].Id })
 	writeJSON(w, http.StatusOK, gen.ModelList{Models: rows})
@@ -293,6 +302,10 @@ func assignmentToGen(p assign.Pending) *gen.Assignment {
 	if p.Error != "" {
 		e := p.Error
 		a.Error = &e
+	}
+	if p.Reason != "" {
+		r := p.Reason
+		a.Reason = &r
 	}
 	return a
 }

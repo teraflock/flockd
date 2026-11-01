@@ -32,6 +32,15 @@
 // the operator installed (app/CLI/config, or adopted from the model dir),
 // "mesh" for coordinator placements — including ones not on disk yet or
 // already evicted, which can only be the mesh's.
+//
+// Every placement also says why (proto design note 2026-11-01): the
+// coordinator names the pass that produced it (ModelAssignment.placements:
+// floor, demand, warm, stage) and the daemon keeps that on the pending
+// record, the activity row and, once the artifact is on disk, the cache
+// entry, so the operator can tell "placed by the mesh floor" from
+// "requested by a customer". A declined or failed report carries the
+// daemon's reason back (ModelState.reason) so the coordinator's node page
+// shows the cause instead of just the verdict.
 package assign
 
 import (
@@ -65,6 +74,47 @@ const (
 	StateEvicted     = "evicted"
 )
 
+// Placement reasons, as the local API and the activity feed spell them:
+// the short names of tunnel PlacementReason.
+const (
+	ReasonFloor  = "floor"
+	ReasonDemand = "demand"
+	ReasonWarm   = "warm"
+	ReasonStage  = "stage"
+)
+
+// ReasonName maps a wire PlacementReason to its short name ("" for
+// unspecified or a value this build does not know).
+func ReasonName(r tunnelv1.PlacementReason) string {
+	switch r {
+	case tunnelv1.PlacementReason_PLACEMENT_REASON_FLOOR:
+		return ReasonFloor
+	case tunnelv1.PlacementReason_PLACEMENT_REASON_DEMAND:
+		return ReasonDemand
+	case tunnelv1.PlacementReason_PLACEMENT_REASON_WARM:
+		return ReasonWarm
+	case tunnelv1.PlacementReason_PLACEMENT_REASON_STAGE:
+		return ReasonStage
+	}
+	return ""
+}
+
+// DescribeReason is the operator's sentence for a placement reason ("" for
+// none): what the activity feed appends to a placement row.
+func DescribeReason(reason string) string {
+	switch reason {
+	case ReasonFloor:
+		return "the mesh floor keeps a copy of this model warm somewhere"
+	case ReasonDemand:
+		return "customers are requesting this model"
+	case ReasonWarm:
+		return "a customer's request found no node holding this model"
+	case ReasonStage:
+		return "the mesh floor is staging it ahead of demand (download only)"
+	}
+	return ""
+}
+
 // failedRetention keeps a failed/declined record visible in the local API
 // (and out of the heartbeat) before it is forgotten.
 const failedRetention = 10 * time.Minute
@@ -92,6 +142,9 @@ type Pending struct {
 	// ends cached, never loaded. An assign for the same model while the
 	// download runs upgrades it.
 	Stage bool `json:"stage,omitempty"`
+	// Reason is why the mesh asked for the model (floor, demand, warm,
+	// stage); empty from a coordinator that predates placement reasons.
+	Reason string `json:"reason,omitempty"`
 }
 
 // Service applies assignments. Nil Ops (mock runtime) declines everything
@@ -110,8 +163,12 @@ type Service struct {
 	Activity *activity.Ring
 	Log      *slog.Logger
 
-	mu       sync.Mutex
-	pending  map[string]*Pending
+	mu      sync.Mutex
+	pending map[string]*Pending
+	// placed is the placement reason per model the mesh asked for in
+	// this process, kept while the record is pending or concluded; the
+	// durable copy lives on the cache entry once the artifact is on disk.
+	placed   map[string]string
 	queue    []string // ids in StateAssigned, FIFO
 	wake     chan struct{}
 	reporter func(*typesv1.ModelState) error
@@ -165,21 +222,28 @@ func (s *Service) Apply(ctx context.Context, ma *tunnelv1.ModelAssignment) {
 	for _, id := range ma.GetEvictModelIds() {
 		s.evict(ctx, id)
 	}
+	reasons := map[string]string{}
+	for _, p := range ma.GetPlacements() {
+		if r := ReasonName(p.GetReason()); r != "" {
+			reasons[p.GetModelId()] = r
+		}
+	}
 	for _, spec := range ma.GetAssign() {
-		s.admit(ctx, spec, false)
+		s.admit(ctx, spec, false, reasons[spec.GetId()])
 	}
 	for _, spec := range ma.GetStage() {
-		s.admit(ctx, spec, true)
+		s.admit(ctx, spec, true, reasons[spec.GetId()])
 	}
 	s.kick()
 }
 
-func (s *Service) admit(ctx context.Context, spec *typesv1.ModelSpec, stage bool) {
+func (s *Service) admit(ctx context.Context, spec *typesv1.ModelSpec, stage bool, reason string) {
 	id := spec.GetId()
 	if err := models.ValidateID(id); err != nil {
 		s.conclude(id, StateDeclined, "invalid model id")
 		return
 	}
+	s.setPlacement(id, reason)
 	if s.loaded(id) {
 		// Loaded satisfies a stage too: it is on disk and then some.
 		s.report(&typesv1.ModelState{ModelId: id, State: StateReady})
@@ -189,6 +253,9 @@ func (s *Service) admit(ctx context.Context, spec *typesv1.ModelSpec, stage bool
 	if p, ok := s.pending[id]; ok && (p.State == StateAssigned || p.State == StateDownloading) {
 		if p.Stage && !stage {
 			p.Stage = false // an assign supersedes a stage in flight
+		}
+		if reason != "" {
+			p.Reason = reason
 		}
 		s.mu.Unlock()
 		return // already on it
@@ -242,28 +309,75 @@ func (s *Service) admit(ctx context.Context, spec *typesv1.ModelSpec, stage bool
 	onDisk := s.Mgr != nil && s.Mgr.Has(id)
 	if stage && onDisk {
 		// Nothing to do: already what the coordinator asked for.
-		s.report(&typesv1.ModelState{ModelId: id, State: StateCached})
-		s.Activity.Record(activity.KindAssignment, activity.ActorMesh, id, "mesh staged "+id+" (already on disk)", "")
+		s.report(&typesv1.ModelState{ModelId: id, State: StateCached, Reason: reason})
+		s.Activity.Record(activity.KindAssignment, activity.ActorMesh, id, "mesh staged "+id+" (already on disk)", DescribeReason(reason))
 		return
 	}
 	s.mu.Lock()
 	if s.pending == nil {
 		s.pending = map[string]*Pending{}
 	}
-	s.pending[id] = &Pending{ID: id, State: StateAssigned, Since: time.Now(), Stage: stage}
+	s.pending[id] = &Pending{ID: id, State: StateAssigned, Since: time.Now(), Stage: stage, Reason: reason}
 	s.queue = append(s.queue, id)
 	s.mu.Unlock()
-	s.report(&typesv1.ModelState{ModelId: id, State: StateAssigned})
+	s.report(&typesv1.ModelState{ModelId: id, State: StateAssigned, Reason: reason})
 	s.publish(id, StateAssigned, "")
 	switch {
 	case stage:
 		s.Activity.Record(activity.KindAssignment, activity.ActorMesh, id,
-			fmt.Sprintf("mesh staged %s (%.1f GB to download, not loaded)", id, float64(entry.SizeBytes)/(1<<30)), "")
+			fmt.Sprintf("mesh staged %s (%.1f GB to download, not loaded)", id, float64(entry.SizeBytes)/(1<<30)), DescribeReason(reason))
 	case onDisk:
-		s.Activity.Record(activity.KindAssignment, activity.ActorMesh, id, "mesh asked to load "+id+" (already on disk)", "")
+		s.Activity.Record(activity.KindAssignment, activity.ActorMesh, id, "mesh asked to load "+id+" (already on disk)", DescribeReason(reason))
 	default:
 		s.Activity.Record(activity.KindAssignment, activity.ActorMesh, id,
-			fmt.Sprintf("mesh assigned %s (%.1f GB to download)", id, float64(entry.SizeBytes)/(1<<30)), "")
+			fmt.Sprintf("mesh assigned %s (%.1f GB to download)", id, float64(entry.SizeBytes)/(1<<30)), DescribeReason(reason))
+	}
+}
+
+// setPlacement remembers why the mesh asked for id: in memory for the
+// pending record, and on the cache entry when the artifact is already
+// there (a warm of a cached copy). An empty reason (old coordinator)
+// leaves whatever was known.
+func (s *Service) setPlacement(id, reason string) {
+	if reason == "" {
+		return
+	}
+	s.mu.Lock()
+	if s.placed == nil {
+		s.placed = map[string]string{}
+	}
+	s.placed[id] = reason
+	s.mu.Unlock()
+	if s.Mgr != nil && s.Mgr.Has(id) {
+		s.Mgr.SetPlacement(id, reason)
+	}
+}
+
+// PlacementReason is why the mesh asked for id, as last told: the pending
+// record's reason, else what the cache entry remembers from an earlier
+// session ("" when unknown or never placed).
+func (s *Service) PlacementReason(id string) string {
+	s.mu.Lock()
+	r := s.placed[id]
+	s.mu.Unlock()
+	if r == "" && s.Mgr != nil {
+		r = s.Mgr.Placement(id)
+	}
+	return r
+}
+
+// placement is the in-process reason for id ("" when none).
+func (s *Service) placement(id string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.placed[id]
+}
+
+// landed records the placement reason on the cache entry once the
+// artifact is on disk, so it outlives this process.
+func (s *Service) landed(id string) {
+	if r := s.placement(id); r != "" && s.Mgr != nil {
+		s.Mgr.SetPlacement(id, r)
 	}
 }
 
@@ -283,6 +397,7 @@ func (s *Service) evict(ctx context.Context, id string) {
 		if s.Ops.Downloading(id) {
 			s.Ops.CancelDownload(id)
 		}
+		s.forgetPlacement(id)
 		s.report(&typesv1.ModelState{ModelId: id, State: StateEvicted})
 		return
 	}
@@ -305,6 +420,7 @@ func (s *Service) evict(ctx context.Context, id string) {
 		s.log().Warn("evict: remove failed", "model", id, "err", err)
 		return
 	}
+	s.forgetPlacement(id)
 	s.log().Info("model evicted on mesh request", "model", id)
 	s.publish(id, StateEvicted, "")
 	s.report(&typesv1.ModelState{ModelId: id, State: StateEvicted})
@@ -356,9 +472,10 @@ func (s *Service) process(ctx context.Context, id string) {
 		return // evicted while waiting
 	}
 	onDisk := s.Mgr != nil && s.Mgr.Has(id)
+	reason := s.placement(id)
 	if !onDisk {
 		// Already cached: straight to the load, no download phase to report.
-		s.report(&typesv1.ModelState{ModelId: id, State: StateDownloading})
+		s.report(&typesv1.ModelState{ModelId: id, State: StateDownloading, Reason: reason})
 		s.publish(id, StateDownloading, "")
 	}
 	if s.staged(id) {
@@ -374,7 +491,8 @@ func (s *Service) process(ctx context.Context, id string) {
 			s.mu.Lock()
 			delete(s.pending, id)
 			s.mu.Unlock()
-			s.report(&typesv1.ModelState{ModelId: id, State: StateCached})
+			s.landed(id)
+			s.report(&typesv1.ModelState{ModelId: id, State: StateCached, Reason: reason})
 			s.publish(id, StateCached, "staged")
 			s.Activity.Record(activity.KindAssignment, activity.ActorMesh, id, id+" staged: on disk, not loaded", "staged")
 			s.log().Info("mesh stage complete", "model", id)
@@ -404,6 +522,7 @@ func (s *Service) process(ctx context.Context, id string) {
 			s.mu.Lock()
 			delete(s.pending, id)
 			s.mu.Unlock()
+			s.landed(id)
 			s.log().Info("mesh assignment cached: over memory budget", "model", id, "err", err)
 			s.report(&typesv1.ModelState{ModelId: id, State: StateCached})
 			s.publish(id, StateCached, "over_memory")
@@ -419,6 +538,7 @@ func (s *Service) process(ctx context.Context, id string) {
 	s.mu.Lock()
 	delete(s.pending, id)
 	s.mu.Unlock()
+	s.landed(id)
 	s.report(&typesv1.ModelState{ModelId: id, State: StateReady})
 	s.publish(id, StateReady, "")
 	s.log().Info("mesh assignment ready", "model", id)
@@ -458,18 +578,19 @@ func (s *Service) fetchFailed(id string, err error) {
 	}
 }
 
-// conclude records a terminal failure/refusal, reports it once, and keeps
-// it visible locally for failedRetention.
+// conclude records a terminal failure/refusal, reports it once — with the
+// reason, so the coordinator's node page shows the cause and not just the
+// verdict — and keeps it visible locally for failedRetention.
 func (s *Service) conclude(id, state, reason string) {
 	s.mu.Lock()
 	if s.pending == nil {
 		s.pending = map[string]*Pending{}
 	}
-	s.pending[id] = &Pending{ID: id, State: state, Since: time.Now(), Error: reason}
+	s.pending[id] = &Pending{ID: id, State: state, Since: time.Now(), Error: reason, Reason: s.placed[id]}
 	s.queue = slices.DeleteFunc(s.queue, func(q string) bool { return q == id })
 	s.mu.Unlock()
 	s.log().Warn("mesh assignment not applied", "model", id, "state", state, "reason", reason)
-	s.report(&typesv1.ModelState{ModelId: id, State: state})
+	s.report(&typesv1.ModelState{ModelId: id, State: state, Reason: reason})
 	s.publish(id, state, reason)
 	kind := activity.KindDeclined
 	if state == StateFailed {
@@ -487,7 +608,7 @@ func (s *Service) States() []*typesv1.ModelState {
 	var out []*typesv1.ModelState
 	for _, p := range s.pending {
 		if p.State == StateAssigned || p.State == StateDownloading {
-			out = append(out, &typesv1.ModelState{ModelId: p.ID, State: p.State})
+			out = append(out, &typesv1.ModelState{ModelId: p.ID, State: p.State, Reason: p.Reason})
 		}
 	}
 	s.mu.Unlock()
@@ -642,6 +763,7 @@ func (s *Service) expire() {
 		case StateFailed, StateDeclined, StateEvicted:
 			if time.Since(p.Since) > failedRetention {
 				delete(s.pending, id)
+				delete(s.placed, id)
 			}
 		}
 	}
@@ -687,11 +809,19 @@ func (s *Service) report(m *typesv1.ModelState) {
 	}
 }
 
-func (s *Service) publish(id, state, reason string) {
+// forgetPlacement drops the in-process placement reason (the cache entry
+// goes with the artifact).
+func (s *Service) forgetPlacement(id string) {
+	s.mu.Lock()
+	delete(s.placed, id)
+	s.mu.Unlock()
+}
+
+func (s *Service) publish(id, state, errText string) {
 	if s.Events == nil {
 		return
 	}
-	s.Events.Publish("model_assignment", map[string]string{"model": id, "state": state, "error": reason})
+	s.Events.Publish("model_assignment", map[string]string{"model": id, "state": state, "error": errText, "reason": s.placement(id)})
 }
 
 func (s *Service) log() *slog.Logger {

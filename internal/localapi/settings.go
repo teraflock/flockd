@@ -74,6 +74,11 @@ type SettingsDeps struct {
 	// SetLogLevel changes the daemon's log level. Nil = the level is only
 	// saved (and reported as pending a restart).
 	SetLogLevel func(string)
+	// BudgetChanged is called after a PUT that may have moved a field of
+	// the coordinator's ResourceBudget (max_disk_mb, max_ram_mb, the slot
+	// ceiling, the serve policy), so the tunnel can send a BudgetUpdate
+	// and placement follows the app without a reconnect. May be nil.
+	BudgetChanged func()
 }
 
 func planLimitsOf(v SettingsValues) modelops.PlanLimits {
@@ -414,6 +419,11 @@ func (s *Server) UpdateLimits(w http.ResponseWriter, r *http.Request) {
 		s.applyDefaultModel(next.DefaultModel)
 	}
 	s.saveOverlay(overlay)
+	// The coordinator's copy of the budget follows the live values; the
+	// tunnel skips the message when nothing it carries changed.
+	if s.deps.Settings.BudgetChanged != nil {
+		s.deps.Settings.BudgetChanged()
+	}
 	writeJSON(w, http.StatusOK, s.limits())
 }
 

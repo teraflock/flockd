@@ -33,6 +33,7 @@ type settingsHarness struct {
 	mu      sync.Mutex
 	plans   []modelops.PlanLimits
 	exclude [][]string
+	budgets int // BudgetChanged calls
 }
 
 func newSettingsServer(t *testing.T, boot SettingsValues, overlay config.LimitsExtra) *settingsHarness {
@@ -53,6 +54,7 @@ func newSettingsServer(t *testing.T, boot SettingsValues, overlay config.LimitsE
 			Boot: boot, Overlay: overlay,
 			ApplyPlan:  func(l modelops.PlanLimits) { h.mu.Lock(); h.plans = append(h.plans, l); h.mu.Unlock() },
 			SetExclude: func(ids []string) { h.mu.Lock(); h.exclude = append(h.exclude, ids); h.mu.Unlock() },
+			BudgetChanged: func() { h.mu.Lock(); h.budgets++; h.mu.Unlock() },
 		},
 	})
 	h.srv = httptest.NewServer(s.Handler())
@@ -547,5 +549,22 @@ func TestStatusLifetimeAndSessionCounters(t *testing.T) {
 		time.Now().Add(-12*time.Hour), "")
 	if got.EstUsd < 99.99 || got.EstUsd > 100.01 || got.EstUsdPerDay < 1.99 || got.EstUsdPerDay > 2.01 || got.LifetimeTokens != 5 {
 		t.Fatalf("estimated earnings = %+v, want $100 lifetime and ~$2/day from this run", got)
+	}
+}
+
+// Every successful PUT tells the daemon the coordinator's budget may have
+// moved (the tunnel sends it only when it did); a rejected one does not.
+func TestLimitsPutNotifiesBudgetChanged(t *testing.T) {
+	h := newSettingsServer(t, SettingsValues{}, config.LimitsExtra{})
+	if code := apiDo(t, h.srv, http.MethodPut, "/api/v1/limits", `{`+baseLimits+`,"max_disk_mb":4096}`, nil); code != http.StatusOK {
+		t.Fatalf("PUT = %d", code)
+	}
+	if code := apiDo(t, h.srv, http.MethodPut, "/api/v1/limits", `{`+baseLimits+`,"max_disk_mb":-1}`, nil); code != http.StatusBadRequest {
+		t.Fatalf("bad PUT = %d", code)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.budgets != 1 {
+		t.Fatalf("BudgetChanged calls = %d, want 1 (the accepted PUT only)", h.budgets)
 	}
 }

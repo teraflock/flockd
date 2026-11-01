@@ -45,6 +45,7 @@ type Coordinator struct {
 	session     *session
 	heartbeats  []*tunnelv1.Heartbeat
 	modelStates []*typesv1.ModelState
+	budgets     []*typesv1.ResourceBudget
 	hello       *tunnelv1.Hello
 	enrolled    map[string]bool
 	reqSeq      int
@@ -290,6 +291,8 @@ func (c *Coordinator) handleNodeMessage(msg *tunnelv1.NodeMessage) {
 		// Node draining/shutting down; nothing to route in the fake.
 	case *tunnelv1.NodeMessage_ModelState:
 		c.modelStates = append(c.modelStates, m.ModelState.GetModel())
+	case *tunnelv1.NodeMessage_BudgetUpdate:
+		c.budgets = append(c.budgets, m.BudgetUpdate.GetBudget())
 	case *tunnelv1.NodeMessage_Hello:
 	}
 }
@@ -353,6 +356,14 @@ func (c *Coordinator) Heartbeats() []*tunnelv1.Heartbeat {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]*tunnelv1.Heartbeat(nil), c.heartbeats...)
+}
+
+// Budgets returns every BudgetUpdate received so far (live settings
+// changes), oldest first.
+func (c *Coordinator) Budgets() []*typesv1.ResourceBudget {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]*typesv1.ResourceBudget(nil), c.budgets...)
 }
 
 // LastHello returns the most recent session Hello.
@@ -561,13 +572,17 @@ func (c *Coordinator) Challenge(ctx context.Context, modelID, prompt string) (*t
 
 // AssignModels pushes a ModelAssignment.
 func (c *Coordinator) AssignModels(assign []*typesv1.ModelSpec, evict []string) error {
+	return c.Assign(&tunnelv1.ModelAssignment{Assign: assign, EvictModelIds: evict})
+}
+
+// Assign pushes a ModelAssignment as given (stage lists, placement
+// reasons and all).
+func (c *Coordinator) Assign(ma *tunnelv1.ModelAssignment) error {
 	sess, err := c.sessionOrErr()
 	if err != nil {
 		return err
 	}
-	return sess.send(&tunnelv1.CoordinatorMessage{Msg: &tunnelv1.CoordinatorMessage_ModelAssignment{
-		ModelAssignment: &tunnelv1.ModelAssignment{Assign: assign, EvictModelIds: evict},
-	}})
+	return sess.send(&tunnelv1.CoordinatorMessage{Msg: &tunnelv1.CoordinatorMessage_ModelAssignment{ModelAssignment: ma}})
 }
 
 // Drain asks the node to stop accepting new work.

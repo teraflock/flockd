@@ -258,8 +258,11 @@ type ActivityList struct {
 // Assignment Coordinator placement status for this model, when the mesh asked for it. Failures and refusals stay visible for ten minutes.
 type Assignment struct {
 	// Error Why it was declined or failed.
-	Error *string   `json:"error,omitempty"`
-	Since time.Time `json:"since"`
+	Error *string `json:"error,omitempty"`
+
+	// Reason Why the mesh asked for it: `floor` | `demand` | `warm` | `stage` (see ModelRow.placement_reason). Absent when the coordinator did not say.
+	Reason *string   `json:"reason,omitempty"`
+	Since  time.Time `json:"since"`
 
 	// State assigned | downloading | ready | cached | declined | failed | evicted. `cached` is a mesh-placed model that is on disk but unloaded (idle unload or memory pressure); the coordinator re-sends the assignment to load it when demand returns.
 	State string `json:"state"`
@@ -687,6 +690,9 @@ type ModelRow struct {
 	// Path Absolute artifact path; present when the file exists.
 	Path   *string `json:"path,omitempty"`
 	Pinned bool    `json:"pinned"`
+
+	// PlacementReason Why the mesh placed this model, when it did and said so: `floor` (the mesh floor keeps a copy warm somewhere), `demand` (customers are requesting it), `warm` (a customer's request found no node holding it) or `stage` (downloaded ahead by the floor, not loaded). Remembered on the model's cache entry across restarts; absent for models you installed and for placements by a coordinator that sends no reason.
+	PlacementReason *string `json:"placement_reason,omitempty"`
 
 	// ReceivedBytes Live progress summed over every file of the artifact; present only while downloading.
 	ReceivedBytes *int64 `json:"received_bytes,omitempty"`

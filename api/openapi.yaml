@@ -404,9 +404,10 @@ paths:
         - `request_started`: one InflightRequest when a request reaches a
           runtime (`elapsed_ms` 0, `tokens` 0).
         - `request_finished`: one FinishedRequest when it ends (same `id`).
-        - `model_assignment`: `{model, state, error}` as a coordinator
-          placement moves through assigned|downloading|ready|cached|
-          declined|failed|evicted.
+        - `model_assignment`: `{model, state, error, reason}` as a
+          coordinator placement moves through assigned|downloading|ready|
+          cached|declined|failed|evicted; `reason` is why the mesh asked
+          (see Assignment.reason), empty when the coordinator did not say.
         - `activity`: one ActivityEvent as it happens (same rows as
           `GET /api/v1/activity`).
         - `update_available`: the Update object when a version check finds
@@ -1110,6 +1111,16 @@ components:
             Who installed it: `operator` (you, via the app/CLI/config) or
             `mesh` (coordinator placement). The mesh can only evict its
             own; yours are never touched.
+        placement_reason:
+          type: string
+          description: >
+            Why the mesh placed this model, when it did and said so:
+            `floor` (the mesh floor keeps a copy warm somewhere), `demand`
+            (customers are requesting it), `warm` (a customer's request
+            found no node holding it) or `stage` (downloaded ahead by the
+            floor, not loaded). Remembered on the model's cache entry
+            across restarts; absent for models you installed and for
+            placements by a coordinator that sends no reason.
         received_bytes:
           type: integer
           format: int64
@@ -1150,6 +1161,12 @@ components:
         error:
           type: string
           description: Why it was declined or failed.
+        reason:
+          type: string
+          description: >
+            Why the mesh asked for it: `floor` | `demand` | `warm` |
+            `stage` (see ModelRow.placement_reason). Absent when the
+            coordinator did not say.
 
     ModelList:
       type: object
