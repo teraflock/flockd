@@ -309,14 +309,20 @@ func (s *Service) StartDownload(ctx context.Context, id string) (bool, error) {
 	return true, nil
 }
 
-// CancelDownload aborts an in-flight download. The .partial file is kept so
-// a later attempt resumes.
+// CancelDownload aborts an in-flight download, whoever started it: an
+// operator download, a mesh placement's fetch or a load of a model that
+// was not on disk. The .partial file is kept so a later attempt resumes.
+// A cancelled mesh fetch is reported to the coordinator as failed by the
+// assign service, which keeps it off this node for its backoff.
 func (s *Service) CancelDownload(id string) bool {
 	s.mu.Lock()
 	cancel, ok := s.downloads[id]
 	s.mu.Unlock()
 	if ok {
 		cancel()
+	}
+	if s.Mgr.CancelDownload(id) {
+		ok = true
 	}
 	return ok
 }
@@ -747,7 +753,11 @@ func (s *Service) Remove(ctx context.Context, id string) error {
 	if err != nil && !errors.Is(err, engine.ErrModelNotFound) {
 		return err
 	}
-	return s.Mgr.Remove(id)
+	if err := s.Mgr.Remove(id); err != nil {
+		return err
+	}
+	s.log().Info("model removed", "model", id, "actor", activity.ActorOperator)
+	return nil
 }
 
 // unloadOpts says who is unloading and how.

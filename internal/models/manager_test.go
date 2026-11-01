@@ -94,6 +94,196 @@ func TestEnsureDownloadVerifyAndCache(t *testing.T) {
 	}
 }
 
+// An upstream re-upload moves the manifest's hash: the cached file is
+// now the wrong artifact and must be replaced on the next Ensure, not
+// served because it happens to exist.
+func TestEnsureRefetchesWhenManifestHashMoves(t *testing.T) {
+	old := []byte("gguf-bytes-model-a-v1")
+	blobs := map[string][]byte{"model-a": old}
+	srv := artifactServer(t, blobs)
+	defer srv.Close()
+
+	m, err := NewManager(t.TempDir(), 0, quietLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Ensure(context.Background(), spec("model-a", old, srv.URL)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Upstream replaced the file; the catalog now pins the new hash.
+	fresh := []byte("gguf-bytes-model-a-v2-reuploaded")
+	blobs["model-a"] = fresh
+	path, err := m.Ensure(context.Background(), spec("model-a", fresh, srv.URL))
+	if err != nil {
+		t.Fatalf("ensure after hash move: %v", err)
+	}
+	got, _ := os.ReadFile(path)
+	if string(got) != string(fresh) {
+		t.Fatalf("served the superseded artifact: %q", got)
+	}
+	if err := m.Verify("model-a"); err != nil {
+		t.Fatal(err)
+	}
+	// A placeholder hash on the manifest is not a move: the cached file
+	// stays (drafts are allowed to carry TODO-verify).
+	draft := spec("model-a", fresh, srv.URL)
+	draft.Sha256 = "TODO-verify"
+	srv.Close()
+	if _, err := m.Ensure(context.Background(), draft); err != nil {
+		t.Fatalf("placeholder hash evicted a good file: %v", err)
+	}
+}
+
+// gatedServer serves one blob whose second half waits on gate, so a test
+// can act while the download is in flight. The request context ending
+// (a cancel) releases the handler too.
+func gatedServer(t *testing.T, blob []byte, gate chan struct{}) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(blob[:len(blob)/2])
+		w.(http.Flusher).Flush()
+		select {
+		case <-gate:
+		case <-r.Context().Done():
+			return
+		}
+		_, _ = w.Write(blob[len(blob)/2:])
+	}))
+}
+
+// Any download can be cancelled by id, not only the ones the operator
+// started: a mesh placement's fetch here. The entry is gone afterwards
+// and a second cancel finds nothing in flight.
+func TestCancelDownloadAnyOrigin(t *testing.T) {
+	blob := bytes.Repeat([]byte("m"), 64*1024)
+	gate := make(chan struct{})
+	srv := gatedServer(t, blob, gate)
+	defer srv.Close()
+	defer close(gate)
+
+	m, _ := NewManager(t.TempDir(), 0, quietLog())
+	done := make(chan error, 1)
+	go func() {
+		_, err := m.EnsureArtifact(context.Background(), spec("mesh-a", blob, srv.URL), OriginMesh)
+		done <- err
+	}()
+	waitFor(t, func() bool { _, ok := m.DownloadProgress("mesh-a"); return ok })
+
+	if !m.CancelDownload("mesh-a") {
+		t.Fatal("cancel found no download in flight")
+	}
+	if err := <-done; err == nil {
+		t.Fatal("cancelled download reported success")
+	}
+	for _, i := range m.List() {
+		if i.ID == "mesh-a" {
+			t.Fatalf("entry survived the cancel: %+v", i)
+		}
+	}
+	if m.CancelDownload("mesh-a") {
+		t.Fatal("second cancel claimed a download in flight")
+	}
+}
+
+// Remove during a download stops it, and leaves neither the entry nor the
+// .partial behind: the finishing goroutine used to re-add the entry as
+// ready after the operator had removed it.
+func TestRemoveDuringDownloadCancelsAndDropsPartial(t *testing.T) {
+	blob := bytes.Repeat([]byte("r"), 64*1024)
+	gate := make(chan struct{})
+	srv := gatedServer(t, blob, gate)
+	defer srv.Close()
+	defer close(gate)
+
+	m, _ := NewManager(t.TempDir(), 0, quietLog())
+	done := make(chan error, 1)
+	go func() {
+		_, err := m.Ensure(context.Background(), spec("rm-a", blob, srv.URL))
+		done <- err
+	}()
+	waitFor(t, func() bool { _, ok := m.DownloadProgress("rm-a"); return ok })
+
+	if err := m.Remove("rm-a"); err != nil {
+		t.Fatalf("remove during download: %v", err)
+	}
+	<-done
+	for _, i := range m.List() {
+		if i.ID == "rm-a" {
+			t.Fatalf("entry came back after remove: %+v", i)
+		}
+	}
+	if _, err := os.Stat(m.Path("rm-a") + ".partial"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("remove left the .partial behind")
+	}
+}
+
+// A "downloading" entry written by a previous process is forgotten at
+// start: nothing owns it, so it would show 0% forever, with no cancel
+// and no remove.
+func TestStaleDownloadingEntryForgottenOnStart(t *testing.T) {
+	dir := t.TempDir()
+	state := `{"entries":{"stale":{"id":"stale","sha256":"abc","state":"downloading"},"good":{"id":"good","sha256":"def","state":"ready"}}}`
+	if err := os.WriteFile(filepath.Join(dir, "models.json"), []byte(state), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "good.gguf"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := NewManager(dir, 0, quietLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]bool{}
+	for _, i := range m.List() {
+		ids[i.ID] = true
+	}
+	if ids["stale"] || !ids["good"] {
+		t.Fatalf("cache after start = %v", ids)
+	}
+}
+
+// Too big to ever fit evicts nothing: before, the pre-flight wiped every
+// evictable model and then refused anyway.
+func TestOverBudgetEvictsNothingWhenItCannotFit(t *testing.T) {
+	mb := 1024 * 1024
+	blobs := map[string][]byte{
+		"s1":  []byte(strings.Repeat("a", mb)),
+		"s2":  []byte(strings.Repeat("b", mb)),
+		"big": []byte(strings.Repeat("c", 4*mb)),
+	}
+	srv := artifactServer(t, blobs)
+	defer srv.Close()
+
+	m, _ := NewManager(t.TempDir(), 3, quietLog())
+	ctx := context.Background()
+	for _, id := range []string{"s1", "s2"} {
+		if _, err := m.Ensure(ctx, spec(id, blobs[id], srv.URL)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := m.Ensure(ctx, spec("big", blobs["big"], srv.URL)); !errors.Is(err, ErrOverBudget) {
+		t.Fatalf("err = %v, want ErrOverBudget", err)
+	}
+	for _, id := range []string{"s1", "s2"} {
+		if _, err := os.Stat(m.Path(id)); err != nil {
+			t.Fatalf("%s was evicted for a model that could never fit", id)
+		}
+	}
+}
+
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("condition not met in time")
+}
+
 func TestValidateID(t *testing.T) {
 	valid := []string{
 		"llama-3.2-3b-instruct-q4_k_m",

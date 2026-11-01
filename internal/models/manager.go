@@ -95,6 +95,11 @@ type Manager struct {
 	state         cacheState
 	progress      map[string]Progress
 	missingSeen   map[string]bool
+	// cancels holds the cancel of every download in flight, by id,
+	// whoever started it (operator, mesh placement, a load of a model
+	// that was not on disk). CancelDownload is the one way to stop any
+	// of them; before it, only operator downloads could be cancelled.
+	cancels map[string]context.CancelFunc
 	// reconcileRejected remembers unindexed files that failed
 	// verification (keyed by id, size and mtime) so a 20 GB mismatch is
 	// hashed once, not on every catalog refresh.
@@ -177,6 +182,7 @@ func NewManager(dir string, maxDiskMB int64, log *slog.Logger) (*Manager, error)
 		state:               cacheState{Entries: map[string]*cacheEntry{}},
 		progress:            map[string]Progress{},
 		missingSeen:         map[string]bool{},
+		cancels:             map[string]context.CancelFunc{},
 
 		reconcileRejected: map[string]bool{},
 		verified:          map[string]bool{},
@@ -195,6 +201,17 @@ func NewManager(dir string, maxDiskMB int64, log *slog.Logger) (*Manager, error)
 	for id := range m.state.Entries {
 		if err := ValidateID(id); err != nil {
 			log.Warn("models: dropping cache entry with unsafe id", "id", id)
+			delete(m.state.Entries, id)
+		}
+	}
+	// A "downloading" entry left by the previous process is not
+	// downloading: nothing in this process owns it, so it would sit at 0%
+	// forever, uncancellable and unremovable, while counting against the
+	// disk budget. Forget the entry; the .partial on disk still makes the
+	// next attempt a resume.
+	for id, e := range m.state.Entries {
+		if e.State == StateDownloading {
+			log.Info("models: forgetting download interrupted by the previous run", "model", id)
 			delete(m.state.Entries, id)
 		}
 	}
@@ -316,14 +333,29 @@ func (m *Manager) EnsureArtifact(ctx context.Context, spec *typesv1.ModelSpec, o
 	if e, ok := m.state.Entries[id]; ok && e.State == StateReady {
 		e.LastUsed = time.Now()
 		m.saveLocked()
-		// Trust-but-verify on startup use: cheap stat; full hash was done at
-		// download time. Serving re-verification happens in Verify().
-		if m.filesExistLocked(e) {
+		switch {
+		case hashMoved(e, spec):
+			// The catalog now pins a different artifact under this id
+			// (an upstream re-upload: seven entries moved under us in
+			// 2026-10). The file on disk is the old one: Verify() would
+			// reject it, and its outputs would not match the fingerprints
+			// the mesh keys by the new hash (SPEC §6). Drop it and fetch
+			// what the manifest pins; the download verifies as always.
+			m.Log.Warn("manifest hash changed; refetching", "model", id,
+				"had", e.SHA256, "want", spec.GetSha256())
+			if err := m.removeFilesLocked(e); err != nil {
+				m.Log.Warn("could not remove superseded artifact", "model", id, "err", err)
+			}
+		case m.filesExistLocked(e):
+			// Trust-but-verify on startup use: cheap stat; full hash was
+			// done at download time. Serving re-verification happens in
+			// Verify().
 			a := m.artifact(e)
 			m.mu.Unlock()
 			return a, nil
 		}
-		// File vanished under us: fall through to re-download.
+		// File vanished under us, or is superseded: fall through to
+		// re-download.
 		delete(m.state.Entries, id)
 		m.saveLocked()
 	}
@@ -332,6 +364,10 @@ func (m *Manager) EnsureArtifact(ctx context.Context, spec *typesv1.ModelSpec, o
 	// Pre-flight on the whole set: nothing is fetched that cannot fit.
 	need := set.totalBytes()
 	if err := m.evictForLocked(ctx, need, origin == OriginMesh); err != nil {
+		// The operator sees this row; the 202 that started an operator
+		// download went out before this check ran.
+		m.Activity.Record(activity.KindDownloadFailed, actorFor(origin), id,
+			"download of "+id+" failed", err.Error())
 		return Artifact{}, err
 	}
 
@@ -356,14 +392,23 @@ func (m *Manager) EnsureArtifact(ctx context.Context, spec *typesv1.ModelSpec, o
 	m.Activity.Record(activity.KindDownloadStarted, actor, id,
 		fmt.Sprintf("%s started downloading %s (%s)", actor, id, humanBytes(need)), "")
 
-	if err := m.downloadSet(ctx, set, entry); err != nil {
+	dlCtx, cancelDL := context.WithCancel(ctx)
+	m.mu.Lock()
+	m.cancels[id] = cancelDL
+	m.mu.Unlock()
+	err = m.downloadSet(dlCtx, set, entry)
+	m.mu.Lock()
+	delete(m.cancels, id)
+	m.mu.Unlock()
+	cancelDL()
+	if err != nil {
 		m.mu.Lock()
 		delete(m.state.Entries, id)
 		delete(m.progress, id)
 		m.saveLocked()
 		m.mu.Unlock()
 		detail := err.Error()
-		if ctx.Err() != nil {
+		if dlCtx.Err() != nil {
 			detail = "cancelled"
 		}
 		m.Activity.Record(activity.KindDownloadFailed, actor, id, "download of "+id+" failed", detail)
@@ -451,6 +496,15 @@ func (m *Manager) haveVerified(dest string, f artifactFile) bool {
 	}
 	m.rememberVerified(dest)
 	return true
+}
+
+// hashMoved reports whether the manifest pins a different artifact than
+// the cached entry holds. Placeholder hashes on either side (drafts, or
+// pre-field cache entries) never count as a move: there is nothing real
+// to disagree about.
+func hashMoved(e *cacheEntry, spec *typesv1.ModelSpec) bool {
+	want := spec.GetSha256()
+	return isRealSHA(want) && isRealSHA(e.SHA256) && e.SHA256 != want
 }
 
 func verifiedKey(path string, fi os.FileInfo) string {
@@ -766,6 +820,18 @@ func (m *Manager) evictForLocked(_ context.Context, need int64, meshOnly bool) e
 	if total <= budget {
 		return nil
 	}
+	// Decide before deleting anything: when evicting every candidate still
+	// would not make room, the artifact does not fit and nothing is
+	// evicted. The old order (evict first, check after) let a placement
+	// too big for the budget wipe the node's mesh models and then be
+	// declined anyway — and the coordinator re-placed what was wiped.
+	var reclaimable int64
+	for _, e := range candidates {
+		reclaimable += e.SizeBytes
+	}
+	if total-reclaimable > budget {
+		return fmt.Errorf("%w: %d MB within disk budget %d MB (pinned or operator-owned models occupy the rest)", ErrOverBudget, need/1024/1024, m.maxDiskMB)
+	}
 	sort.Slice(candidates, func(i, j int) bool {
 		return candidates[i].LastUsed.Before(candidates[j].LastUsed)
 	})
@@ -861,6 +927,10 @@ func (m *Manager) Remove(id string) error {
 	if err := ValidateID(id); err != nil {
 		return err
 	}
+	// A download in flight for the id is stopped first: otherwise its
+	// goroutine would re-add the entry as ready when it finished, undoing
+	// the removal.
+	m.CancelDownload(id)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	e, ok := m.state.Entries[id]
@@ -870,9 +940,27 @@ func (m *Manager) Remove(id string) error {
 	if err := m.removeFilesLocked(e); err != nil {
 		return fmt.Errorf("models: remove %s: %w", id, err)
 	}
+	if !e.multi() {
+		// Remove means gone, resume included.
+		_ = os.Remove(filepath.Join(m.Dir, e.ID+".gguf.partial"))
+	}
 	delete(m.state.Entries, id)
+	delete(m.progress, id)
 	m.saveLocked()
 	return nil
+}
+
+// CancelDownload stops the download of id whoever started it, and
+// reports whether there was one. The .partial stays for a later resume;
+// Remove deletes it.
+func (m *Manager) CancelDownload(id string) bool {
+	m.mu.Lock()
+	cancel, ok := m.cancels[id]
+	m.mu.Unlock()
+	if ok {
+		cancel()
+	}
+	return ok
 }
 
 // Touch refreshes LRU recency (called when a model serves a request).
