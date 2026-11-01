@@ -99,7 +99,7 @@ type Manager struct {
 	// whoever started it (operator, mesh placement, a load of a model
 	// that was not on disk). CancelDownload is the one way to stop any
 	// of them; before it, only operator downloads could be cancelled.
-	cancels map[string]context.CancelFunc
+	cancels map[string]*transfer
 	// reconcileRejected remembers unindexed files that failed
 	// verification (keyed by id, size and mtime) so a 20 GB mismatch is
 	// hashed once, not on every catalog refresh.
@@ -108,6 +108,15 @@ type Manager struct {
 	// path, size and mtime), so a resumed multi-part download does not
 	// re-hash the shards it already finished.
 	verified map[string]bool
+}
+
+// transfer is a download in flight: its cancel, and done, closed once
+// Ensure has returned — files closed, entry and progress settled — so a
+// canceller can wait for the files to be free (Windows will not delete
+// an open .partial) and for the entry to be gone before acting on them.
+type transfer struct {
+	cancel context.CancelFunc
+	done   chan struct{}
 }
 
 // States a cache entry moves through.
@@ -182,7 +191,7 @@ func NewManager(dir string, maxDiskMB int64, log *slog.Logger) (*Manager, error)
 		state:               cacheState{Entries: map[string]*cacheEntry{}},
 		progress:            map[string]Progress{},
 		missingSeen:         map[string]bool{},
-		cancels:             map[string]context.CancelFunc{},
+		cancels:             map[string]*transfer{},
 
 		reconcileRejected: map[string]bool{},
 		verified:          map[string]bool{},
@@ -393,9 +402,11 @@ func (m *Manager) EnsureArtifact(ctx context.Context, spec *typesv1.ModelSpec, o
 		fmt.Sprintf("%s started downloading %s (%s)", actor, id, humanBytes(need)), "")
 
 	dlCtx, cancelDL := context.WithCancel(ctx)
+	tr := &transfer{cancel: cancelDL, done: make(chan struct{})}
 	m.mu.Lock()
-	m.cancels[id] = cancelDL
+	m.cancels[id] = tr
 	m.mu.Unlock()
+	defer close(tr.done) // after every return path below has settled the entry
 	err = m.downloadSet(dlCtx, set, entry)
 	m.mu.Lock()
 	delete(m.cancels, id)
@@ -927,40 +938,55 @@ func (m *Manager) Remove(id string) error {
 	if err := ValidateID(id); err != nil {
 		return err
 	}
-	// A download in flight for the id is stopped first: otherwise its
-	// goroutine would re-add the entry as ready when it finished, undoing
-	// the removal.
-	m.CancelDownload(id)
+	// A download in flight for the id is stopped first and waited for:
+	// otherwise its goroutine would re-add the entry as ready when it
+	// finished, undoing the removal, and its open .partial could not be
+	// deleted on Windows. A cancelled transfer has already dropped its
+	// own entry, so what is left to remove is the resume state.
+	cancelled := m.CancelDownload(id)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	e, ok := m.state.Entries[id]
 	if !ok {
-		return fmt.Errorf("models: %s not in cache", id)
+		if !cancelled {
+			return fmt.Errorf("models: %s not in cache", id)
+		}
+		m.removeResumeStateLocked(id)
+		return nil
 	}
 	if err := m.removeFilesLocked(e); err != nil {
 		return fmt.Errorf("models: remove %s: %w", id, err)
 	}
-	if !e.multi() {
-		// Remove means gone, resume included.
-		_ = os.Remove(filepath.Join(m.Dir, e.ID+".gguf.partial"))
-	}
+	m.removeResumeStateLocked(id)
 	delete(m.state.Entries, id)
 	delete(m.progress, id)
 	m.saveLocked()
 	return nil
 }
 
-// CancelDownload stops the download of id whoever started it, and
-// reports whether there was one. The .partial stays for a later resume;
-// Remove deletes it.
+// removeResumeStateLocked deletes what a cancelled or finished download
+// leaves for a resume: the single-file .partial, or a multi-file set's
+// directory (which holds its per-file partials). Remove means gone,
+// resume included.
+func (m *Manager) removeResumeStateLocked(id string) {
+	_ = os.Remove(filepath.Join(m.Dir, id+".gguf.partial"))
+	_ = os.RemoveAll(filepath.Join(m.Dir, id))
+}
+
+// CancelDownload stops the download of id whoever started it, waits for
+// it to wind down (files closed, entry gone), and reports whether there
+// was one. The .partial stays for a later resume; Remove deletes it.
+// Never call it with m.mu held: the transfer needs the lock to finish.
 func (m *Manager) CancelDownload(id string) bool {
 	m.mu.Lock()
-	cancel, ok := m.cancels[id]
+	tr, ok := m.cancels[id]
 	m.mu.Unlock()
-	if ok {
-		cancel()
+	if !ok {
+		return false
 	}
-	return ok
+	tr.cancel()
+	<-tr.done
+	return true
 }
 
 // Touch refreshes LRU recency (called when a model serves a request).
