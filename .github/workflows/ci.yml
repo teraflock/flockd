@@ -7,7 +7,7 @@ on:
   pull_request:
 
 env:
-  GO_VERSION: "1.26.10"
+  GO_VERSION: "1.26.11"
 
 jobs:
   # The proto contract repo is a sibling checkout (go.mod replace ../proto).
