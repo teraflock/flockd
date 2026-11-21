@@ -44,6 +44,10 @@ func writeEngineError(w http.ResponseWriter, err error) {
 	case errors.As(err, &nse):
 		writeOpenAIError(w, http.StatusServiceUnavailable, "server_error",
 			fmt.Sprintf("node is not serving right now (%s); retry shortly", nse.State))
+	case rt.IsInvalidInput(err):
+		// The runtime refused the input itself (an embedding input over
+		// the model's context): the caller's to fix, not a server fault.
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 	case errors.Is(err, engine.ErrDecisionModel):
 		// Same status, code and wording as the mesh gateway.
 		writeAPIError(w, http.StatusNotFound, "invalid_request_error", "model_not_found", err.Error())

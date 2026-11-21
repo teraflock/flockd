@@ -191,8 +191,8 @@ func TestServerArgsDecisionModel(t *testing.T) {
 		}
 	}
 	// A context that does not divide evenly rounds the batch up.
-	if got := decisionBatch(8193, 4); got != 2049 {
-		t.Errorf("decisionBatch(8193, 4) = %d, want 2049", got)
+	if got := slotBatch(8193, 4); got != 2049 {
+		t.Errorf("slotBatch(8193, 4) = %d, want 2049", got)
 	}
 
 	// Kev is causal: llama-server takes its prompt a batch at a time, so
@@ -213,9 +213,27 @@ func TestServerArgsDecisionModel(t *testing.T) {
 	if strings.Contains(chat, "batch-size") {
 		t.Errorf("chat model got batch flags: %s", chat)
 	}
-	emb := a.serverArgs(rt.ModelSpec{ID: "e", Path: "/models/e.gguf", Embeddings: true}, res, 1)
-	if !slices.Contains(emb, "--embeddings") || strings.Contains(strings.Join(emb, " "), "batch-size") {
-		t.Errorf("embedding model args: %v", emb)
+}
+
+// An embedding input is evaluated in one batch, so the batch must hold a
+// whole slot's context: at llama-server's default of 512, nomic (8,192
+// advertised) refused every input over 512 tokens.
+func TestServerArgsEmbeddingModelBatch(t *testing.T) {
+	a := &Adapter{Accel: "cpu"}
+	// The plan admission makes for nomic: two slots of 8,192 tokens.
+	planned := strings.Join(a.serverArgs(rt.ModelSpec{ID: "nomic", Path: "/models/nomic.gguf", Embeddings: true, ContextLength: 8192},
+		rt.ResourceBudget{MaxConcurrent: 2, Slots: 2, ContextTokens: 16384}, 1), " ")
+	for _, want := range []string{"--embeddings", "--ctx-size 16384", "--parallel 2", "--batch-size 8192", "--ubatch-size 8192"} {
+		if !strings.Contains(planned, want) {
+			t.Errorf("args %q missing %q", planned, want)
+		}
+	}
+
+	// No context to size from (no plan, no manifest length, no override):
+	// llama-server's defaults stand.
+	bare := a.serverArgs(rt.ModelSpec{ID: "e", Path: "/models/e.gguf", Embeddings: true}, rt.ResourceBudget{}, 1)
+	if !slices.Contains(bare, "--embeddings") || strings.Contains(strings.Join(bare, " "), "batch-size") {
+		t.Errorf("unsized embedding model args: %v", bare)
 	}
 }
 
@@ -362,4 +380,52 @@ func TestRealLlamaServerDecision(t *testing.T) {
 		t.Fatalf("over-context prompt: err = %v, want InvalidInputError", err)
 	}
 	t.Logf("over-context prompt: invalid input: %v", err)
+}
+
+// llama-server refusing an embedding input is the request's fault, not the
+// node's: a 400 over the slot's context, or the over-batch 500 when the
+// adapter sized the batch to the context.
+func TestAdapterEmbeddingInputRefused(t *testing.T) {
+	cases := []struct {
+		name           string
+		status         int
+		reply          string
+		batchIsContext bool
+		invalid        bool
+		wantMessage    string
+	}{
+		{"400 over context", http.StatusBadRequest,
+			`{"error":{"code":400,"message":"input (4002 tokens) is larger than the max context size (2048 tokens). skipping","type":"exceed_context_size_error","n_prompt_tokens":4002,"n_ctx":2048}}`,
+			true, true, "input (4002 tokens) is larger than the max context size (2048 tokens)"},
+		{"500 over batch (= context)", http.StatusInternalServerError,
+			`{"error":{"code":500,"message":"input (8302 tokens) is too large to process. increase the physical batch size (current batch size: 8192)","type":"server_error"}}`,
+			true, true, "input is larger than the model's context: input (8302 tokens)"},
+		{"500 over batch, batch not set by the adapter", http.StatusInternalServerError,
+			`{"error":{"code":500,"message":"input (728 tokens) is too large to process. increase the physical batch size (current batch size: 512)","type":"server_error"}}`,
+			false, false, "llamacpp: /v1/embeddings: status 500"},
+		{"500 other", http.StatusInternalServerError, `{"error":{"code":500,"message":"boom","type":"server_error"}}`,
+			true, false, "llamacpp: /v1/embeddings: status 500"},
+	}
+	for _, c := range cases {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(c.status)
+			_, _ = w.Write([]byte(c.reply))
+		}))
+		inst := testInstance(t, srv.URL)
+		inst.spec.Embeddings = true
+		inst.batchIsContext = c.batchIsContext
+		_, err := inst.Complete(context.Background(), rt.CompletionRequest{Kind: rt.KindEmbedding, EmbeddingInput: []string{"a"}})
+		srv.Close()
+		if err == nil {
+			t.Errorf("%s: no error", c.name)
+			continue
+		}
+		if rt.IsInvalidInput(err) != c.invalid {
+			t.Errorf("%s: invalid input = %v, want %v (%v)", c.name, rt.IsInvalidInput(err), c.invalid, err)
+		}
+		if !strings.Contains(err.Error(), c.wantMessage) {
+			t.Errorf("%s: error %q does not contain %q", c.name, err, c.wantMessage)
+		}
+	}
 }

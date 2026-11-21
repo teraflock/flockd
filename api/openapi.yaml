@@ -526,6 +526,13 @@ paths:
           content:
             application/json:
               schema: { type: object }
+        "400":
+          description: >-
+            The runtime refused an input: it is longer than the model's
+            context.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "404":
           description: >-
             Unknown model, or a decision model (`error.code:

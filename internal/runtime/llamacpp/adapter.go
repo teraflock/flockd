@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -186,7 +187,7 @@ func (a *Adapter) Load(ctx context.Context, m rt.ModelSpec, res rt.ResourceBudge
 		return nil, err
 	}
 	return &instance{
-		batchIsContext: m.Decision && slices.Contains(args, "--ubatch-size"),
+		batchIsContext: (m.Decision || m.Embeddings) && slices.Contains(args, "--ubatch-size"),
 
 		spec:    m,
 		buildID: buildID,
@@ -243,11 +244,23 @@ func (a *Adapter) serverArgs(m rt.ModelSpec, res rt.ResourceBudget, port int) []
 		// the context of all slots together. Causal decision models that
 		// take a prompt in several batches (Kev) keep the defaults.
 		if ctxLen > 0 && decisionNeedsWholeBatch(m) {
-			batch := strconv.Itoa(decisionBatch(ctxLen, slots))
+			batch := strconv.Itoa(slotBatch(ctxLen, slots))
 			args = append(args, "--batch-size", batch, "--ubatch-size", batch)
 		}
 	case m.Embeddings:
 		args = append(args, "--embeddings")
+		// An embedding model has no KV cache to carry a prompt across
+		// batches: llama-server evaluates each input in ONE batch and
+		// answers anything longer than --ubatch-size with a 500 ("input is
+		// too large to process"). At the default of 512 a model whose
+		// catalog entry advertises an 8,192-token context refused every
+		// input over 512 tokens, and the coordinator charged each refusal
+		// to the node. Same sizing as a whole-batch decision model: one
+		// slot's share of --ctx-size.
+		if ctxLen > 0 {
+			batch := strconv.Itoa(slotBatch(ctxLen, slots))
+			args = append(args, "--batch-size", batch, "--ubatch-size", batch)
+		}
 	}
 	if m.MmprojPath != "" {
 		// Vision-language models ship their projector as a sidecar; without
@@ -282,9 +295,10 @@ func decisionNeedsWholeBatch(m rt.ModelSpec) bool {
 	return m.Decision && !multiBatchDecisionFamilies[strings.ToLower(m.Family)]
 }
 
-// decisionBatch is the batch size for a decision model: one slot's context
+// slotBatch is the batch size for a model that takes a whole prompt in one
+// batch (whole-batch decision models, embedding models): one slot's context
 // (rounded up, so it is never below llama-server's n_ctx_slot).
-func decisionBatch(ctxLen, slots int) int {
+func slotBatch(ctxLen, slots int) int {
 	slots = max(slots, 1)
 	return (ctxLen + slots - 1) / slots
 }
@@ -351,8 +365,8 @@ func (a *Adapter) SupportsModel(ctx context.Context, m rt.ModelSpec) error {
 }
 
 type instance struct {
-	// batchIsContext: a decision model started with --ubatch-size equal
-	// to a slot's context (see overBatch).
+	// batchIsContext: a decision or embedding model started with
+	// --ubatch-size equal to a slot's context (see overBatch).
 	batchIsContext bool
 
 	spec    rt.ModelSpec
@@ -536,7 +550,7 @@ type oaEmbeddingResponse struct {
 func (i *instance) embed(ctx context.Context, req rt.CompletionRequest) (rt.TokenStream, error) {
 	resp, err := i.post(ctx, "/v1/embeddings", oaEmbeddingRequest{Model: i.spec.ID, Input: req.EmbeddingInput})
 	if err != nil {
-		return nil, err
+		return nil, i.embeddingInputError(err)
 	}
 	defer resp.Body.Close()
 	var er oaEmbeddingResponse
@@ -551,6 +565,26 @@ func (i *instance) embed(ctx context.Context, req rt.CompletionRequest) (rt.Toke
 	ch <- rt.Chunk{Done: true, Embeddings: vecs, Usage: &rt.Usage{PromptTokens: er.Usage.PromptTokens}}
 	close(ch)
 	return rt.NewChanStream(ch, nil), nil
+}
+
+// embeddingInputError turns llama-server refusing an embedding input into
+// an *rt.InvalidInputError: a 400 (an input over the slot's context, a
+// malformed request) or the over-batch 500 (overBatch). Both are the
+// request's fault and fail the same way on every node; anything else is
+// returned unchanged.
+func (i *instance) embeddingInputError(err error) error {
+	var se *statusError
+	if !errors.As(err, &se) {
+		return err
+	}
+	msg := runtimeErrorMessage([]byte(se.body))
+	switch {
+	case se.code == http.StatusBadRequest:
+		return &rt.InvalidInputError{Msg: msg}
+	case i.overBatch(se.code, msg):
+		return &rt.InvalidInputError{Msg: "input is larger than the model's context: " + msg}
+	}
+	return err
 }
 
 // decide answers a typed decision request with llama-server's
@@ -608,8 +642,10 @@ func (i *instance) decide(ctx context.Context, req rt.CompletionRequest) (rt.Tok
 
 // overBatch recognises llama-server's "input (N tokens) is too large to
 // process. increase the physical batch size" — a 500, checked before the
-// context-size check that answers 400. The adapter starts a decision
-// model with the batch equal to a slot's context (serverArgs), so a
+// context-size check that answers 400. The adapter starts a whole-batch
+// decision model or an embedding model with the batch equal to a slot's
+// context (serverArgs; llama-server may cap the slot lower, at the model's
+// training context, which only moves the refusal to the 400), so a
 // prompt over the batch is a prompt over the context: the input is too
 // long for this model on any node, not a server fault. Only trusted when
 // this adapter set the batch (batchIsContext).
@@ -676,9 +712,21 @@ func (i *instance) post(ctx context.Context, path string, body any) (*http.Respo
 		defer resp.Body.Close()
 		var msg bytes.Buffer
 		_, _ = msg.ReadFrom(bufio.NewReaderSize(resp.Body, 4096))
-		return nil, fmt.Errorf("llamacpp: %s: status %s: %s", path, resp.Status, strings.TrimSpace(msg.String()))
+		return nil, &statusError{path: path, code: resp.StatusCode, status: resp.Status, body: strings.TrimSpace(msg.String())}
 	}
 	return resp, nil
+}
+
+// statusError is llama-server answering a POST with a non-200.
+type statusError struct {
+	path   string
+	code   int
+	status string
+	body   string
+}
+
+func (e *statusError) Error() string {
+	return fmt.Sprintf("llamacpp: %s: status %s: %s", e.path, e.status, e.body)
 }
 
 type llamaHealthProps struct {
