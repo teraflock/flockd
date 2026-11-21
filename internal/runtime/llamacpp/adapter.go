@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -580,12 +581,24 @@ func (i *instance) embeddingInputError(err error) error {
 	msg := runtimeErrorMessage([]byte(se.body))
 	switch {
 	case se.code == http.StatusBadRequest:
-		return &rt.InvalidInputError{Msg: msg}
+		// "input (N tokens) is larger than the max context size (M
+		// tokens). skipping": the customer reads this, minus the server's
+		// note to itself.
+		return &rt.InvalidInputError{Msg: strings.TrimSuffix(strings.TrimSpace(msg), ". skipping")}
 	case i.overBatch(se.code, msg):
-		return &rt.InvalidInputError{Msg: "input is larger than the model's context: " + msg}
+		// The server's advice ("increase the physical batch size") is
+		// for whoever runs it; the customer needs the size of the input.
+		if m := overBatchInput.FindString(msg); m != "" {
+			return &rt.InvalidInputError{Msg: m + " is larger than the model's context"}
+		}
+		return &rt.InvalidInputError{Msg: "input is larger than the model's context"}
 	}
 	return err
 }
+
+// overBatchInput is the "input (N tokens)" that opens llama-server's
+// over-batch message.
+var overBatchInput = regexp.MustCompile(`^input \(\d+ tokens\)`)
 
 // decide answers a typed decision request with llama-server's
 // POST /v1/systemone. The body is built in list order (decision.RuntimeBody

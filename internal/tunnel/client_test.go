@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -814,6 +815,35 @@ func TestDecisionDispatchInvalidInput(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("no decision result")
+	}
+}
+
+func TestEmbeddingDispatchInvalidInput(t *testing.T) {
+	// An embedding input the runtime refused (longer than the model's
+	// context) is the request's fault: the result says so. Any other
+	// failure is the node's and leaves invalid_input false.
+	for _, c := range []struct {
+		fail    error
+		invalid bool
+		want    string
+	}{
+		{&rt.InvalidInputError{Msg: "input (4002 tokens) is larger than the max context size (2048 tokens). skipping"}, true, "larger than the max context size"},
+		{fmt.Errorf("engine: %w", &rt.InvalidInputError{Msg: "input is larger than the model's context"}), true, "larger than the model's context"},
+		{errors.New("llamacpp: /v1/embeddings: status 500 Internal Server Error: boom"), false, "status 500"},
+	} {
+		h, _ := newDecisionHarness(t, c.fail)
+		ch, err := h.coord.DispatchEmbedding("mock-decision", []string{"alpha"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case res := <-ch:
+			if res.GetInvalidInput() != c.invalid || !strings.Contains(res.GetError(), c.want) || len(res.GetEmbeddings()) != 0 {
+				t.Fatalf("%v: result = %v", c.fail, res)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%v: no embedding result", c.fail)
+		}
 	}
 }
 

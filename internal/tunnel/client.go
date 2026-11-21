@@ -573,9 +573,12 @@ func (c *Client) runDispatch(ctx context.Context, ss *sessionStream, d *tunnelv1
 		if req.Kind == rt.KindEmbedding {
 			// An embedding dispatch is answered by an EmbeddingResult and
 			// nothing else: the coordinator ignores a TokenChunk for it
-			// and would wait out its timeout.
+			// and would wait out its timeout. invalid_input marks an
+			// input the runtime refused (longer than the model's
+			// context): the request's fault, the same on every node, so
+			// the coordinator neither retries it nor charges this node.
 			_ = ss.send(&tunnelv1.NodeMessage{Msg: &tunnelv1.NodeMessage_EmbeddingResult{
-				EmbeddingResult: &tunnelv1.EmbeddingResult{RequestId: id, Error: err.Error()},
+				EmbeddingResult: &tunnelv1.EmbeddingResult{RequestId: id, Error: err.Error(), InvalidInput: rt.IsInvalidInput(err)},
 			}})
 			return
 		}

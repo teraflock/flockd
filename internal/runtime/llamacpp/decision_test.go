@@ -216,14 +216,14 @@ func TestServerArgsDecisionModel(t *testing.T) {
 }
 
 // An embedding input is evaluated in one batch, so the batch must hold a
-// whole slot's context: at llama-server's default of 512, nomic (8,192
-// advertised) refused every input over 512 tokens.
+// whole slot's context: at llama-server's default of 512, nomic refused
+// every input over 512 tokens.
 func TestServerArgsEmbeddingModelBatch(t *testing.T) {
 	a := &Adapter{Accel: "cpu"}
-	// The plan admission makes for nomic: two slots of 8,192 tokens.
-	planned := strings.Join(a.serverArgs(rt.ModelSpec{ID: "nomic", Path: "/models/nomic.gguf", Embeddings: true, ContextLength: 8192},
-		rt.ResourceBudget{MaxConcurrent: 2, Slots: 2, ContextTokens: 16384}, 1), " ")
-	for _, want := range []string{"--embeddings", "--ctx-size 16384", "--parallel 2", "--batch-size 8192", "--ubatch-size 8192"} {
+	// The plan admission makes for nomic: two slots of 2,048 tokens.
+	planned := strings.Join(a.serverArgs(rt.ModelSpec{ID: "nomic", Path: "/models/nomic.gguf", Embeddings: true, ContextLength: 2048},
+		rt.ResourceBudget{MaxConcurrent: 2, Slots: 2, ContextTokens: 4096}, 1), " ")
+	for _, want := range []string{"--embeddings", "--ctx-size 4096", "--parallel 2", "--batch-size 2048", "--ubatch-size 2048"} {
 		if !strings.Contains(planned, want) {
 			t.Errorf("args %q missing %q", planned, want)
 		}
@@ -399,7 +399,7 @@ func TestAdapterEmbeddingInputRefused(t *testing.T) {
 			true, true, "input (4002 tokens) is larger than the max context size (2048 tokens)"},
 		{"500 over batch (= context)", http.StatusInternalServerError,
 			`{"error":{"code":500,"message":"input (8302 tokens) is too large to process. increase the physical batch size (current batch size: 8192)","type":"server_error"}}`,
-			true, true, "input is larger than the model's context: input (8302 tokens)"},
+			true, true, "input (8302 tokens) is larger than the model's context"},
 		{"500 over batch, batch not set by the adapter", http.StatusInternalServerError,
 			`{"error":{"code":500,"message":"input (728 tokens) is too large to process. increase the physical batch size (current batch size: 512)","type":"server_error"}}`,
 			false, false, "llamacpp: /v1/embeddings: status 500"},
@@ -426,6 +426,11 @@ func TestAdapterEmbeddingInputRefused(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), c.wantMessage) {
 			t.Errorf("%s: error %q does not contain %q", c.name, err, c.wantMessage)
+		}
+		// What an invalid input says is what the customer reads: none of
+		// the server's notes to its operator.
+		if c.invalid && (strings.Contains(err.Error(), "skipping") || strings.Contains(err.Error(), "batch size")) {
+			t.Errorf("%s: error %q carries the runtime's operator advice", c.name, err)
 		}
 	}
 }
