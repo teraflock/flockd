@@ -55,12 +55,13 @@ prompt; logs go to `%USERPROFILE%\.teraflock\flockd.log`; the release
 window), hardware
 detection is real — RAM, CPU name, NVIDIA GPUs with VRAM via `nvidia-smi`
 (`cuda12`), other adapters listed on the CPU lane — and the battery guard
-works; a Windows llama-server build is still in progress
-([epic](https://github.com/teraflock/docs/issues/9)), so until then set
-`runtime.llama_server_path` to a local build or use `--standalone` with
-the mock runtime.
+works. The published Windows llama-server build is CPU only for now
+(`cpu-avx2`); an NVIDIA card is detected but served by that build until
+the CUDA one is published ([epic](https://github.com/teraflock/docs/issues/9)).
 
-Beta note: binaries are checksummed but not yet code-signed/notarized.
+Signing: on macOS the binaries and the installer package are Developer ID
+signed and notarized. The Windows binaries are not code-signed yet. Every
+release carries `checksums.txt`.
 Joining the mesh needs an invite from [teraflock.ai](https://teraflock.ai) —
 then `tera login`, `tera up`, `tera dashboard`.
 
@@ -179,12 +180,12 @@ API instead need only `OPENAI_BASE_URL=http://127.0.0.1:7777/v1` (above).
 
 The hosted mesh is live: a node dials out to `tunnel.teraflock.ai:443` over
 mTLS and serves requests that arrive at `api.teraflock.ai`. Onboarding runs
-in cohorts from the [waitlist](https://teraflock.ai); once you have an
-invite link open:
+in cohorts from the [waitlist](https://teraflock.ai); once you are
+invited:
 
 ```sh
-tera login                     # browser handoff: claims this node to your account
-tera login --claim-code CODE   # headless boxes: paste the one-shot claim code instead
+tera login                     # asks for a claim code from app.teraflock.com/connect
+tera login --claim-code CODE   # the same without the prompt (scripts, or the code on your invite page)
 tera up                        # install + start the service (launchd / systemd --user / Windows logon task)
 tera dashboard                 # watch it serve
 ```
@@ -255,13 +256,17 @@ a vendor SDK: the daemon reads sysfs / shells out to the vendor tool.
 | platform | GPU detection | accel |
 |---|---|---|
 | macOS (Apple Silicon) | `system_profiler`; unified memory counts as VRAM | `metal` |
-| macOS (Intel + discrete) | `system_profiler` | `metal` |
 | Linux, NVIDIA | `nvidia-smi` CSV | `cuda12` |
 | Linux, AMD | sysfs (`/sys/class/drm/card*/device`, amdgpu driver) for id/VRAM, `pci.ids` for the retail name, `rocm-smi` (optional) to enrich | `rocm` |
 | Linux, any GPU with a Vulkan driver | `libvulkan.so.1` + a hardware ICD in `/usr/share/vulkan/icd.d` (RADV/AMDVLK, NVIDIA, ANV; lavapipe does not count) | `vulkan` (secondary lane) |
 | Linux, no usable GPU | — | `cpu-avx2` (amd64) / `cpu` |
 | Windows, NVIDIA | `nvidia-smi` CSV | `cuda12` |
 | Windows, other adapters | `Win32_VideoController` (listed; no VRAM/accel until a Windows Vulkan lane exists) | `cpu-avx2` |
+
+Intel Macs are not supported: no llama-server build is published for
+darwin/amd64, and `tera up` refuses to install a service that could never
+load a model. The macOS binaries stay universal, so the CLI itself runs
+there.
 
 The `accel` column is what the profile reports; the build that actually
 runs is the first lane of the preference chain
@@ -367,8 +372,8 @@ goreleaser release --snapshot --skip=publish,sign
   fingerprint verification is not active on the hosted mesh.
 - [ ] **Phase 4 — product (partial).** Batch API and the hosted console
   ([app.teraflock.com](https://app.teraflock.com)) shipped; redemption
-  moves credits but the payout leg is a stub; signed auto-update is open
-  (binaries are checksummed, not signed).
+  moves credits but the payout leg is a stub; signed auto-update of the
+  daemon is open.
 
 What's implemented vs stubbed, in detail: [docs/HANDOFF.md](docs/HANDOFF.md).
 

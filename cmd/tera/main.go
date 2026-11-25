@@ -376,7 +376,15 @@ func cmdLogin() *cobra.Command {
 	var force bool
 	c := &cobra.Command{
 		Use:   "login",
-		Short: "Enroll this node via browser (PKCE loopback handoff)",
+		Short: "Connect this node to your account with a claim code from the console",
+		Long: `Connect this node to your Teraflock account.
+
+With no flags, tera login sends you to the console for a single-use claim
+code (` + consoleConnectURL + `) and asks you to paste it.
+
+  tera login --claim-code <code>     use a code you already have (no prompt)
+  tera login --url '<invite link>'   open an invite link and receive the code
+                                     through the browser (same machine only)`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			alreadyEnrolled := enroll.Enrolled(dataDir())
 			// A bare re-run of `tera login` on an already-enrolled node used
@@ -396,7 +404,28 @@ func cmdLogin() *cobra.Command {
 			}
 			// --claim-code skips the browser entirely: headless boxes, SSH
 			// sessions, and dev meshes have no browser to hand off to.
+			//
+			// Without it, and without an explicit --url, the code comes from
+			// the console's connect page by paste (login_connect.go): the
+			// default login URL is the invite page, which answers only a
+			// link that carries an invite token, so opening it bare was a
+			// dead end.
+			if claimCode == "" && !cmd.Flags().Changed("url") {
+				in := cmd.InOrStdin()
+				open := browser.Open
+				if !stdinIsTerminal(in) {
+					open = nil // scripted or piped: print the address, open nothing
+				}
+				code, err := promptClaimCode(in, cmd.OutOrStdout(), open)
+				if err != nil {
+					return err
+				}
+				claimCode = code
+			}
 			if claimCode == "" {
+				if strings.TrimSpace(loginURL) == "" {
+					return fmt.Errorf("--url needs the invite link, e.g. `tera login --url 'https://teraflock.ai/claim?token=…'`")
+				}
 				flow := &enroll.LoginFlow{
 					LoginURL: loginURL,
 					OnURL: func(url string) {
@@ -475,8 +504,8 @@ func cmdLogin() *cobra.Command {
 			return nil
 		},
 	}
-	c.Flags().StringVar(&loginURL, "url", config.Default().Enroll.LoginURL, "signup/claim page URL")
-	c.Flags().StringVar(&claimCode, "claim-code", "", "enroll with this claim code instead of opening a browser")
+	c.Flags().StringVar(&loginURL, "url", "", "invite link to open; the code comes back through the browser")
+	c.Flags().StringVar(&claimCode, "claim-code", "", "enroll with this claim code, without a prompt or a browser")
 	c.Flags().BoolVar(&force, "force", false, "re-run the claim flow even if this node is already enrolled")
 	return c
 }

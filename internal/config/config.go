@@ -218,7 +218,9 @@ type Tunnel struct {
 }
 
 type Enroll struct {
-	// LoginURL is the browser URL opened by `tera login`.
+	// LoginURL is the invite page. Nothing opens it bare any more: it only
+	// answers a link that carries an invite token, which `tera login --url`
+	// takes whole. Kept so existing config files keep loading.
 	LoginURL string `koanf:"login_url"`
 }
 

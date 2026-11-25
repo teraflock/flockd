@@ -56,7 +56,7 @@ cask "tera" do
 
   caveats <<~EOS
     To join the mesh you need an invite from teraflock.ai — then:
-      tera login      # opens the claim page in your browser
+      tera login      # connects this Mac: asks for a code from app.teraflock.com/connect
       tera up         # installs and starts the background service
       tera dashboard  # watch it earn
   EOS

@@ -201,7 +201,8 @@ insecure             = false    # dev only: plaintext gRPC to the coordinator
                                 # plaintext until mTLS termination lands)
 
 [enroll]
-login_url = "https://teraflock.ai/claim"   # browser page opened by `tera login`
+login_url = "https://teraflock.ai/claim"   # the invite page; unused since `tera login` asks for a
+                                           # claim code (or takes an invite link with --url)
 ```
 
 ## Notes
