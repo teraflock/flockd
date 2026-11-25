@@ -4,9 +4,9 @@ package hardware
 
 import (
 	"context"
+	"log/slog"
 	"os/exec"
-	"strconv"
-	"strings"
+	"runtime"
 
 	typesv1 "github.com/teraflock/proto/gen/go/flock/types/v1"
 )
@@ -16,41 +16,27 @@ import (
 // Shared by Linux and Windows: the CSV query is identical on both and the
 // tool ships with every NVIDIA driver, which keeps flockd cgo-free (no
 // NVML binding, SPEC §A1.3). Nil when no tool or no GPU.
+//
+// Accel is cuda12 — the runtime artifact lanes are keyed on it for both
+// linux/amd64 and windows/amd64 — unless the driver reports that no GPU on
+// the box can run the CUDA build (nvidia.go), which is logged once per
+// affected GPU.
 func detectNvidia(ctx context.Context, candidates ...string) []*typesv1.GpuInfo {
 	for _, c := range candidates {
 		path, err := exec.LookPath(c)
 		if err != nil {
 			continue
 		}
-		out, err := exec.CommandContext(ctx, path,
-			"--query-gpu=name,memory.total,driver_version",
-			"--format=csv,noheader,nounits").Output()
-		if err != nil {
-			return nil
+		rows := queryNvidiaSMI(func(fields string) ([]byte, error) {
+			return exec.CommandContext(ctx, path,
+				"--query-gpu="+fields,
+				"--format=csv,noheader,nounits").Output()
+		})
+		gpus, warnings := nvidiaGPUInfos(rows, vulkanVendors()["nvidia"], runtime.GOOS)
+		for _, w := range warnings {
+			slog.Default().Warn(w)
 		}
-		return parseNvidiaSMI(string(out))
+		return gpus
 	}
 	return nil
-}
-
-// parseNvidiaSMI reads one `name, memory.total, driver_version` line per
-// GPU. Accel is cuda12: the runtime artifact lanes are keyed on it for
-// both linux/amd64 and windows/amd64.
-func parseNvidiaSMI(out string) []*typesv1.GpuInfo {
-	var gpus []*typesv1.GpuInfo
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		parts := strings.Split(line, ",")
-		if len(parts) < 3 {
-			continue
-		}
-		memMB, _ := strconv.ParseUint(strings.TrimSpace(parts[1]), 10, 64)
-		gpus = append(gpus, &typesv1.GpuInfo{
-			Vendor:        "nvidia",
-			Model:         strings.TrimSpace(parts[0]),
-			VramMb:        memMB,
-			DriverVersion: strings.TrimSpace(parts[2]),
-			Accel:         "cuda12",
-		})
-	}
-	return gpus
 }

@@ -239,8 +239,8 @@ func TestManifestPickWalksAccelChain(t *testing.T) {
 		{[]string{"cuda12", "vulkan", "cpu-avx2"}, "cuda12"},
 		{[]string{"rocm", "vulkan", "cpu-avx2"}, "vulkan"}, // AMD box, no rocm lane published
 		{[]string{"rocm", "cpu-avx2"}, "cpu-avx2"},         // AMD box without a Vulkan driver
-		{[]string{"vulkan", "cpu-avx2"}, "vulkan"},         // Intel Arc
-		{[]string{"cpu-avx2"}, "cpu-avx2"},
+		{[]string{"vulkan", "cpu-avx2"}, "vulkan"},         // Intel Arc; NVIDIA below the CUDA build's compute capability
+		{[]string{"cpu-avx2"}, "cpu-avx2"},                 // the same NVIDIA box without a Vulkan driver: never cuda12
 		{nil, "cpu-avx2"},
 		{[]string{"cpu"}, "cpu-avx2"}, // any CPU build satisfies a CPU request
 	}
@@ -255,6 +255,43 @@ func TestManifestPickWalksAccelChain(t *testing.T) {
 	}
 	if _, err := m.pick("windows", "amd64", "cuda12", "cpu-avx2"); err == nil || !strings.Contains(err.Error(), "accel=cuda12>cpu-avx2") {
 		t.Errorf("want no-build error naming the chain, got %v", err)
+	}
+}
+
+// An NVIDIA box whose GPUs are below the CUDA build's compute capability
+// (GTX 10-series and older) arrives with a chain that has no cuda12 entry.
+// The published cuda12 build must then never be picked, on any OS, however
+// the manifest orders its artifacts.
+func TestManifestPickNeverCUDAWhenNotInChain(t *testing.T) {
+	m := &ArtifactManifest{RuntimeBuildID: "llamacpp-b9999-1", Artifacts: []Artifact{
+		{OS: "linux", Arch: "amd64", Accel: "cuda12"},
+		{OS: "linux", Arch: "amd64", Accel: "vulkan"},
+		{OS: "linux", Arch: "amd64", Accel: "cpu-avx2"},
+		{OS: "windows", Arch: "amd64", Accel: "cuda12"},
+		{OS: "windows", Arch: "amd64", Accel: "cpu-avx2"},
+	}}
+	cases := []struct {
+		goos       string
+		chain      []string
+		want       string
+		wantReason string
+	}{
+		{"linux", []string{"vulkan", "cpu-avx2"}, "vulkan", "preferred"},
+		{"linux", []string{"cpu-avx2"}, "cpu-avx2", "preferred"},
+		{"windows", []string{"cpu-avx2"}, "cpu-avx2", "preferred"},
+		{"windows", []string{"vulkan", "cpu-avx2"}, "cpu-avx2", "no vulkan artifact for windows/amd64"},
+		// A capable card (or one of unknown capability) is unaffected.
+		{"linux", []string{"cuda12", "vulkan", "cpu-avx2"}, "cuda12", "preferred"},
+		{"windows", []string{"cuda12", "cpu-avx2"}, "cuda12", "preferred"},
+	}
+	for _, c := range cases {
+		b, err := m.pick(c.goos, "amd64", c.chain...)
+		if err != nil || b.Accel != c.want || b.OS != c.goos {
+			t.Errorf("pick(%s, %v) = %s/%s, %v; want %s", c.goos, c.chain, b.OS, b.Accel, err, c.want)
+		}
+		if got := pickReason(c.goos, "amd64", c.chain, b.Accel); got != c.wantReason {
+			t.Errorf("pickReason(%s, %v, %s) = %q, want %q", c.goos, c.chain, b.Accel, got, c.wantReason)
+		}
 	}
 }
 

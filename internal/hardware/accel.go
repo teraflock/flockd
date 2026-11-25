@@ -22,6 +22,10 @@ import (
 // only when the Vulkan loader and a hardware ICD for that GPU's vendor are
 // installed (vulkan.go). macOS never emits it (Metal always wins; MoltenVK
 // is not a target).
+//
+// An NVIDIA box whose GPUs are all below the CUDA build's compute
+// capability floor (GTX 10-series and older, nvidia.go) carries no native
+// lane: its chain is vulkan > cpu, or just cpu without the Vulkan driver.
 
 // AccelPreference returns the ordered accelerator chain the runtime
 // artifact fetcher should try for this profile: the native backend of each
@@ -49,7 +53,8 @@ func accelChain(p *typesv1.CapabilityProfile, vulkan map[string]bool) []string {
 		switch a := g.GetAccel(); a {
 		case "", accelCPU, accelCPUAVX2:
 			// A GPU with no native lane (Intel Arc, an adapter Windows lists
-			// without a backend): Vulkan is its only GPU option.
+			// without a backend, an NVIDIA card too old for the CUDA build):
+			// Vulkan is its only GPU option.
 		default:
 			add(a)
 		}

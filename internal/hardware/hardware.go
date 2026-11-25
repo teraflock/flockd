@@ -89,7 +89,9 @@ func BestAccel(p *typesv1.CapabilityProfile) string {
 			return g.GetAccel()
 		}
 	}
-	return cpuAccel()
+	// No GPU with a native lane: the head of the chain, which is vulkan
+	// when a detected GPU can take that lane and the CPU build otherwise.
+	return AccelPreference(p)[0]
 }
 
 // BestVRAMMB returns the largest detected GPU memory (system RAM on Apple

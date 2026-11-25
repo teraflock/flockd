@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"testing"
 
 	typesv1 "github.com/teraflock/proto/gen/go/flock/types/v1"
@@ -25,6 +26,17 @@ func TestAccelChain(t *testing.T) {
 		{"amd with vulkan", gpu("amd", "rocm"), map[string]bool{"amd": true, "intel": true}, []string{"rocm", "vulkan", cpu}},
 		{"amd, radv missing", gpu("amd", "rocm"), map[string]bool{"intel": true}, []string{"rocm", cpu}},
 		{"intel arc: vulkan is the only GPU lane", gpu("intel", ""), map[string]bool{"intel": true}, []string{"vulkan", cpu}},
+		// NVIDIA below the CUDA build's compute-capability floor (nvidia.go)
+		// is reported with no native lane, like Arc.
+		{"old nvidia: vulkan instead of cuda", gpu("nvidia", ""), map[string]bool{"nvidia": true}, []string{"vulkan", cpu}},
+		{"old nvidia without a vulkan driver: cpu", gpu("nvidia", ""), nil, []string{cpu}},
+		{"old nvidia, only another vendor's vulkan driver: cpu", gpu("nvidia", ""), map[string]bool{"amd": true, "intel": true}, []string{cpu}},
+		{"two old nvidia cards", &typesv1.CapabilityProfile{Gpus: []*typesv1.GpuInfo{
+			{Vendor: "nvidia", Accel: ""}, {Vendor: "nvidia", Accel: ""},
+		}}, map[string]bool{"nvidia": true}, []string{"vulkan", cpu}},
+		{"mixed old+new nvidia box keeps cuda first", &typesv1.CapabilityProfile{Gpus: []*typesv1.GpuInfo{
+			{Vendor: "nvidia", Accel: "cuda12"}, {Vendor: "nvidia", Accel: "cuda12"},
+		}}, map[string]bool{"nvidia": true}, []string{"cuda12", "vulkan", cpu}},
 		{"intel without vulkan", gpu("intel", ""), nil, []string{cpu}},
 		{"unknown vendor without vulkan", gpu("matrox", "cpu"), map[string]bool{"amd": true}, []string{cpu}},
 		{"vendor-agnostic: apple with an injected vulkan lane", gpu("apple", "metal"), map[string]bool{"apple": true}, []string{"metal", "vulkan", cpu}},
@@ -50,6 +62,8 @@ func TestAccelPreferenceHeadIsBestAccel(t *testing.T) {
 		{Gpus: []*typesv1.GpuInfo{{Vendor: "nvidia", Accel: "cuda12"}}},
 		{Gpus: []*typesv1.GpuInfo{{Vendor: "amd", Accel: "rocm"}}},
 		{Gpus: []*typesv1.GpuInfo{{Vendor: "none", Model: "cpu", Accel: cpuAccel()}}},
+		{Gpus: []*typesv1.GpuInfo{{Vendor: "nvidia", Model: "NVIDIA GeForce GTX 1080 Ti", VramMb: 11264}}}, // below the CUDA floor
+		{Gpus: []*typesv1.GpuInfo{{Vendor: "intel", Model: "Intel(R) UHD Graphics 770"}}},
 		{},
 	} {
 		chain := AccelPreference(p)
@@ -58,6 +72,9 @@ func TestAccelPreferenceHeadIsBestAccel(t *testing.T) {
 		}
 		if BestAccel(p) != chain[0] {
 			t.Errorf("BestAccel = %q, chain = %v", BestAccel(p), chain)
+		}
+		if slices.Contains(chain, accelCUDA12) != (p.GetGpus() != nil && p.Gpus[0].Accel == accelCUDA12) {
+			t.Errorf("chain %v for %+v: cuda12 must appear only for a GPU that carries it", chain, p.GetGpus())
 		}
 	}
 }

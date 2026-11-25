@@ -263,6 +263,13 @@ a vendor SDK: the daemon reads sysfs / shells out to the vendor tool.
 | Windows, NVIDIA | `nvidia-smi` CSV | `cuda12` |
 | Windows, other adapters | `Win32_VideoController` (listed; no VRAM/accel until a Windows Vulkan lane exists) | `cpu-avx2` |
 
+NVIDIA cards older than the RTX 20-series / GTX 16-series (compute
+capability below 7.5: GTX 10-series, Volta) cannot run the published CUDA
+build. A box with only such cards is taken off the `cuda12` lane at
+detection, serves on `vulkan` when the NVIDIA Vulkan driver is installed
+and on the CPU build otherwise, and logs why. Drivers too old to report
+the capability are left on `cuda12`, as before.
+
 Intel Macs are not supported: no llama-server build is published for
 darwin/amd64, and `tera up` refuses to install a service that could never
 load a model. The macOS binaries stay universal, so the CLI itself runs
