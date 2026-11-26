@@ -141,13 +141,17 @@ func Enroll(ctx context.Context, client tunnelv1.TunnelServiceClient, id *Identi
 	return creds, nil
 }
 
-// RotateIfNeeded re-enrolls when the client cert is within 7 days of
-// expiry. Cert rotation happens over the tunnel every 30 days (SPEC §6).
+// RotationWindow is how long before expiry the daemon starts renewing the
+// client certificate (RotateIfNeeded).
+const RotationWindow = 7 * 24 * time.Hour
+
+// RotateIfNeeded re-enrolls when the client cert is within RotationWindow
+// of expiry. Cert rotation happens over the tunnel every 30 days (SPEC §6).
 // TODO(rotation): the real coordinator will accept rotation without a claim
 // code, authenticated by the existing mTLS session; the fake accepts the
 // sentinel code below.
 func RotateIfNeeded(ctx context.Context, client tunnelv1.TunnelServiceClient, id *Identity, creds *Credentials, prof *typesv1.CapabilityProfile, dataDir string) (*Credentials, error) {
-	if time.Until(creds.CertExpiresAt) > 7*24*time.Hour {
+	if time.Until(creds.CertExpiresAt) > RotationWindow {
 		return creds, nil
 	}
 	return Enroll(ctx, client, id, "rotate:"+creds.NodeID, "", prof, dataDir)

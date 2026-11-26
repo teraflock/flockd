@@ -22,21 +22,39 @@ import (
 // the box can run the CUDA build (nvidia.go), which is logged once per
 // affected GPU.
 func detectNvidia(ctx context.Context, candidates ...string) []*typesv1.GpuInfo {
+	rows, ok := runNvidiaSMI(ctx, candidates...)
+	if !ok {
+		return nil
+	}
+	gpus, warnings := nvidiaGPUInfos(rows, vulkanVendors()["nvidia"], runtime.GOOS)
+	for _, w := range warnings {
+		slog.Default().Warn(w)
+	}
+	return gpus
+}
+
+// runNvidiaSMI queries the first nvidia-smi found among candidates. ok is
+// false when none of them resolves to a tool.
+func runNvidiaSMI(ctx context.Context, candidates ...string) (rows []nvidiaGPU, ok bool) {
 	for _, c := range candidates {
 		path, err := exec.LookPath(c)
 		if err != nil {
 			continue
 		}
-		rows := queryNvidiaSMI(func(fields string) ([]byte, error) {
+		return queryNvidiaSMI(func(fields string) ([]byte, error) {
 			return exec.CommandContext(ctx, path,
 				"--query-gpu="+fields,
 				"--format=csv,noheader,nounits").Output()
-		})
-		gpus, warnings := nvidiaGPUInfos(rows, vulkanVendors()["nvidia"], runtime.GOOS)
-		for _, w := range warnings {
-			slog.Default().Warn(w)
-		}
-		return gpus
+		}), true
 	}
-	return nil
+	return nil, false
+}
+
+// ProbeNVIDIA asks the NVIDIA driver about its GPUs for diagnostics: the
+// driver version, the compute capability when the driver reports it, and
+// the explanation for a card the published CUDA build cannot run on. It
+// logs nothing. Nil when there is no NVIDIA driver tool or no GPU.
+func ProbeNVIDIA(ctx context.Context) []NVIDIAGPU {
+	rows, _ := runNvidiaSMI(ctx, nvidiaSMICandidates()...)
+	return nvidiaReport(rows, vulkanVendors()["nvidia"], runtime.GOOS)
 }

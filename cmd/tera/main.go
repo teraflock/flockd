@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -56,14 +57,24 @@ func main() {
 	root.AddCommand(
 		cmdUp(), cmdDown(), cmdStatus(), cmdLogin(), cmdUnenroll(), cmdModels(), cmdLimits(),
 		cmdEarnings(), cmdRedeem(), cmdDashboard(), cmdLogs(), cmdTop(), cmdChat(), cmdMCP(), cmdToken(), cmdVersion(), cmdUninstall(),
+		cmdDoctor(),
 	)
 
 	if err := root.Execute(); err != nil {
+		// `tera doctor` already printed its report; a failed check only
+		// sets the exit status.
+		if errors.Is(err, errDoctorFailed) {
+			os.Exit(1)
+		}
 		fmt.Fprintln(os.Stderr, styleWarn.Render("error:"), err)
 		// The client knows the fix for the errors it produces (daemon
 		// down, governor holding back, model not installed): say it.
 		if r := client.Remedy(err); r != "" && !strings.Contains(err.Error(), r) {
 			fmt.Fprintln(os.Stderr, styleDim.Render("  "+r))
+		}
+		var down *client.UnreachableError
+		if errors.As(err, &down) {
+			fmt.Fprintln(os.Stderr, styleDim.Render("  `tera doctor` checks why the node is not running"))
 		}
 		os.Exit(1)
 	}
@@ -164,6 +175,7 @@ func cmdUp() *cobra.Command {
 						fmt.Println(styleDim.Render("    " + line))
 					}
 				}
+				fmt.Println(styleDim.Render("  `tera doctor` checks the install, the service and the runtime one by one"))
 				return fmt.Errorf("daemon did not come up within %s (try `tera down` to stop the restart loop): %w", daemonStartWait, err)
 			}
 			fmt.Println(styleOK.Render("✓"), "flockd service installed and started")
@@ -194,15 +206,9 @@ func preflightRuntime(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("preflight: hardware detect: %w", err)
 	}
-	signingKey, err := cfg.Runtime.ArtifactSigningKeyPEM()
+	f, err := runtimeFetcher(cfg)
 	if err != nil {
 		return fmt.Errorf("preflight: %w", err)
-	}
-	f := &llamacpp.Fetcher{
-		ManifestURL:      cfg.Runtime.ArtifactManifestURL,
-		BinaryPath:       cfg.Runtime.LlamaServerPath,
-		SigningKeyPEM:    signingKey,
-		RequireSignature: cfg.Runtime.RequireSignature,
 	}
 	if err := f.Preflight(preCtx, hardware.AccelPreference(hw)...); err != nil {
 		return fmt.Errorf("%w\n\n"+
@@ -215,6 +221,23 @@ func preflightRuntime(ctx context.Context) error {
 			"  · wait for a matching build to publish in the runtime catalog", err)
 	}
 	return nil
+}
+
+// runtimeFetcher builds the llama-server fetcher from the configuration,
+// the way the daemon does: `tera up` preflights with it and `tera doctor`
+// resolves the build with it, so both judge the manifest by one rule.
+func runtimeFetcher(cfg config.Config) (*llamacpp.Fetcher, error) {
+	signingKey, err := cfg.Runtime.ArtifactSigningKeyPEM()
+	if err != nil {
+		return nil, err
+	}
+	return &llamacpp.Fetcher{
+		ManifestURL:      cfg.Runtime.ArtifactManifestURL,
+		BinaryPath:       cfg.Runtime.LlamaServerPath,
+		CacheDir:         filepath.Join(cfg.DataDir, "runtimes"),
+		SigningKeyPEM:    signingKey,
+		RequireSignature: cfg.Runtime.RequireSignature,
+	}, nil
 }
 
 // waitForDaemon polls the local API until it answers or ctx expires. Any

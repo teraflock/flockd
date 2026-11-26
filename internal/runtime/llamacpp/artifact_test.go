@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -468,5 +469,87 @@ func TestExtractKeepsWindowsDLLsByBasename(t *testing.T) {
 		if runtime.GOOS != "windows" && err == nil {
 			t.Errorf("%s: DLLs are Windows-only", dll)
 		}
+	}
+}
+
+// Resolve is the read-only half of EnsureSelection (`tera doctor`): it
+// names the build that would run and never downloads it.
+func TestResolveNamesTheBuildWithoutDownloading(t *testing.T) {
+	tarball := makeTarball(t, []byte("#!/bin/sh\necho vulkan\n"))
+	srv, _ := serveBuild(t, tarball)
+	defer srv.Close()
+	sum := sha256.Sum256(tarball)
+	man := ArtifactManifest{RuntimeBuildID: "llamacpp-b9999-1", Artifacts: []Artifact{
+		{OS: runtime.GOOS, Arch: runtime.GOARCH, Accel: "vulkan", URL: srv.URL + "/llama-server.tar.gz", SHA256: hex.EncodeToString(sum[:])},
+	}}
+	mj, _ := json.Marshal(man)
+	cache := t.TempDir()
+	f := &Fetcher{ManifestURL: manifestServer(t, mj), CacheDir: cache}
+
+	sel, err := f.Resolve(context.Background(), "rocm", "vulkan", "cpu-avx2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sel.BuildID != "llamacpp-b9999-1" || sel.Accel != "vulkan" || !strings.HasPrefix(sel.Reason, "no rocm artifact for") {
+		t.Errorf("selection = %+v", sel)
+	}
+	if sel.Path != "" {
+		t.Errorf("nothing is on disk yet, Path = %q", sel.Path)
+	}
+	if entries, _ := os.ReadDir(cache); len(entries) != 0 {
+		t.Fatalf("Resolve wrote to the cache: %v", entries)
+	}
+
+	// Once the daemon has fetched it, Resolve reports where it is, and
+	// agrees with EnsureSelection on everything.
+	ensured, err := f.EnsureSelection(context.Background(), "rocm", "vulkan", "cpu-avx2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sel, err = f.Resolve(context.Background(), "rocm", "vulkan", "cpu-avx2")
+	if err != nil || sel != ensured {
+		t.Errorf("Resolve = %+v, %v; EnsureSelection = %+v", sel, err, ensured)
+	}
+
+	// An extract trusted by sha256 only is not "ready" once signatures are
+	// required: EnsureSelection would fetch it again.
+	strict := &Fetcher{ManifestURL: f.ManifestURL, CacheDir: cache, RequireSignature: true}
+	if path, _, ok := strict.cachedExtract("llamacpp-b9999-1", man.Artifacts[0]); ok || path == "" {
+		t.Errorf("sha256-only extract counted as reusable under require_signature (path %q)", path)
+	}
+}
+
+func TestResolveErrors(t *testing.T) {
+	man := ArtifactManifest{RuntimeBuildID: "llamacpp-b9999-1", Artifacts: []Artifact{
+		{OS: "plan9", Arch: "amd64", Accel: "metal", URL: "http://x", SHA256: strings.Repeat("0", 64)},
+	}}
+	mj, _ := json.Marshal(man)
+	_, err := (&Fetcher{ManifestURL: manifestServer(t, mj)}).Resolve(context.Background(), "cuda12")
+	if !errors.Is(err, ErrNoBuild) || !strings.Contains(err.Error(), "no build for") {
+		t.Errorf("no build for this platform: err = %v, want ErrNoBuild", err)
+	}
+
+	// A manifest that cannot be fetched is a different failure.
+	gone := httptest.NewServer(http.NotFoundHandler())
+	defer gone.Close()
+	_, err = (&Fetcher{ManifestURL: gone.URL + "/manifest.json"}).Resolve(context.Background(), "cuda12")
+	if err == nil || errors.Is(err, ErrNoBuild) {
+		t.Errorf("unreachable manifest: err = %v, want a fetch error that is not ErrNoBuild", err)
+	}
+
+	if _, err := (&Fetcher{}).Resolve(context.Background(), "metal"); err == nil || errors.Is(err, ErrNoBuild) {
+		t.Errorf("nothing configured: err = %v", err)
+	}
+
+	bin := filepath.Join(t.TempDir(), "llama-server")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sel, err := (&Fetcher{BinaryPath: bin}).Resolve(context.Background(), "cuda12")
+	if err != nil || sel.Path != bin || sel.Accel != "" || sel.BuildID != "local-binary" {
+		t.Errorf("local binary = %+v, %v", sel, err)
+	}
+	if _, err := (&Fetcher{BinaryPath: bin + "-missing"}).Resolve(context.Background(), "cuda12"); err == nil {
+		t.Error("a missing local binary must not resolve")
 	}
 }

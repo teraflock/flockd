@@ -94,19 +94,11 @@ func (m *systemdManager) Install(ctx context.Context, binPath string, args []str
 // `tera up`. `tera down` deliberately never disables lingering (other
 // units may rely on it).
 func ensureLinger(ctx context.Context, opts Options) {
-	user := os.Getenv("USER")
-	if user == "" {
-		if u, err := os.UserHomeDir(); err == nil {
-			user = filepath.Base(u)
-		}
-	}
+	user := lingerUser()
 	hint := "flockd will stop when you log out; run `sudo loginctl enable-linger " + user + "` to keep it running"
-	out, err := exec.CommandContext(ctx, "loginctl", "show-user", user, "-p", "Linger").Output()
-	if err == nil {
-		if on, ok := parseLinger(string(out)); ok && on {
-			opts.info("lingering already enabled: flockd keeps running after you log out")
-			return
-		}
+	if on, known := lingerEnabled(ctx, user); known && on {
+		opts.info("lingering already enabled: flockd keeps running after you log out")
+		return
 	}
 	// No username: acts on the calling user, which needs no root on
 	// systemd >= 230 unless polkit says otherwise.
@@ -119,6 +111,39 @@ func ensureLinger(ctx context.Context, opts Options) {
 		return
 	}
 	opts.info("lingering enabled: flockd keeps running after you log out")
+}
+
+// lingerUser is the login name lingering is asked about: $USER, else the
+// last element of the home directory.
+func lingerUser() string {
+	user := os.Getenv("USER")
+	if user == "" {
+		if u, err := os.UserHomeDir(); err == nil {
+			user = filepath.Base(u)
+		}
+	}
+	return user
+}
+
+// lingerEnabled reads the user's Linger property. known is false when
+// loginctl is missing, fails, or answers without the property.
+func lingerEnabled(ctx context.Context, user string) (on, known bool) {
+	out, err := exec.CommandContext(ctx, "loginctl", "show-user", user, "--property=Linger").Output()
+	if err != nil {
+		return false, false
+	}
+	return parseLinger(string(out))
+}
+
+// Linger reports whether systemd lingering is enabled for the current
+// user: without it the --user unit, and the node with it, stops when the
+// last session ends. It only reads; `tera up` is what enables lingering.
+// known is false when the answer could not be read (no loginctl, not a
+// systemd session). applies is always true on Linux.
+func Linger(ctx context.Context) (user string, on, known, applies bool) {
+	user = lingerUser()
+	on, known = lingerEnabled(ctx, user)
+	return user, on, known, true
 }
 
 // parseLinger reads `loginctl show-user <u> -p Linger` output

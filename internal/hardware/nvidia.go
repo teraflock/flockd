@@ -190,3 +190,46 @@ func nvidiaCapWarning(g nvidiaGPU, mixed, vulkan bool, goos string) string {
 		return msg + "; falling back to the CPU runtime"
 	}
 }
+
+// NVIDIAGPU is one NVIDIA card as its driver reports it, for diagnostics
+// (`tera doctor`): what the capability profile cannot carry, and the
+// operator-facing explanation when the published CUDA build cannot run on
+// the card.
+type NVIDIAGPU struct {
+	Name          string
+	DriverVersion string
+	VRAMMB        uint64
+	// ComputeCap is the CUDA compute capability ("8.9"); empty when the
+	// driver does not report one.
+	ComputeCap string
+	// RunsCUDA is false only when the capability is known to be below what
+	// the CUDA build needs.
+	RunsCUDA bool
+	// Warning is the same line detection logs for a card below the floor;
+	// empty otherwise.
+	Warning string
+}
+
+// nvidiaReport is the pure half of ProbeNVIDIA: nvidia-smi rows to
+// diagnostics, with the warning text nvidiaGPUInfos would log.
+func nvidiaReport(rows []nvidiaGPU, vulkan bool, goos string) []NVIDIAGPU {
+	anyCUDA := false
+	for _, r := range rows {
+		if r.runsCUDARuntime() {
+			anyCUDA = true
+			break
+		}
+	}
+	var out []NVIDIAGPU
+	for _, r := range rows {
+		g := NVIDIAGPU{Name: r.Name, DriverVersion: r.DriverVersion, VRAMMB: r.VRAMMB, RunsCUDA: r.runsCUDARuntime()}
+		if r.CapKnown {
+			g.ComputeCap = fmt.Sprintf("%d.%d", r.CapMajor, r.CapMinor)
+		}
+		if !g.RunsCUDA {
+			g.Warning = nvidiaCapWarning(r, anyCUDA, vulkan, goos)
+		}
+		out = append(out, g)
+	}
+	return out
+}

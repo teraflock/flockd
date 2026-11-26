@@ -151,6 +151,7 @@ Then watch it work:
 tera dashboard        # gorgeous terminal dashboard: tok/s sparkline, earnings ticker
 tera dashboard --web  # browser dashboard (prints the auth token to paste)
 tera status           # one-shot status
+tera doctor           # why is this node not serving? read-only checks, each with its fix
 tera logs -f          # follow the daemon's log ring (same source as the dashboards)
 tera chat             # streaming REPL against the node's own model (SSH boxes, headless nodes)
 echo "hi" | tera chat -m <id>   # one-shot: answers once and exits (scriptable)
@@ -207,6 +208,50 @@ file. The coordinator may ask the node to download and serve catalog
 models that fit the budget you set with `tera limits` — every such
 placement is reported in `tera dashboard` and the activity feed, and
 `mesh_managed = false` turns it off.
+
+### When a node is not serving
+
+`tera doctor` runs a fixed list of checks and prints one line for each:
+pass, warning or fail, with a plain explanation and, when something is
+wrong, the command that fixes it. It goes in the order you would debug by
+hand:
+
+1. **Install**: `tera` and `flockd` are both present and the same version,
+   and the configuration loads.
+2. **Service**: the launchd agent, systemd user unit or Windows logon task
+   is installed and running. On Linux it also checks lingering, without
+   which the node stops when you log out.
+3. **Daemon**: the local API answers with this install's token, and what
+   the daemon says it is doing. A node that is paused because you are at
+   the keyboard, on battery or outside its schedule is working as
+   configured; the line says so and names the `tera limits` flag that
+   changes it.
+4. **Enrollment**: the node is claimed, as which node, and when its client
+   certificate expires.
+5. **Mesh**: DNS, TCP and a TLS handshake to the coordinator, and whether
+   the running daemon's own session looks alive.
+6. **Hardware and runtime**: the CPU, memory and GPUs as detected, the
+   accelerator lanes in order of preference, and which llama-server build
+   the pinned manifest has for this machine.
+7. **Models**: the default model, what is loaded, and free disk space.
+8. **Update**: whether a newer `flockd` is out, or required by the mesh.
+
+```sh
+tera doctor          # the report; exit status 1 when a check failed
+tera doctor --json   # the same as an array of {id, title, status, detail, remedy}
+```
+
+`tera doctor` only reads. It installs nothing, restarts nothing and writes
+no configuration. Its network traffic is the runtime manifest and one TLS
+handshake with the coordinator, to which it presents no certificate: the
+node key is never opened. A check that does not apply (the mesh check on a
+standalone node, the update check while the daemon is down) is reported as
+skipped, with the reason. Warnings leave the exit status at 0.
+
+If `tera` is not on your PATH, run it by its full path. The desktop app
+installs `tera` and `flockd` in `~/.teraflock/bin`, which is not on PATH,
+so there it is `~/.teraflock/bin/tera doctor`; the fixes `tera doctor`
+prints are spelled with that full path.
 
 ### Residential ISP terms
 
@@ -267,13 +312,14 @@ NVIDIA cards older than the RTX 20-series / GTX 16-series (compute
 capability below 7.5: GTX 10-series, Volta) cannot run the published CUDA
 build. A box with only such cards is taken off the `cuda12` lane at
 detection, serves on `vulkan` when the NVIDIA Vulkan driver is installed
-and on the CPU build otherwise, and logs why. Drivers too old to report
-the capability are left on `cuda12`, as before.
+and on the CPU build otherwise, and logs why; `tera doctor` shows the
+card's driver version and compute capability with the same explanation.
+Drivers too old to report the capability are left on `cuda12`, as before.
 
 Intel Macs are not supported: no llama-server build is published for
 darwin/amd64, and `tera up` refuses to install a service that could never
-load a model. The macOS binaries stay universal, so the CLI itself runs
-there.
+load a model (`tera doctor` reports the same). The macOS binaries stay
+universal, so the CLI itself runs there.
 
 The `accel` column is what the profile reports; the build that actually
 runs is the first lane of the preference chain

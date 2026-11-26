@@ -367,3 +367,53 @@ func TestQueryNvidiaSMIFallback(t *testing.T) {
 		t.Errorf("query fields changed: %q / %q", nvidiaSMIFields, nvidiaSMIFieldsWithCap)
 	}
 }
+
+// nvidiaReport is what `tera doctor` shows: the driver's own facts, and
+// for a card below the CUDA floor the same sentence detection logs.
+func TestNvidiaReport(t *testing.T) {
+	if got := nvidiaReport(nil, true, "linux"); got != nil {
+		t.Errorf("no rows -> %v, want nil", got)
+	}
+
+	rows := parseNvidiaSMI("NVIDIA GeForce GTX 1080 Ti, 11264, 536.23, 6.1\nNVIDIA GeForce RTX 4090, 24564, 536.23, 8.9\nNVIDIA Quadro, 8192, 390.1\n")
+	// Three columns on the last line: its capability is unknown.
+	rows[2].CapKnown = false
+	got := nvidiaReport(rows, false, "linux")
+	_, warnings := nvidiaGPUInfos(rows, false, "linux")
+	if len(got) != 3 || len(warnings) != 1 {
+		t.Fatalf("report = %+v, warnings = %v", got, warnings)
+	}
+	old, modern, unknown := got[0], got[1], got[2]
+	if old.Name != "NVIDIA GeForce GTX 1080 Ti" || old.DriverVersion != "536.23" || old.VRAMMB != 11264 ||
+		old.ComputeCap != "6.1" || old.RunsCUDA || old.Warning != warnings[0] {
+		t.Errorf("old card = %+v, want the logged warning %q", old, warnings[0])
+	}
+	if !strings.Contains(old.Warning, "stays on the CUDA runtime for its other NVIDIA GPU") {
+		t.Errorf("mixed-box warning = %q", old.Warning)
+	}
+	if modern.ComputeCap != "8.9" || !modern.RunsCUDA || modern.Warning != "" {
+		t.Errorf("modern card = %+v", modern)
+	}
+	if unknown.ComputeCap != "" || !unknown.RunsCUDA || unknown.Warning != "" {
+		t.Errorf("card with no reported capability = %+v (unknown counts as able)", unknown)
+	}
+
+	// A box with only old cards: the fallback named in the warning follows
+	// the Vulkan probe and the OS, exactly as at detection.
+	only := parseNvidiaSMI("NVIDIA GeForce GTX 1080, 8192, 536.23, 6.1\n")
+	for _, c := range []struct {
+		vulkan bool
+		goos   string
+		want   string
+	}{
+		{true, "linux", "falling back to the Vulkan runtime"},
+		{false, "linux", "install the Vulkan loader"},
+		{false, "windows", "falling back to the CPU runtime"},
+	} {
+		r := nvidiaReport(only, c.vulkan, c.goos)
+		_, w := nvidiaGPUInfos(only, c.vulkan, c.goos)
+		if len(r) != 1 || r[0].RunsCUDA || r[0].Warning != w[0] || !strings.Contains(r[0].Warning, c.want) {
+			t.Errorf("vulkan=%v %s: %+v, want %q", c.vulkan, c.goos, r, c.want)
+		}
+	}
+}

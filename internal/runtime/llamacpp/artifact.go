@@ -107,25 +107,96 @@ type Fetcher struct {
 // disk or f.ManifestURL advertises a matching artifact (cpu fallback
 // included, same rule as Ensure) that satisfies the signature policy.
 func (f *Fetcher) Preflight(ctx context.Context, accels ...string) error {
+	_, err := f.Resolve(ctx, accels...)
+	return err
+}
+
+// Resolve reports which build EnsureSelection would run for the
+// accelerator chain, without downloading or unpacking anything: the
+// configured local binary, or the manifest's pick for this (GOOS, GOARCH)
+// under the signature policy. It is the read-only half of EnsureSelection
+// (`tera up` preflight, `tera doctor`). Selection.Path is set only when
+// that build is already usable on disk: the local binary, or an extract of
+// the picked build in CacheDir that EnsureSelection would reuse as is.
+func (f *Fetcher) Resolve(ctx context.Context, accels ...string) (Selection, error) {
+	sel, art, err := f.resolve(ctx, accels...)
+	if err != nil || art == nil {
+		return sel, err
+	}
+	if f.CacheDir != "" {
+		if path, _, ok := f.cachedExtract(sel.BuildID, *art); ok {
+			sel.Path = path
+		}
+	}
+	return sel, nil
+}
+
+// resolve is the shared, network-only front of Resolve and
+// EnsureSelection. art is nil for a configured local binary (the
+// Selection is then complete); otherwise it is the manifest's pick and
+// Selection.Path is still empty.
+func (f *Fetcher) resolve(ctx context.Context, accels ...string) (Selection, *Artifact, error) {
 	if f.BinaryPath != "" {
 		if _, err := os.Stat(f.BinaryPath); err != nil {
-			return fmt.Errorf("llamacpp: configured llama_server_path: %w", err)
+			return Selection{}, nil, fmt.Errorf("llamacpp: configured llama_server_path: %w", err)
 		}
-		return nil
+		return Selection{Path: f.BinaryPath, BuildID: localBinaryBuildID, Reason: "configured llama_server_path"}, nil, nil
 	}
 	if f.ManifestURL == "" {
-		return errNoRuntimeConfigured
+		return Selection{}, nil, errNoRuntimeConfigured
 	}
 	man, err := f.fetchManifest(ctx)
 	if err != nil {
-		return err
+		return Selection{}, nil, err
 	}
 	art, err := man.pick(runtime.GOOS, runtime.GOARCH, accels...)
 	if err != nil {
-		return err
+		return Selection{}, nil, err
 	}
-	return f.checkAdvertisedSignature(art)
+	if err := f.checkAdvertisedSignature(art); err != nil {
+		return Selection{}, nil, err
+	}
+	return Selection{
+		BuildID: man.RuntimeBuildID,
+		Accel:   art.Accel,
+		Reason:  pickReason(runtime.GOOS, runtime.GOARCH, accels, art.Accel),
+	}, &art, nil
 }
+
+// cachedExtract looks for a verified extract of art in CacheDir. The
+// stored SHA is of the tarball, not the binary, so reuse is gated on a
+// stamp written after a verified extract. ok is true only when the extract
+// was trusted under a policy at least as strict as today's; trust is
+// reported whenever an extract is present, for the re-fetch log line.
+func (f *Fetcher) cachedExtract(buildID string, art Artifact) (path, trust string, ok bool) {
+	dir := filepath.Join(f.CacheDir, buildID)
+	path = filepath.Join(dir, binaryName())
+	sha, err := os.ReadFile(filepath.Join(dir, stampSHA256))
+	if err != nil || strings.TrimSpace(string(sha)) != art.SHA256 {
+		return path, "", false
+	}
+	if _, err := os.Stat(path); err != nil {
+		return path, "", false
+	}
+	trust = readTrustStamp(dir)
+	return path, trust, !f.RequireSignature || trust == trustCosign
+}
+
+// localBinaryBuildID is the build id reported for runtime.llama_server_path.
+const localBinaryBuildID = "local-binary"
+
+// ErrNoBuild marks a manifest that publishes no build this OS/arch can
+// run (not even a CPU one), as opposed to a manifest that could not be
+// fetched or trusted. Test with errors.Is.
+var ErrNoBuild = errors.New("llamacpp: no runtime build for this platform")
+
+// noBuildError carries pick's message and matches ErrNoBuild.
+type noBuildError struct{ msg string }
+
+func (e *noBuildError) Error() string { return e.msg }
+
+// Is makes errors.Is(err, ErrNoBuild) true.
+func (*noBuildError) Is(target error) bool { return target == ErrNoBuild }
 
 var errNoRuntimeConfigured = fmt.Errorf("llamacpp: no runtime binary available: set runtime.llama_server_path to an existing llama-server binary or runtime.artifact_manifest_url to a pinned build manifest")
 
@@ -156,50 +227,20 @@ func (f *Fetcher) Ensure(ctx context.Context, accels ...string) (path, buildID s
 
 // EnsureSelection is Ensure plus which accel the build actually is.
 func (f *Fetcher) EnsureSelection(ctx context.Context, accels ...string) (Selection, error) {
-	if f.BinaryPath != "" {
-		if _, err := os.Stat(f.BinaryPath); err != nil {
-			return Selection{}, fmt.Errorf("llamacpp: configured llama_server_path: %w", err)
-		}
-		return Selection{Path: f.BinaryPath, BuildID: "local-binary", Reason: "configured llama_server_path"}, nil
+	sel, art, err := f.resolve(ctx, accels...)
+	if err != nil || art == nil {
+		return sel, err
 	}
-	if f.ManifestURL == "" {
-		return Selection{}, errNoRuntimeConfigured
+	path, trust, ok := f.cachedExtract(sel.BuildID, *art)
+	sel.Path = path
+	if ok {
+		return sel, nil
 	}
-
-	man, err := f.fetchManifest(ctx)
-	if err != nil {
-		return Selection{}, err
+	if trust != "" {
+		f.log().Info("cached runtime was trusted by sha256 only; re-fetching to verify its signature",
+			"runtime_build_id", sel.BuildID, "cached_trust", trust)
 	}
-	art, err := man.pick(runtime.GOOS, runtime.GOARCH, accels...)
-	if err != nil {
-		return Selection{}, err
-	}
-	if err := f.checkAdvertisedSignature(art); err != nil {
-		return Selection{}, err
-	}
-	sel := Selection{
-		BuildID: man.RuntimeBuildID,
-		Accel:   art.Accel,
-		Reason:  pickReason(runtime.GOOS, runtime.GOARCH, accels, art.Accel),
-	}
-
-	dir := filepath.Join(f.CacheDir, man.RuntimeBuildID)
-	sel.Path = filepath.Join(dir, binaryName())
-	// The stored SHA is of the tarball, not the binary, so reuse is gated
-	// on a stamp written after a verified extract — and on that extract
-	// having been trusted under a policy at least as strict as today's.
-	if sha, err := os.ReadFile(filepath.Join(dir, stampSHA256)); err == nil &&
-		strings.TrimSpace(string(sha)) == art.SHA256 {
-		if _, err := os.Stat(sel.Path); err == nil {
-			trust := readTrustStamp(dir)
-			if !f.RequireSignature || trust == trustCosign {
-				return sel, nil
-			}
-			f.log().Info("cached runtime was trusted by sha256 only; re-fetching to verify its signature",
-				"runtime_build_id", man.RuntimeBuildID, "cached_trust", trust)
-		}
-	}
-	if err := f.fetchAndUnpack(ctx, art, dir, man.RuntimeBuildID); err != nil {
+	if err := f.fetchAndUnpack(ctx, *art, filepath.Dir(path), sel.BuildID); err != nil {
 		return Selection{}, err
 	}
 	return sel, nil
@@ -407,7 +448,7 @@ func (m *ArtifactManifest) pick(goos, goarch string, accels ...string) (Artifact
 	if cpuFallback != nil {
 		return *cpuFallback, nil
 	}
-	return Artifact{}, fmt.Errorf("llamacpp: manifest %s has no build for %s/%s accel=%s", m.RuntimeBuildID, goos, goarch, strings.Join(accels, ">"))
+	return Artifact{}, &noBuildError{fmt.Sprintf("llamacpp: manifest %s has no build for %s/%s accel=%s", m.RuntimeBuildID, goos, goarch, strings.Join(accels, ">"))}
 }
 
 func isCPUAccel(accel string) bool { return accel == "cpu" || accel == "cpu-avx2" }

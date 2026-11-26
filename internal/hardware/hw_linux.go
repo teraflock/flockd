@@ -23,11 +23,14 @@ func detectPlatform(ctx context.Context, p *typesv1.CapabilityProfile) error {
 
 	// NVIDIA first, AMD only when nvidia-smi found nothing (flockd#20).
 	// CPU-only fallback is applied by the caller when no GPUs are found.
-	p.Gpus = pickLinuxGPUs(detectNvidia(ctx, "nvidia-smi"), func() []*typesv1.GpuInfo {
+	p.Gpus = pickLinuxGPUs(detectNvidia(ctx, nvidiaSMICandidates()...), func() []*typesv1.GpuInfo {
 		return detectAMD(ctx, "/", p.RamTotalMb)
 	})
 	return nil
 }
+
+// nvidiaSMICandidates is where nvidia-smi is looked for: PATH.
+func nvidiaSMICandidates() []string { return []string{"nvidia-smi"} }
 
 // rocmSMITimeout bounds the one rocm-smi call at detection; a wedged ROCm
 // stack must not stall boot (sysfs already gave us the GPU).

@@ -57,7 +57,7 @@ func detectPlatform(ctx context.Context, p *typesv1.CapabilityProfile) error {
 	}
 	p.CpuModel = cpuModel()
 
-	p.Gpus = detectNvidia(ctx, "nvidia-smi", nvidiaSMISystem32())
+	p.Gpus = detectNvidia(ctx, nvidiaSMICandidates()...)
 	// Non-NVIDIA adapters are listed, never accelerated; an NVIDIA card that
 	// nvidia-smi already reported is not repeated from the CIM listing (and
 	// one nvidia-smi could not see, e.g. a stale driver, is listed without
@@ -121,6 +121,10 @@ func pickCPUModel(registryName, envIdentifier string) string {
 	}
 	return strings.TrimSpace(envIdentifier)
 }
+
+// nvidiaSMICandidates is where nvidia-smi is looked for: PATH, then the
+// driver's own install location.
+func nvidiaSMICandidates() []string { return []string{"nvidia-smi", nvidiaSMISystem32()} }
 
 // nvidiaSMISystem32 is where the NVIDIA driver installs nvidia-smi.exe.
 func nvidiaSMISystem32() string {
