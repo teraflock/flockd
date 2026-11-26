@@ -378,3 +378,41 @@ func TestLimitsExtraOverlay(t *testing.T) {
 		t.Fatalf("no overlay file = %+v %v", e, err)
 	}
 }
+
+// A config.toml line that limits.toml overrides is reported, so start-up
+// can say which lines of config.toml are not the values in force. The
+// laptop ran for weeks with `max_concurrent = 4` in config.toml and 16 in
+// force, because the app had saved "auto" to limits.toml.
+func TestLoadReportsKeysShadowedByLimits(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.toml")
+	data := fmt.Sprintf("data_dir = %q\n[governor]\nserve_policy = \"always\"\nidle_after = \"2m\"\n[budget]\nmax_concurrent = 4\n", dir)
+	if err := os.WriteFile(cfgPath, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Shadowed) != 0 {
+		t.Fatalf("no overlay, nothing shadowed: %+v", cfg.Shadowed)
+	}
+
+	// Same serve_policy, the same idle_after spelled differently, a
+	// different max_concurrent, and a key config.toml does not set.
+	overlay := "[governor]\nserve_policy = \"always\"\nidle_after = \"2m0s\"\n[models]\nmax_disk_mb = 61440\n[budget]\nmax_concurrent = 0\n"
+	if err := os.WriteFile(LimitsPath(dir), []byte(overlay), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Budget.MaxConcurrent != 0 {
+		t.Fatalf("limits.toml should win: max_concurrent = %d", cfg.Budget.MaxConcurrent)
+	}
+	want := []ShadowedKey{{Key: "budget.max_concurrent", ConfigValue: "4", LimitsValue: "0"}}
+	if fmt.Sprint(cfg.Shadowed) != fmt.Sprint(want) {
+		t.Fatalf("shadowed = %+v, want %+v", cfg.Shadowed, want)
+	}
+}

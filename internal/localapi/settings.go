@@ -480,12 +480,10 @@ func (s *Server) applyDefaultModel(id string) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
-		if err := ops.Load(ctx, id); err != nil {
-			s.deps.Log.Warn("default model not loaded; it will be loaded at the next start", "model", id, "err", err)
-			return
-		}
-		if err := ops.SetDefault(id); err != nil {
-			s.deps.Log.Warn("default model not switched", "model", id, "err", err)
+		// SwitchDefault: the outgoing default makes room when the two do
+		// not fit together, and comes back if the new one fails to start.
+		if err := ops.SwitchDefault(ctx, id); err != nil {
+			s.deps.Log.Warn("default model not switched; it will be loaded at the next start", "model", id, "err", err)
 		}
 	}()
 }

@@ -31,6 +31,19 @@ type Config struct {
 	Tunnel   Tunnel   `koanf:"tunnel"`
 	Enroll   Enroll   `koanf:"enroll"`
 	Update   Update   `koanf:"update"`
+
+	// Shadowed lists the keys config.toml sets that limits.toml overrides
+	// with a different value. Start-up logs them: an operator reading
+	// config.toml otherwise has no way to tell that a line there is not
+	// the value in force. Not a config key.
+	Shadowed []ShadowedKey `koanf:"-"`
+}
+
+// ShadowedKey is one config.toml key overridden by limits.toml.
+type ShadowedKey struct {
+	Key         string // dotted, e.g. budget.max_concurrent
+	ConfigValue string // what config.toml says
+	LimitsValue string // what limits.toml says, the value in force
 }
 
 type Log struct {
@@ -332,6 +345,7 @@ func Load(path string) (Config, error) {
 		if err := k.Unmarshal("", &cfg); err != nil {
 			return cfg, fmt.Errorf("config: unmarshal %s: %w", overlay, err)
 		}
+		cfg.Shadowed = shadowedKeys(path, overlay)
 	}
 	cfg.Models.Default = NormalizeDefaultModel(cfg.Models.Default)
 
@@ -339,6 +353,36 @@ func Load(path string) (Config, error) {
 		return cfg, err
 	}
 	return cfg, nil
+}
+
+// shadowedKeys compares the two files key by key. Best effort: a file that
+// does not parse here has already been reported by Load.
+func shadowedKeys(configPath, overlayPath string) []ShadowedKey {
+	if configPath == "" {
+		return nil
+	}
+	fk, ov := koanf.New("."), koanf.New(".")
+	if fk.Load(file.Provider(configPath), toml.Parser()) != nil || ov.Load(file.Provider(overlayPath), toml.Parser()) != nil {
+		return nil
+	}
+	var out []ShadowedKey
+	for _, key := range ov.Keys() {
+		if !fk.Exists(key) {
+			continue
+		}
+		a, b := fmt.Sprint(fk.Get(key)), fmt.Sprint(ov.Get(key))
+		if a == b {
+			continue
+		}
+		// "2m" and "2m0s" are the same setting.
+		if da, err := time.ParseDuration(a); err == nil {
+			if db, err := time.ParseDuration(b); err == nil && da == db {
+				continue
+			}
+		}
+		out = append(out, ShadowedKey{Key: key, ConfigValue: a, LimitsValue: b})
+	}
+	return out
 }
 
 // LimitsPath is the daemon-owned governor-limits overlay location.

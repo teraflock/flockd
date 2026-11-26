@@ -194,7 +194,11 @@ func (s *Service) vramSampler() *memory.VRAMSampler {
 // placed before the operator's own, least recently used first; never the
 // default model, never one with requests in flight), and fails with
 // ErrOverMemory when that is not enough. Callers hold admitMu.
-func (s *Service) admit(ctx context.Context, id string, estimateMB int64) error {
+//
+// asDefault marks a load of the operator's chosen default (LoadDefault).
+// Then the engine's current default is not protected: it is a stand-in or
+// the default being replaced, and it makes room like any other idle model.
+func (s *Service) admit(ctx context.Context, id string, estimateMB int64, asDefault bool) error {
 	budget := s.MemoryBudgetMB()
 	if budget <= 0 {
 		return nil // no budget known: nothing to enforce
@@ -211,16 +215,21 @@ func (s *Service) admit(ctx context.Context, id string, estimateMB int64) error 
 		}
 	}
 	def := s.Eng.DefaultModel()
+	protected := def
+	if asDefault {
+		protected = ""
+	}
 	type cand struct {
 		id       string
 		mesh     bool
+		standIn  bool
 		lastUsed time.Time
 	}
 	var cands []cand
 	s.mu.Lock()
 	for _, m := range s.Eng.Models() {
 		mid := m.Spec.ID
-		if mid == id || mid == def {
+		if mid == id || (protected != "" && mid == protected) {
 			continue
 		}
 		u, ok := s.Eng.Usage(mid)
@@ -228,10 +237,13 @@ func (s *Service) admit(ctx context.Context, id string, estimateMB int64) error 
 			continue
 		}
 		li := s.loads[mid]
-		cands = append(cands, cand{id: mid, mesh: li != nil && li.Origin == models.OriginMesh, lastUsed: u.LastUsed})
+		cands = append(cands, cand{id: mid, mesh: li != nil && li.Origin == models.OriginMesh, standIn: mid == def, lastUsed: u.LastUsed})
 	}
 	s.mu.Unlock()
 	sort.Slice(cands, func(i, j int) bool {
+		if cands[i].standIn != cands[j].standIn {
+			return cands[j].standIn // the model answering bare requests goes last
+		}
 		if cands[i].mesh != cands[j].mesh {
 			return cands[i].mesh // mesh-placed go first
 		}
@@ -254,6 +266,11 @@ func (s *Service) admit(ctx context.Context, id string, estimateMB int64) error 
 		used = s.usedMB()
 	}
 	if used+estimateMB > budget {
+		if asDefault {
+			// Read again: unloading a stand-in default above leaves the
+			// engine with another chat model as its default, or with none.
+			def = s.Eng.DefaultModel()
+		}
 		if id == def || def == "" {
 			// The default model (or the first load, which becomes it):
 			// the operator picked this model and the daemon cannot serve

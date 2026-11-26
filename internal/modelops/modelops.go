@@ -383,6 +383,26 @@ func (s *Service) LoadInstance(ctx context.Context, id string) (rt.Instance, err
 // idle instances are unloaded to make room (see admit), and ErrOverMemory
 // is returned — with the file kept — when they cannot.
 func (s *Service) LoadInstanceOrigin(ctx context.Context, id, origin string) (rt.Instance, error) {
+	return s.loadInstance(ctx, id, origin, false)
+}
+
+// LoadDefault is LoadInstance for the model the operator chose as the
+// node's default: at start-up, or when they pick another one while the
+// daemon runs. Admission protects no other model from it. Whatever is the
+// engine's default at that moment is either a stand-in (the first chat
+// model loaded becomes the default, and a mesh placement can finish
+// loading while the real default is still downloading) or the default
+// being replaced; either one, when idle, is unloaded if that is what it
+// takes to fit. Without this a stand-in a few GB too large kept the
+// operator's default out for as long as the daemon ran: it was protected
+// as "the default", so nothing could unload it, idle or not.
+//
+// The caller makes the model the default (SetDefault) once it is loaded.
+func (s *Service) LoadDefault(ctx context.Context, id string) (rt.Instance, error) {
+	return s.loadInstance(ctx, id, models.OriginOperator, true)
+}
+
+func (s *Service) loadInstance(ctx context.Context, id, origin string, asDefault bool) (rt.Instance, error) {
 	if inst, ok := s.loadedInstance(id); ok {
 		return inst, nil
 	}
@@ -504,7 +524,7 @@ func (s *Service) LoadInstanceOrigin(ctx context.Context, id, origin string) (rt
 	if inst, ok := s.loadedInstance(id); ok {
 		return inst, nil // raced with another loader while downloading
 	}
-	if err := s.admit(ctx, id, minEstimate); err != nil {
+	if err := s.admit(ctx, id, minEstimate, asDefault); err != nil {
 		s.log().Warn("model not loaded: over memory budget", "model", id, "estimate_mb", minEstimate, "err", err)
 		return nil, err
 	}
@@ -811,6 +831,30 @@ func (s *Service) SetDefault(id string) error {
 	}
 	s.Events.Publish("models_changed", map[string]string{"model": id, "change": "default"})
 	return nil
+}
+
+// SwitchDefault makes id the node's default while the daemon runs,
+// loading it first when it is not loaded. The load is LoadDefault: the
+// outgoing default, when idle, is unloaded if the two do not fit together.
+// If the load then fails and the outgoing default was unloaded for it,
+// that one is loaded again, so a default that cannot start does not leave
+// the node with nothing to serve.
+func (s *Service) SwitchDefault(ctx context.Context, id string) error {
+	prev := s.Eng.DefaultModel()
+	if _, err := s.LoadDefault(ctx, id); err != nil {
+		if prev != "" && prev != id {
+			if _, ok := s.loadedInstance(prev); !ok {
+				if _, rerr := s.LoadInstance(ctx, prev); rerr != nil {
+					s.log().Warn("previous default model not loaded again", "model", prev, "err", rerr)
+				} else {
+					s.log().Info("previous default model loaded again", "model", prev, "after_failed_switch_to", id)
+				}
+			}
+			_ = s.Eng.SetDefault(prev) // not loaded = nothing to restore
+		}
+		return err
+	}
+	return s.SetDefault(id)
 }
 
 func (s *Service) log() *slog.Logger {

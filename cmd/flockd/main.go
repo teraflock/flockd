@@ -127,6 +127,12 @@ func run() error {
 	log, ring := logging.NewTo(sink, cfg.Log.Level, cfg.Log.Format)
 	slog.SetDefault(log)
 	hardware.Version = version
+	// limits.toml (written by the API and the app) wins over config.toml.
+	// Name every line of config.toml that is therefore not in force.
+	for _, sk := range cfg.Shadowed {
+		log.Info("limits.toml overrides config.toml", "key", sk.Key, "config_toml", sk.ConfigValue,
+			"in_force", sk.LimitsValue, "limits_file", config.LimitsPath(cfg.DataDir))
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -829,7 +835,9 @@ func loadDefaultModel(ctx context.Context, cfg config.Config, hw *typesv1.Capabi
 		// live in modelops now, shared with the on-demand API routes.
 		// OnLoaded stamps the runtime build id (reportRuntimeBuild).
 		log.Info("ensuring default model", "model", cfg.Models.Default)
-		if _, err := ops.LoadInstance(ctx, cfg.Models.Default); err != nil {
+		// LoadDefault, not LoadInstance: a model that finished loading
+		// while this one was downloading must not keep it out.
+		if _, err := ops.LoadDefault(ctx, cfg.Models.Default); err != nil {
 			return fmt.Errorf("load default model %q: %w", cfg.Models.Default, err)
 		}
 		for _, pin := range cfg.Models.Pin {
