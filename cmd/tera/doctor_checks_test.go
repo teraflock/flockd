@@ -277,9 +277,12 @@ func daemonDownErr() error {
 }
 
 func TestCheckInstall(t *testing.T) {
+	// The check prints the directory with the host's separator, so the
+	// expectation is built the same way (this test runs on Windows too).
+	installDir := filepath.Dir("/usr/local/bin/tera")
 	runDoctorCases(t, checkInstall, []doctorCase{
 		{name: "both binaries together on PATH", want: doctorPass,
-			detail: []string{"tera 1.2.0 and flockd 1.2.0 are installed in /usr/local/bin."},
+			detail: []string{"tera 1.2.0 and flockd 1.2.0 are installed in " + installDir + "."},
 			absent: []string{"PATH"}},
 		{name: "v prefix is the same version", want: doctorPass,
 			mutate: func(env *doctorEnv, _ *stubDaemon) { env.flockd = stubFlockd{ver: "v1.2.0"} }},
@@ -303,7 +306,7 @@ func TestCheckInstall(t *testing.T) {
 				env.install.FlockdPath, env.install.FlockdErr = "", errors.New("not found")
 			},
 			detail: []string{"the flockd daemon was not found"},
-			remedy: []string{"Install flockd next to tera (in /usr/local/bin)", doctorReleasesURL}},
+			remedy: []string{"Install flockd next to tera (in " + installDir + ")", doctorReleasesURL}},
 		{name: "flockd does not start", want: doctorWarn,
 			mutate: func(env *doctorEnv, _ *stubDaemon) { env.flockd = stubFlockd{err: errors.New("killed")} },
 			detail: []string{"did not report its version (killed)"},
